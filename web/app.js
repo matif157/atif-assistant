@@ -5,15 +5,13 @@ const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const statusline = document.getElementById("statusline");
 const dot = document.getElementById("dot");
-const hint = document.getElementById("hint");
 
-let mode = "ask";
 let session = localStorage.getItem("raees.session") || null;
 
-const MODE_HINT = {
-  ask: "Reality Engine labels every claim. Challenge Mode argues against you.",
-  challenge: "CHALLENGE — building the case against your position.",
-  decide: "DECIDE — options, reversibility, consequences, recommendation.",
+const ROUTE_LABEL = {
+  ask: "ANSWERED",
+  challenge: "CHALLENGED",
+  decide: "DECIDED",
 };
 
 /* ------------------------------------------------------------ rendering */
@@ -64,6 +62,8 @@ function addBot(res) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
 
+  if (res.route) showRoute(res.route);
+
   const parts = labelize(res.text);
   if (parts.length) parts.forEach((p) => bubble.appendChild(p));
   else bubble.textContent = res.text;
@@ -83,8 +83,14 @@ function addBot(res) {
   for (const p of res.patterns || []) {
     meta.appendChild(chip("pat", `PATTERN: ${p.name}`));
   }
+  for (const c of res.critique || []) {
+    meta.appendChild(chip("crit", "SELF-AUDIT"));
+  }
   if (res.intent && !res.intent.startsWith("UNCLEAR")) {
     meta.appendChild(chip("int", res.intent.split(" - ")[0]));
+  }
+  if (res.asked_count > 1) {
+    meta.appendChild(chip("repeat", `ASKED ${res.asked_count}x`));
   }
   if (res.memories_used) meta.appendChild(chip("", `MEMORY: ${res.memories_used}`));
   if (res.provider) meta.appendChild(chip("", res.provider.toUpperCase()));
@@ -126,7 +132,7 @@ async function ask(question) {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, mode, session }),
+      body: JSON.stringify({ question, session }),
     });
     if (!res.ok) throw new Error(`server returned ${res.status}`);
     const data = await res.json();
@@ -136,6 +142,7 @@ async function ask(question) {
       session = data.session;
       localStorage.setItem("raees.session", session);
     }
+    if (data.learned?.length) refreshLearned();
   } catch (e) {
     removeTyping();
     const detail = e instanceof SyntaxError
@@ -147,10 +154,17 @@ async function ask(question) {
   }
 }
 
-function resolveMode(raw) {
-  if (raw.startsWith("/challenge")) return { m: "challenge", q: raw.slice(11).trim() || raw.slice(1) };
-  if (raw.startsWith("/decide")) return { m: "decide", q: raw.slice(7).trim() || raw.slice(1) };
-  return { m: mode, q: raw };
+/* ------------------------------------------------------------ route strip */
+
+const routeBox = document.getElementById("route");
+const routeMode = document.getElementById("route-mode");
+const routeWhy = document.getElementById("route-why");
+
+function showRoute(route) {
+  routeBox.hidden = false;
+  routeMode.textContent = ROUTE_LABEL[route.mode] || route.mode.toUpperCase();
+  routeMode.className = `route-mode ${route.mode}`;
+  routeWhy.textContent = route.reason || "";
 }
 
 /* ---------------------------------------------------------------- wiring */
@@ -158,14 +172,9 @@ function resolveMode(raw) {
 sendBtn.addEventListener("click", () => {
   const raw = input.value.trim();
   if (!raw) return;
-  const { m, q } = resolveMode(raw);
-  const prev = mode;
-  mode = m;
   input.value = "";
   input.style.height = "auto";
-  ask(q).finally(() => {
-    mode = prev;
-  });
+  ask(raw);
 });
 
 input.addEventListener("keydown", (e) => {
@@ -178,15 +187,6 @@ input.addEventListener("keydown", (e) => {
 input.addEventListener("input", () => {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 140) + "px";
-});
-
-document.querySelectorAll(".mode").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".mode").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    mode = btn.dataset.mode;
-    hint.textContent = MODE_HINT[mode];
-  });
 });
 
 /* memory sheet */
@@ -231,6 +231,100 @@ memq.addEventListener("input", () => {
   clearTimeout(memTimer);
   memTimer = setTimeout(() => searchMemory(memq.value.trim()), 200);
 });
+
+/* insights sheet */
+const iSheet = document.getElementById("insights-sheet");
+const iBody = document.getElementById("insights-body");
+
+document.getElementById("btn-insights").addEventListener("click", async () => {
+  iSheet.hidden = false;
+  iBody.textContent = "loading...";
+  try {
+    const d = await (await fetch("/api/insights")).json();
+    iBody.innerHTML = "";
+
+    if (d.reading) {
+      const r = document.createElement("div");
+      r.className = "iread";
+      r.textContent = d.reading;
+      iBody.appendChild(r);
+    }
+
+    if (d.distribution?.length) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = `${d.total} questions total`;
+      iBody.appendChild(h);
+      for (const row of d.distribution) {
+        const r = document.createElement("div");
+        r.className = "mrow";
+        const t = document.createElement("div");
+        t.className = "t";
+        t.textContent = `${row.class} — ${row.count}`;
+        r.appendChild(t);
+        iBody.appendChild(r);
+      }
+    }
+
+    if (d.contradictions?.length) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = "CONFLICTING MEMORY";
+      iBody.appendChild(h);
+      for (const c of d.contradictions) {
+        const r = document.createElement("div");
+        r.className = "mrow";
+        const t = document.createElement("div");
+        t.className = "t";
+        t.textContent = `${c.subject}: "${c.a}" vs "${c.b}"`;
+        r.appendChild(t);
+        iBody.appendChild(r);
+      }
+    }
+    if (!iBody.childNodes.length) iBody.textContent = "No history yet.";
+  } catch {
+    iBody.textContent = "Could not load insights.";
+  }
+});
+document.getElementById("close-insights").addEventListener("click", () => (iSheet.hidden = true));
+
+/* learned facts sheet */
+const lSheet = document.getElementById("learned-sheet");
+const lBody = document.getElementById("learned-body");
+
+async function refreshLearned() {
+  try {
+    const { candidates } = await (await fetch("/api/learned")).json();
+    if (!candidates?.length) return;
+    lSheet.hidden = false;
+    lBody.innerHTML = "";
+    for (const c of candidates) {
+      const row = document.createElement("div");
+      row.className = "mrow";
+      const t = document.createElement("div");
+      t.className = "t";
+      t.textContent = c.text;
+      const btns = document.createElement("div");
+      btns.className = "m";
+      for (const [label, act] of [["APPROVE", "approve"], ["REJECT", "reject"]]) {
+        const b = document.createElement("button");
+        b.className = "ghost small";
+        b.textContent = label;
+        b.addEventListener("click", async () => {
+          await fetch(`/api/learned/${c.id}/${act}`, { method: "POST" });
+          row.remove();
+          if (!lBody.childNodes.length) lSheet.hidden = true;
+        });
+        btns.appendChild(b);
+      }
+      row.append(t, btns);
+      lBody.appendChild(row);
+    }
+  } catch {
+    /* non-critical */
+  }
+}
+document.getElementById("close-learned").addEventListener("click", () => (lSheet.hidden = true));
 
 /* boot */
 (async function init() {

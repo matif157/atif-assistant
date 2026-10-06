@@ -108,18 +108,43 @@ button { font-family: inherit; cursor: pointer; }
 
 /* composer */
 footer { border-top: 1px solid var(--line); background: var(--bg); padding: 10px 16px 12px; }
-.modes { display: flex; gap: 6px; margin-bottom: 8px; }
-.mode {
-  flex: 1;
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--dim);
-  padding: 7px 0;
-  border-radius: 8px;
-  font-size: 11px;
-  letter-spacing: .1em;
+/* route strip: read-only, shows the decision Raees made and why */
+.route {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  line-height: 1.4;
 }
-.mode.active { color: var(--acc); border-color: var(--acc); background: rgba(94,234,212,.07); }
+.route[hidden] { display: none; }
+.route-mode {
+  flex: 0 0 auto;
+  letter-spacing: .1em;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+.route-mode.challenge { color: var(--warn); border-color: rgba(251,191,36,.4); }
+.route-mode.decide { color: var(--acc); border-color: rgba(94,234,212,.35); }
+.route-why { color: var(--dim2, var(--dim)); opacity: .8; }
+
+.chip.crit { color: #c4b5fd; border-color: rgba(196,181,253,.35); }
+.chip.repeat { color: var(--warn); border-color: rgba(251,191,36,.3); }
+
+.ghost.small { padding: 3px 9px; font-size: 10px; margin-right: 6px; }
+
+.ihead { font-size: 10px; letter-spacing: .1em; color: var(--dim); margin: 14px 0 6px; }
+.iread {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--acc);
+  border-left: 2px solid var(--acc);
+  padding: 2px 0 2px 9px;
+  margin-bottom: 4px;
+}
+
 .composer { display: flex; gap: 8px; align-items: flex-end; }
 textarea {
   flex: 1;

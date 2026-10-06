@@ -29,6 +29,103 @@ memory search all work. Only free-text generation is disabled.
 
 ---
 
+## No modes. Raees routes.
+
+There is no mode picker. You ask; Raees decides how the question deserves to
+be answered, and shows you its reasoning above each reply.
+
+| Your question looks like | Raees does | Why |
+|---|---|---|
+| *"does she love me more"* | CHALLENGED | Comparing feelings is not measurable. Answering it would invent certainty. |
+| *"am I worth it"* | CHALLENGED | Nobody can hand out a verdict on your worth. The underlying need gets answered instead. |
+| *"should I quit my job"* | DECIDED | A real decision with consequences. Options, reversibility, review date. |
+| *"what is FTS5"* | ANSWERED | Knowledge question with a checkable answer. |
+| *"should I see a doctor for chest pain"* | ANSWERED | Professional domain. Signposted before advising. |
+| anything unrecognised | CHALLENGED | Unclassified requests default to the honest treatment, not the agreeable one. |
+
+The route strip under each answer shows the mode and the one-line reason.
+
+### Repetition escalation
+
+Raees counts how often you ask each *class* of question. Ask the same class
+three times and the loop itself becomes the subject:
+
+> This class of question has come up 5 times. Stop re-answering it. Name the
+> loop and address it directly.
+
+The answer chip shows `ASKED 5x` so you can see the count.
+
+### Insights
+
+The `INSIGHTS` button shows the distribution of what you actually ask. After
+a few sessions it will tell you plainly something like:
+
+> 6 of 10 questions are comparisons between people. That is the dominant shape
+> of what you ask, and it has no possible answer.
+
+It also lists conflicting stored facts.
+
+---
+
+## Adversarial self-audit
+
+Every answer is audited before you see it. A second pass tries to find the
+draft's failures:
+
+```
+VERDICT: SOUND | NEEDS_REVISION
+DEFECTS: numbered list
+REVISION: corrected answer, or EMPTY
+```
+
+Six failure modes are checked: fabrication, sympathy drift, premise
+compliance, missed question, label dishonesty, rumination enablement. A
+challenge is checked for a seventh — whether it actually pushed back.
+
+If defects are found, the revision replaces the draft. A revision that is
+empty, truncated, or too short to be an answer is discarded rather than
+replacing a working draft. Failures are soft: a broken audit never breaks the
+answer.
+
+Challenges get audited hardest, because the user's position is emotionally
+loaded and drift toward validating is most likely there.
+
+### The brake
+
+After the audit, a deterministic pass runs over the final text:
+
+| Caught | Warning |
+|---|---|
+| `"she loved him 40% more"` | comparison or percentage the evidence does not support |
+| no Reality Engine labels | claims are unverified |
+| `"but you decide"`, `"only you can know"` | handed the decision back instead of reasoning |
+| `"you're doing great"`, `"your feelings are valid"` | reassurance language in place of analysis |
+| challenge missing `CASE AGAINST` | the challenge did not happen |
+
+### Contradiction detection
+
+Subject/value pairs are extracted from every fact and indexed separately. When
+two stored facts about the same subject cannot both be true, the conflict is
+injected into context ahead of the answer and surfaced in Insights. Raees must
+state the conflict rather than silently pick a side.
+
+### Memory learning
+
+After each answer Raees reads the exchange and proposes durable facts. Three
+gates must all pass:
+
+1. the model proposes it in strict `FACT | subject | statement` format
+2. it is first-person and **durable** — a feeling, belief, or clinical claim
+   is rejected outright
+3. it is not already in memory
+
+Anything that passes lands as a **candidate**. It is never promoted to a
+curated fact, and never becomes a rule, without your explicit approval in the
+LEARNED sheet. Constitution principle 06: memory may not silently change
+rules.
+
+---
+
 ## The three features
 
 ### Reality Engine
@@ -50,7 +147,8 @@ A post-generation brake in `raees/engine.py` then audits the answer:
 
 ### Challenge Mode
 
-`/challenge` builds the case against your position:
+Applied automatically whenever a comparison or a self-worth verdict is asked.
+Builds the case against your position:
 
 ```
 CASE FOR · CASE AGAINST · WHAT YOU ARE OVERLOOKING
@@ -81,15 +179,28 @@ substantially, and generic words (`what`, `when`, `which`) are ignored, so
 
 ---
 
-## Modes
+## API
 
-| Mode | Command | Purpose |
-|---|---|---|
-| Ask | default | labelled answer with retrieved memory |
-| Challenge | `/challenge` | argue against the position |
-| Decide | `/decide` | options, reversibility, consequences, recommendation |
+```bash
+curl -s -X POST http://127.0.0.1:8770/api/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"should I quit my job"}'
+```
 
-Click the mode buttons or type the slash command.
+No `mode` field. The response carries the route Raees chose, why, the Reality
+labels, brake warnings, self-audit notes, pattern hits, and repeat count.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/ask` | ask a question |
+| `GET /api/insights` | question distribution, reading, contradictions |
+| `GET /api/learned` | memory candidates awaiting approval |
+| `POST /api/learned/{id}/approve` | promote a candidate to a curated fact |
+| `POST /api/learned/{id}/reject` | discard a candidate |
+| `GET /api/memory?q=` | FTS5 search across all memory kinds |
+| `GET /api/health` | status and counts |
+| `GET /api/history/{session}` | conversation history |
+| `GET/POST /api/decisions` | decision ledger |
 
 ---
 
@@ -167,18 +278,33 @@ no Celery, no build step.
 
 ```
 Browser (PWA)
-   │  HTTP
+   │  HTTP  —  one question, no mode
    ▼
-FastAPI process  ──▶  SQLite (FTS5)          raees/db.py
-   │                    ▲
-   │                    └── seeded from archive
+app.py
    │
-   ├── Reality Engine + brake        raees/engine.py
-   ├── Pattern Radar                 raees/radar.py
-   ├── Constitution                  raees/constitution.py
-   └── Model gateway                 raees/llm.py
-         └── Groq → Gemini → OpenRouter → Ollama
+   ├── router.py      classify → pick treatment → escalate on repetition
+   │        │
+   │        ▼
+   ├── engine.py      Reality Engine, challenge structure, decision structure
+   │        │
+   │        ├── pass 1   draft
+   │        ├── pass 2   adversarial self-audit → revision
+   │        └── pass 3   deterministic brake
+   │
+   ├── radar.py       pattern matching
+   ├── constitution.py  invariants, rumination, intent, professional domains
+   ├── learn.py       gated memory extraction → candidates → your approval
+   │
+   ├── db.py  ──▶  SQLite (FTS5 + claims_fts)
+   │                facts · episodes · patterns · rules ·
+   │                decisions · questions · learned
+   │
+   └── llm.py         Groq → Gemini → OpenRouter → Ollama
 ```
+
+Every answer costs up to three model calls: draft, audit, and a revision if
+the audit found defects. Without a key, one call is skipped and the answer is
+honest about not having reasoned.
 
 Swap SQLite for Postgres later only if you actually need it. For one user,
 you almost certainly won't.
@@ -186,14 +312,16 @@ you almost certainly won't.
 | File | Role |
 |---|---|
 | `raees/config.py` | env-driven settings |
-| `raees/db.py` | schema, FTS5 retrieval, test isolation |
+| `raees/db.py` | schema, FTS5, contradictions, question ledger, test isolation |
 | `raees/constitution.py` | invariants, brake rules, intent classifier |
+| `raees/router.py` | mode selection and repetition escalation |
 | `raees/radar.py` | pattern matching |
-| `raees/llm.py` | provider failover + offline fallback |
-| `raees/engine.py` | Reality Engine, Challenge, Decide |
+| `raees/llm.py` | provider failover, live Ollama probe, offline fallback |
+| `raees/engine.py` | Reality Engine, challenge, decide, self-audit, brake |
+| `raees/learn.py` | gated memory extraction |
 | `raees/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
-| `tests/test_core.py` | 27 tests over brake, radar, retrieval |
+| `tests/test_core.py` | 81 tests |
 
 ---
 
@@ -203,17 +331,30 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-Covers the brake (fabricated rankings, missing labels), the radar (clock
-tokens, false positives, generic words) and retrieval (multi-word queries,
-empty queries, stopwords). The suite runs against a scratch database and
-asserts the real one is unchanged.
+81 checks across eight groups:
+
+| Group | Covers |
+|---|---|
+| brake | fabricated rankings, missing labels, hedging-out, reassurance, missing challenge sections |
+| router | ten routing cases, unclassified default, distress signal, repetition escalation, question classes |
+| radar | clock tokens, false positives, generic words |
+| retrieval | multi-word queries, empty queries, stopwords |
+| contradictions | negation detection, non-negated differences excluded |
+| learning gates | feelings, beliefs, clinical claims, third parties rejected; approve and reject round trips |
+| extraction | strict format parsing, dedup, EMPTY marker, offline no-op |
+| question ledger | counts, distribution |
+| isolation | the real database is unchanged |
+
+Every group runs against a scratch database. `test_isolation` asserts the real
+one is byte-for-byte unchanged after the whole run.
 
 ---
 
 ## Troubleshooting
 
-**"no model key" in the header** — `.env` is missing or has no key. Retrieval
-still works.
+**"no model key" in the header** — `.env` is missing or has no key. Ollama is
+probed live, so it only shows ready when actually serving. Retrieval, routing,
+the brake and the radar still work.
 
 **Blank page** — hard reload. The service worker is network-first, so this
 should be rare.
@@ -226,4 +367,4 @@ should be rare.
 
 ## Built
 
-06 Oct 2026. v0.1.0.
+06 Oct 2026. v0.2.0.

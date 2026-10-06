@@ -14,16 +14,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine
+from . import db, engine, learn, router
 from .config import TAILSCALE_HOST, WEB_DIR
-from .llm import available_providers
+from .llm import available_providers, ollama_is_up
 
 app = FastAPI(title="Raees", version="0.1.0")
 
 
 class Ask(BaseModel):
     question: str
-    mode: str = "ask"
     session: str | None = None
 
 
@@ -41,12 +40,20 @@ def _startup() -> None:
 
 
 @app.get("/api/health")
-def health() -> dict:
+async def health() -> dict:
+    providers = available_providers()
+    if not any(p["ready"] for p in providers):
+        # No key set anywhere - check whether a local model is actually
+        # serving before telling the user there is nothing available.
+        if await ollama_is_up():
+            for p in providers:
+                if p["name"] == "ollama":
+                    p["ready"] = True
     return {
         "ok": True,
         "seeded": db.is_seeded(),
         "counts": db.counts(),
-        "providers": available_providers(),
+        "providers": providers,
         "tailscale_host": TAILSCALE_HOST,
     }
 
@@ -71,26 +78,98 @@ def memory(q: str = "", limit: int = 20) -> JSONResponse:
 @app.post("/api/ask")
 async def ask(payload: Ask) -> dict:
     session = payload.session or uuid.uuid4().hex[:12]
+
+    # No mode in, no mode out. The router decides, and the user sees why.
+    qclass = router.question_class(payload.question)
+    repeats = db.question_count(qclass)
+    route = router.route(payload.question, repeat_count=repeats)
+    db.record_question(qclass, payload.question)
+
     ctx = engine.build_context(payload.question)
-    result = await engine.respond(payload.question, mode=payload.mode)
+    ctx["escalations"] = route.escalations
+    result = await engine.respond(
+        payload.question, mode=route.mode, ctx=ctx
+    )
+    result["route"] = route.to_dict()
+    result["asked_count"] = repeats + 1
 
     db.save_message(
         session,
         "user",
         payload.question,
-        labels={"mode": payload.mode, "intent": result.get("intent")},
+        labels={
+            "route": route.mode,
+            "intent": result.get("intent"),
+            "qclass": qclass,
+        },
         patterns=[p["name"] for p in result.get("patterns", [])],
     )
     db.save_message(
         session,
         "assistant",
         result["text"],
-        labels={"labels": result.get("labels", [])},
+        labels={
+            "labels": result.get("labels", []),
+            "route": route.mode,
+            "warnings": result.get("warnings", []),
+            "critique": result.get("critique", []),
+        },
         patterns=[p["name"] for p in result.get("patterns", [])],
     )
 
     result["session"] = session
+
+    # Learn after answering, so a slow extraction never delays the reply.
+    learned = await learn.extract(
+        payload.question, result["text"], result.get("provider", "offline")
+    )
+    if learned:
+        result["learned"] = learned
+
     return result
+
+
+@app.get("/api/insights")
+def insights() -> dict:
+    """What the user keeps asking, and what that says about them."""
+    dist = db.question_distribution()
+    total = db.question_count()
+    total_comparisons = next(
+        (d["count"] for d in dist if d["class"] == "comparison"), 0
+    )
+    reading = ""
+    if total_comparisons >= 5:
+        reading = (
+            f"{total_comparisons} of {total} questions are comparisons between "
+            "people. That is the dominant shape of what you ask, and it has no "
+            "possible answer."
+        )
+    return {
+        "distribution": dist,
+        "total": total,
+        "comparisons": total_comparisons,
+        "reading": reading,
+        "contradictions": db.find_contradictions(limit=5),
+    }
+
+
+@app.get("/api/learned")
+def learned_candidates() -> dict:
+    return {"candidates": db.learned_candidates()}
+
+
+@app.post("/api/learned/{fact_id}/approve")
+def approve(fact_id: int) -> dict:
+    fid = db.approve_learned(fact_id)
+    if not fid:
+        return {"ok": False, "error": "not found"}
+    return {"ok": True, "fact_id": fid}
+
+
+@app.post("/api/learned/{fact_id}/reject")
+def reject(fact_id: int) -> dict:
+    db.reject_learned(fact_id)
+    return {"ok": True}
 
 
 @app.get("/api/history/{session}")

@@ -128,6 +128,31 @@ def build_context(question: str) -> dict[str, Any]:
         if pr:
             parts.append(pr)
 
+    low_words = [w for w in question.lower().split() if len(w) > 3]
+
+    # A detected contradiction outranks a clean retrieval: if two stored facts
+    # cannot both be true, the answer must surface that before anything else.
+    contradictions = db.find_contradictions(limit=3)
+    relevant_contradictions = (
+        [
+            c
+            for c in contradictions
+            if c.get("a")
+            and any(w in c["subject"].split() for w in low_words)
+        ]
+        or contradictions[:1]
+    )
+    if relevant_contradictions:
+        parts.append(
+            "CONFLICTING MEMORY. These two stored facts cannot both be true. "
+            "Do not pick one silently - state the conflict and say which one "
+            "the evidence favours, or that it cannot be resolved."
+        )
+        for c in relevant_contradictions:
+            parts.append(f"- ({c['subject']}) A: {c['a']}")
+            if c.get("b"):
+                parts.append(f"- ({c['subject']}) B: {c['b']}")
+
     risks = C.detect_professional_risk(question)
     rumination = C.detect_rumination(question)
     objective = C.hidden_objective(question)
@@ -139,6 +164,8 @@ def build_context(question: str) -> dict[str, Any]:
         "professional_risk": risks,
         "rumination": rumination,
         "hidden_objective": objective,
+        "contradictions": relevant_contradictions,
+        "escalations": [],
     }
 
 
@@ -147,6 +174,8 @@ def _guardrails(ctx: dict[str, Any]) -> str:
     obj = ctx["hidden_objective"]
     if obj != "UNCLEAR - classify before answering.":
         lines.append(f"CLASSIFIED INTENT: {obj}")
+    for e in ctx.get("escalations", []):
+        lines.append(f"ROUTER REQUIREMENT: {e}")
     if ctx["rumination"]:
         lines.append(
             "RUMINATION RISK: this request asks for evidence about an "
@@ -193,7 +222,26 @@ _FABRICATION = re.compile(
 )
 
 
-def audit_response(text: str) -> list[str]:
+# A challenge that ends without a position is a challenge that failed.
+_HEDGE_OUT = re.compile(
+    r"(but you decide|at the end of the day|only you can know|"
+    r"it depends on you|whatever you (feel|think)|"
+    r"you know (best|yourself) (better|what)|"
+    r"time will tell|mai apni marzi)",
+    re.IGNORECASE,
+)
+
+# Language that hands the verdict back to the user instead of reasoning.
+_SOFTENING = re.compile(
+    r"(you're doing (great|fine|well)|it'?s completely normal|"
+    r"you seem like a (really )?(good|nice) (person|man)|"
+    r"don'?t be so hard on yourself|give yourself (credit|a break)|"
+    r"your feelings are valid)",
+    re.IGNORECASE,
+)
+
+
+def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
     """Post-hoc brake. Returns warnings if the model broke a hard rule."""
     warnings = []
     if _FABRICATION.search(text):
@@ -206,6 +254,21 @@ def audit_response(text: str) -> list[str]:
             "BRAKE: response carried no Reality Engine labels. Claims are "
             "unverified."
         )
+    if _HEDGE_OUT.search(text):
+        warnings.append(
+            "BRAKE: response handed the decision back to the user instead of "
+            "reasoning to a position."
+        )
+    if _SOFTENING.search(text):
+        warnings.append(
+            "BRAKE: response used reassurance language in place of analysis."
+        )
+    if challenge_mode:
+        for required in ("CASE AGAINST", "RECOMMENDATION"):
+            if required.upper() not in text.upper():
+                warnings.append(
+                    f"BRAKE: challenge is missing the {required} section."
+                )
     return warnings
 
 
@@ -235,6 +298,13 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     except ProviderError:
         text, provider = _offline_answer(question, ctx), "offline"
 
+    # Adversarial second pass: find what the draft got wrong, then fix it.
+    critique, revised, critique_notes = await _self_critique(
+        question, text, ctx, provider
+    )
+    if revised:
+        text = revised
+
     return {
         "text": text,
         "provider": provider,
@@ -248,7 +318,110 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         "rumination": ctx["rumination"],
         "professional_risk": ctx["professional_risk"],
         "memories_used": len(ctx["memories"]),
+        "critique": critique_notes,
     }
+
+
+# ------------------------------------------------- adversarial self-critique
+
+CRITIQUE_INSTRUCTIONS = """
+You are auditing another AI's draft answer. Your job is to find its failures.
+
+Check, in order:
+1. FABRICATION - did it assert anything the evidence does not support?
+2. SYMPATHY DRIFT - did it soften a truth, or validate a conclusion it
+   should have challenged?
+3. PREMISE COMPLIANCE - did it accept an unmeasurable premise (comparing
+   feelings, ranking people) instead of refusing it?
+4. MISSED QUESTION - is the user actually asking something the draft avoided?
+5. LABEL HONESTY - are the FACT/INFERENCE/ASSUMPTION labels accurate, or is
+   an assumption dressed up as a fact?
+6. RUMINATION ENABLEMENT - does it encourage searching for more evidence?
+
+Output STRICTLY:
+VERDICT: SOUND | NEEDS_REVISION
+DEFECTS: numbered list, or NONE
+REVISION: the corrected answer in full, or EMPTY if SOUND
+"""
+
+
+async def _self_critique(
+    question: str,
+    draft: str,
+    ctx: dict[str, Any],
+    provider: str,
+    audit_challenge: bool = False,
+) -> tuple[dict[str, Any], str | None, list[str]]:
+    """Second pass over the draft. Fails soft - never breaks the answer."""
+    if provider == "offline" or not draft.strip():
+        return {}, None, []
+
+    extra: list[str] = []
+    if audit_challenge:
+        extra.append(
+            "This draft was a CHALLENGE. It is meant to argue against the "
+            "user. If it ended up agreeing, softening, or leaving the user to "
+            "decide without a view, that is a critical defect."
+        )
+    for e in ctx.get("escalations", []):
+        extra.append(f"ROUTER REQUIREMENT: {e}")
+
+    ctx_block = ctx["context_block"]
+    user_content = "\n\n".join(
+        part
+        for part in (
+            ctx_block,
+            "\n".join(extra),
+            f"ORIGINAL QUESTION: {question}",
+            f"DRAFT ANSWER TO AUDIT:\n{draft}",
+        )
+        if part and part.strip()
+    )
+    system = BASE_SYSTEM + CRITIQUE_INSTRUCTIONS
+    if audit_challenge:
+        system += "\n7. CHALLENGE INTEGRITY - did it actually push back?\n"
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        raw, _ = await complete(messages, temperature=0.2, max_tokens=2200)
+    except ProviderError:
+        return {}, None, []
+
+    verdict = "SOUND"
+    m = re.search(r"VERDICT:\s*(SOUND|NEEDS_REVISION)", raw, re.IGNORECASE)
+    if m:
+        verdict = m.group(1).upper()
+
+    defects: list[str] = []
+    dm = re.search(r"DEFECTS:\s*(.+?)(?:\nREVISION:|\Z)", raw, re.DOTALL | re.I)
+    if dm:
+        block = dm.group(1).strip()
+        if block.upper() not in {"NONE", "NONE.", "-"}:
+            defects = [
+                re.sub(r"^\s*\d+[.)]\s*", "", line).strip()
+                for line in block.splitlines()
+                if line.strip()
+            ]
+
+    revision = None
+    rm = re.search(r"REVISION:\s*(.+)\Z", raw, re.DOTALL | re.I)
+    if rm:
+        candidate = rm.group(1).strip()
+        # A revision that is empty, a placeholder, or obviously truncated is
+        # discarded rather than replacing a working draft.
+        if len(candidate) > 80 and candidate.upper() not in {"EMPTY", "NONE", "N/A"}:
+            revision = candidate
+
+    notes: list[str] = []
+    if defects:
+        notes.append(f"Self-critique ({verdict}): " + "; ".join(defects[:3]))
+    if revision:
+        notes.append("Answer revised after adversarial pass.")
+
+    return {"verdict": verdict, "defects": defects}, revision, notes
 
 
 async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
@@ -272,11 +445,19 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     except ProviderError:
         text, provider = _offline_challenge(question, ctx), "offline"
 
+    # The challenge is the mode most likely to drift into validating, because
+    # the user's position is emotionally loaded. Audit it hardest.
+    critique, revised, critique_notes = await _self_critique(
+        question, text, ctx, provider, audit_challenge=True
+    )
+    if revised:
+        text = revised
+
     return {
         "text": text,
         "provider": provider,
-        "labels": [],
-        "warnings": [],
+        "labels": parse_labels(text),
+        "warnings": audit_response(text, challenge_mode=True),
         "patterns": [
             {"name": p["name"], "intervention": p.get("intervention")}
             for p in ctx["patterns"]
@@ -285,6 +466,7 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         "rumination": ctx["rumination"],
         "professional_risk": ctx["professional_risk"],
         "memories_used": len(ctx["memories"]),
+        "critique": critique_notes,
     }
 
 
@@ -309,11 +491,17 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     except ProviderError:
         text, provider = _offline_answer(question, ctx), "offline"
 
+    critique, revised, critique_notes = await _self_critique(
+        question, text, ctx, provider
+    )
+    if revised:
+        text = revised
+
     return {
         "text": text,
         "provider": provider,
-        "labels": [],
-        "warnings": [],
+        "labels": parse_labels(text),
+        "warnings": audit_response(text),
         "patterns": [
             {"name": p["name"], "intervention": p.get("intervention")}
             for p in ctx["patterns"]
@@ -322,6 +510,7 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         "rumination": ctx["rumination"],
         "professional_risk": ctx["professional_risk"],
         "memories_used": len(ctx["memories"]),
+        "critique": critique_notes,
     }
 
 
@@ -356,8 +545,13 @@ def _offline_challenge(question: str, ctx: dict[str, Any]) -> str:
     )
 
 
-async def respond(question: str, mode: str = "ask") -> dict[str, Any]:
-    ctx = build_context(question)
+async def respond(
+    question: str,
+    mode: str = "ask",
+    ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if ctx is None:
+        ctx = build_context(question)
     if mode == "challenge":
         return await _challenge(question, ctx)
     if mode == "decide":

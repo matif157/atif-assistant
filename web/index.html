@@ -18,21 +18,21 @@
     <span class="sub" id="statusline">personal intelligence</span>
   </div>
   <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
+  <button class="ghost" id="btn-insights" title="What you keep asking">INSIGHTS</button>
 </header>
 
 <main id="chat"></main>
 
 <footer>
-  <div class="modes">
-    <button class="mode active" data-mode="ask">ASK</button>
-    <button class="mode" data-mode="challenge">CHALLENGE</button>
-    <button class="mode" data-mode="decide">DECIDE</button>
+  <div class="route" id="route" hidden>
+    <span class="route-mode" id="route-mode"></span>
+    <span class="route-why" id="route-why"></span>
   </div>
   <div class="composer">
-    <textarea id="input" rows="1" placeholder="Ask. Or type /challenge, /decide"></textarea>
+    <textarea id="input" rows="1" placeholder="Ask. Raees decides how to answer."></textarea>
     <button id="send" aria-label="Send">&#10148;</button>
   </div>
-  <div class="hint" id="hint">Reality Engine labels every claim. Challenge Mode argues against you.</div>
+  <div class="hint" id="hint">Every claim labelled. No mode to pick - Raees routes each question itself.</div>
 </footer>
 
 <div class="sheet" id="memory-sheet" hidden>
@@ -42,6 +42,22 @@
     <button class="ghost" id="close-memory">CLOSE</button>
   </div>
   <div id="mem-results"></div>
+</div>
+
+<div class="sheet" id="insights-sheet" hidden>
+  <div class="sheet-head">
+    <strong>INSIGHTS</strong>
+    <button class="ghost" id="close-insights">CLOSE</button>
+  </div>
+  <div id="insights-body"></div>
+</div>
+
+<div class="sheet" id="learned-sheet" hidden>
+  <div class="sheet-head">
+    <strong>LEARNED - NEEDS YOUR APPROVAL</strong>
+    <button class="ghost" id="close-learned">CLOSE</button>
+  </div>
+  <div id="learned-body"></div>
 </div>
 
 <script src="/static/app.js"></script>

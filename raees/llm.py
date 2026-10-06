@@ -155,7 +155,23 @@ async def complete(
     raise ProviderError(f"no provider available: {last_error}")
 
 
+async def ollama_is_up() -> bool:
+    """Actually probe Ollama. Being configured is not being ready."""
+    base = os.environ.get("RAEES_OLLAMA_URL", "http://127.0.0.1:11434")
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get(f"{base}/api/tags")
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def available_providers() -> list[dict[str, Any]]:
+    """Sync snapshot of provider configuration.
+
+    Ollama reports ready=False here because reachability cannot be checked
+    without I/O. Use ``ready_providers()`` for the live check.
+    """
     keys = {
         "groq": "GROQ_API_KEY",
         "gemini": "GEMINI_API_KEY",
@@ -164,7 +180,13 @@ def available_providers() -> list[dict[str, Any]]:
     out = []
     for name in PROVIDER_ORDER:
         if name == "ollama":
-            out.append({"name": name, "ready": True, "note": "local"})
+            out.append(
+                {
+                    "name": name,
+                    "ready": False,
+                    "note": "local - probed live at request time",
+                }
+            )
         else:
             out.append(
                 {

@@ -13,6 +13,7 @@ and conversation history so memory survives restarts.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -112,6 +113,27 @@ CREATE TABLE IF NOT EXISTS evidence (
     created_at TEXT NOT NULL
 );
 
+-- Question-class ledger. Repetition is the signal the router escalates on.
+CREATE TABLE IF NOT EXISTS questions (
+    id         INTEGER PRIMARY KEY,
+    qclass     TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Durable facts Raees learned from conversation, kept separate from seeds so
+-- a mistake is easy to delete without touching curated memory.
+CREATE TABLE IF NOT EXISTS learned (
+    id         INTEGER PRIMARY KEY,
+    text       TEXT NOT NULL,
+    subject    TEXT,
+    kind       TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    status     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     kind UNINDEXED,
     ref_id UNINDEXED,
@@ -120,9 +142,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     tokenize = 'porter unicode61'
 );
 
+-- Contradiction candidates: same subject, different asserted value.
+CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
+    fact_id UNINDEXED,
+    subject,
+    value,
+    tokenize = 'porter unicode61'
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session);
 CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source);
 CREATE INDEX IF NOT EXISTS idx_decisions_review ON decisions(review_date);
+CREATE INDEX IF NOT EXISTS idx_questions_class ON questions(qclass);
+CREATE INDEX IF NOT EXISTS idx_learned_status ON learned(status);
 """
 
 
@@ -260,6 +292,7 @@ def _load_detail(kind: str, ref_id: int) -> dict[str, Any] | None:
         "episode": "episodes",
         "pattern": "patterns",
         "rule": "rules",
+        "learned": "learned",
     }.get(kind)
     if not table:
         return None
@@ -285,7 +318,174 @@ def add_fact(
     conn.commit()
     _fts_index("fact", cur.lastrowid, text[:80], text)
     conn.commit()
+    _index_claim(int(cur.lastrowid), text)
     return int(cur.lastrowid)
+
+
+# ------------------------------------------- contradictions & learned facts
+
+# Negations that flip a claim's meaning. Used to spot a fact and its denial.
+_NEGATION = re.compile(
+    r"\b(not|never|no|none|didn'?t|doesn'?t|did not|does not|wasn'?t|"
+    r"was not|isn'?t|is not|can'?t|cannot|won'?t)\b",
+    re.IGNORECASE,
+)
+
+_SUBJECT_RE = re.compile(
+    r"\b(?:my|our)\s+([a-z][a-z ]{2,30}?)\s+(?:is|are|was|were|has|have|"
+    r"does|do|did|feels?|think(?:s)?|said|says|wants?|likes?|loves?)\b",
+    re.IGNORECASE,
+)
+
+
+def _index_claim(fact_id: int, text: str) -> None:
+    """Record subject/value pairs so contradictions can be detected later."""
+    conn = connect()
+    m = _SUBJECT_RE.search(text)
+    if not m:
+        return
+    subject = " ".join(m.group(1).lower().split())
+    value = text[m.end() :].strip().lower()[:200]
+    if not value:
+        return
+    conn.execute("DELETE FROM claims_fts WHERE fact_id=?", (fact_id,))
+    conn.execute(
+        "INSERT INTO claims_fts(fact_id, subject, value) VALUES (?,?,?)",
+        (fact_id, subject, value),
+    )
+    conn.commit()
+
+
+def find_contradictions(limit: int = 5) -> list[dict[str, Any]]:
+    """Facts about the same subject whose values cannot both be true.
+
+    Deliberately conservative: only same-subject pairs where one value is a
+    negation of the other. Returns candidates for review, not verdicts.
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT fact_id, subject, value FROM claims_fts"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    by_subject: dict[str, list[tuple[int, str]]] = {}
+    for r in rows:
+        by_subject.setdefault(r["subject"], []).append((r["fact_id"], r["value"]))
+
+    out: list[dict[str, Any]] = []
+    for subject, claims in by_subject.items():
+        if len(claims) < 2:
+            continue
+        for i in range(len(claims)):
+            for j in range(i + 1, len(claims)):
+                fa, va = claims[i]
+                fb, vb = claims[j]
+                if bool(_NEGATION.search(va)) != bool(_NEGATION.search(vb)):
+                    texts = {}
+                    for fid in (fa, fb):
+                        row = conn.execute(
+                            "SELECT text FROM facts WHERE id=?", (fid,)
+                        ).fetchone()
+                        if row:
+                            texts[fid] = row["text"]
+                    out.append(
+                        {
+                            "subject": subject,
+                            "a": texts.get(fa),
+                            "b": texts.get(fb),
+                        }
+                    )
+    return out[:limit]
+
+
+def record_question(qclass: str, body: str) -> int:
+    conn = connect()
+    cur = conn.execute(
+        "INSERT INTO questions(qclass, body, created_at) VALUES (?,?,?)",
+        (qclass, body[:500], now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def question_count(qclass: str | None = None) -> int:
+    conn = connect()
+    if qclass:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM questions WHERE qclass=?", (qclass,)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) AS n FROM questions").fetchone()
+    return int(row["n"]) if row else 0
+
+
+def question_distribution() -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        """SELECT qclass, COUNT(*) AS n FROM questions
+           GROUP BY qclass ORDER BY n DESC"""
+    ).fetchall()
+    return [{"class": r["qclass"], "count": int(r["n"])} for r in rows]
+
+
+def add_learned(
+    text: str,
+    kind: str,
+    source: str,
+    subject: str | None = None,
+    confidence: float = 0.6,
+) -> int:
+    """Store a fact learned from conversation. Never auto-promoted to a rule."""
+    conn = connect()
+    ts = now()
+    cur = conn.execute(
+        """INSERT INTO learned(text, subject, kind, source, confidence,
+                              status, created_at)
+           VALUES (?,?,?,?,?,'candidate',?)""",
+        (text, subject, kind, source, confidence, ts),
+    )
+    conn.commit()
+    _fts_index("learned", int(cur.lastrowid), text[:80], text)
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def learned_candidates() -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        """SELECT * FROM learned WHERE status='candidate'
+           ORDER BY created_at DESC LIMIT 50"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def approve_learned(fact_id: int) -> int:
+    """Promote a learned candidate into a curated fact."""
+    conn = connect()
+    row = conn.execute(
+        "SELECT text, subject, confidence FROM learned WHERE id=?", (fact_id,)
+    ).fetchone()
+    if not row:
+        return 0
+    fid = add_fact(
+        text=row["text"],
+        source=f"learned:{fact_id}",
+        confidence=row["confidence"],
+    )
+    conn.execute(
+        "UPDATE learned SET status='approved' WHERE id=?", (fact_id,)
+    )
+    conn.commit()
+    return fid
+
+
+def reject_learned(fact_id: int) -> None:
+    conn = connect()
+    conn.execute("UPDATE learned SET status='rejected' WHERE id=?", (fact_id,))
+    conn.execute("DELETE FROM memory_fts WHERE kind='learned' AND ref_id=?", (fact_id,))
+    conn.commit()
 
 
 def add_episode(
@@ -466,6 +666,8 @@ def counts() -> dict[str, int]:
         "decisions",
         "messages",
         "evidence",
+        "questions",
+        "learned",
     )
     return {t: conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] for t in tables}
 
