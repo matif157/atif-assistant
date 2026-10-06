@@ -547,6 +547,57 @@ def test_isolation() -> None:
     )
 
 
+def test_remote_web() -> None:
+    """The phone-facing surface: service worker scope, manifest, API shape.
+
+    These are the bits that make remote access work, and each one failed
+    silently at least once: a wrong sw.js path leaves the app unusable offline
+    without any visible error in the browser.
+    """
+    from fastapi.testclient import TestClient
+
+    from raees.app import app
+
+    client = TestClient(app)
+
+    sw = client.get("/sw.js")
+    check("service worker served at root scope", sw.status_code == 200)
+    check(
+        "service worker has javascript content type",
+        "javascript" in sw.headers.get("content-type", ""),
+    )
+
+    # The registration path in app.js must match where the worker is served.
+    # A mismatch still returns 200 from /static/sw.js but never controls "/".
+    app_js = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text()
+    check(
+        "app registers the worker at root scope",
+        'serviceWorker.register("/sw.js")' in app_js,
+    )
+    check(
+        "app does not register the worker under /static",
+        'register("/static/sw.js")' not in app_js,
+    )
+
+    # start_url must sit inside the worker's scope, or installing to the
+    # homescreen produces a shortcut that opens with no offline shell.
+    import json
+
+    manifest = json.loads(
+        (Path(__file__).resolve().parent.parent / "web" / "manifest.json").read_text()
+    )
+    check("manifest start_url is origin root", manifest.get("start_url") == "/")
+    check("manifest is standalone", manifest.get("display") == "standalone")
+
+    # The app must not cache API traffic, or answers go stale on a second device.
+    sw_body = sw.text
+    check("service worker skips /api/", '/api/' in sw_body and "return;" in sw_body)
+
+    health = client.get("/api/health")
+    check("health endpoint responds", health.status_code == 200)
+    check("health reports counts", "counts" in health.json())
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -572,6 +623,7 @@ def main() -> int:
     test_evidence_parsing()
     test_critique_parsing()
     test_isolation()
+    test_remote_web()
 
     if before is not None:
         from raees import db

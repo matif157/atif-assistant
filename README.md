@@ -342,6 +342,11 @@ you want this to survive reboots.
 - Your archive files are read at seed time only; they are not copied in.
 - The PWA caches the app shell for offline opening, but `/api/*` is never
   cached, so answers are always live.
+- The service worker is served from `/sw.js` at the origin root, not from
+  `/static/sw.js`. Scope is derived from the script's own path, so a worker
+  under `/static/` cannot control the page at `/`, and the offline shell and
+  install-to-homescreen would silently do nothing. Change one without the other
+  and there is no error in the browser to tell you.
 - With a cloud model key, your **questions** are sent to that provider.
   **Memory stays local.**
 

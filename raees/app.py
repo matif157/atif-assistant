@@ -238,5 +238,14 @@ def index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/sw.js")
+def service_worker() -> FileResponse:
+    # Served from the root, not /static, so its default scope covers the whole
+    # origin. From /static/sw.js the scope would be limited to /static/, the app
+    # page at / would not be controlled, and the offline shell plus
+    # install-to-homescreen would silently do nothing on the phone.
+    return FileResponse(WEB_DIR / "sw.js", media_type="application/javascript")
+
+
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

@@ -514,5 +514,5 @@ document.getElementById("close-learned").addEventListener("click", () => (lSheet
 
 /* PWA */
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
