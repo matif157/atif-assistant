@@ -213,6 +213,7 @@ Seeded once from `../asked-questions-archive`:
 | Source | Becomes |
 |---|---|
 | `CONTEXT.md` | facts (with confidence + last verified) |
+| `CONTEXT-PROFESSIONAL.md` | professional identity, profile links, deployed work |
 | `TIMELINE.md` | episodes |
 | `AGENTS.md` | rules |
 | `ASK-LATER.md` | open questions |
@@ -230,6 +231,20 @@ search-index entries whose parent row was deleted, so re-seeding does not leave
 orphans that retrieval could cite.
 
 Search memory from the UI with the **MEM** button.
+
+`CONTEXT-PROFESSIONAL.md` holds the professional side: name, role, location,
+every profile URL, and what is deployed where. It is a separate file because it
+has a different half-life than the rest. URLs go stale; relationships do not.
+Each claim carries a date it was last checked against a live source, so Raees
+knows the difference between confirmed and merely claimed.
+
+Unverified professional claims are stored as **rules**, not facts. A question is
+not a fact, and storing "the Fiverr handle might be wrong" at high confidence
+would let Raees assert it. Right now three are outstanding: which Fiverr handle
+is live, whether the Upwork id changed, and whether to repair or retire the
+InfinityFree mirror.
+
+Session handover and prompt templates live in [`docs/SESSION-DOCS.md`](docs/SESSION-DOCS.md).
 
 ### Raw evidence
 

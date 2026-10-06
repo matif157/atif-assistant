@@ -172,6 +172,45 @@ def _bullets(text: str, min_len: int = 25) -> list[str]:
     return out
 
 
+def _sectioned_bullets(text: str, min_len: int = 25) -> list[tuple[str, str]]:
+    """(section, bullet) pairs, with wrapped bullets folded back into one line.
+
+    A bullet that continues on the next line arrives truncated, and storing half
+    a sentence as a "fact" makes Raees assert something nobody wrote. Indented
+    continuation lines are therefore joined back onto their bullet. Table rows
+    are skipped: they hold links and separators, not claims.
+    """
+    out: list[tuple[str, str]] = []
+    section = ""
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        s = raw.strip()
+        h = re.match(r"^#{2,3}\s+(.+)$", s)
+        if h:
+            section = h.group(1).strip()
+            i += 1
+            continue
+        if not s.startswith(("- ", "* ")):
+            i += 1
+            continue
+        body = s[2:].strip()
+        i += 1
+        # A blank line ends the bullet; indented text continues it.
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip() or nxt.strip().startswith(("- ", "* ", "#", "|")):
+                break
+            if not nxt.startswith((" ", "\t")):
+                break
+            body += " " + nxt.strip()
+            i += 1
+        if len(body) >= min_len and not body.startswith("|"):
+            out.append((section, body))
+    return out
+
+
 def _headings(text: str) -> list[str]:
     return [
         m.group(2).strip()
@@ -242,6 +281,27 @@ def seed(archive_dir: Path | None = None) -> dict[str, int]:
                 )
                 added["facts"] += 1
 
+    # --- facts from CONTEXT-PROFESSIONAL.md ---
+    # Professional identity and deployed work. Separate from CONTEXT.md because
+    # it is verifiable against live sources and has a different half-life: URLs
+    # go stale, relationships do not. Bullets only, so the table and heading
+    # structure above does not turn into nonsense one-liners.
+    prof = _read("CONTEXT-PROFESSIONAL.md")
+    if prof:
+        for section, body in _sectioned_bullets(prof):
+            # A question is not a fact. Open questions become rules, so they are
+            # skipped here rather than stored as confident claims.
+            if section.lower().startswith("open question"):
+                continue
+            db.add_fact(
+                body,
+                source=f"seed:CONTEXT-PROFESSIONAL.md#{section}",
+                confidence=0.85,
+                evidence=2,
+                last_verified="2026-10-06",
+            )
+            added["facts"] += 1
+
     # --- episodes from TIMELINE.md ---
     # TIMELINE.md is organised by thread (## headings) with dated events
     # inline in prose. Extract each thread as an episode, then split out any
@@ -295,6 +355,17 @@ def seed(archive_dir: Path | None = None) -> dict[str, int]:
                     people=re.findall(r"\b([A-Z][a-z]{2,12})\b", para)[:6],
                 )
                 added["episodes"] += 1
+
+    # --- open questions from CONTEXT-PROFESSIONAL.md as rules ---
+    # A question is not a fact, but it is still something Raees should hold onto
+    # and be able to surface. Rules are the only store that is not asserting
+    # something true, so unverified professional claims land there instead.
+    if prof:
+        for section, body in _sectioned_bullets(prof):
+            if not section.lower().startswith("open question"):
+                continue
+            db.add_rule(f"Unverified: {body}", source="seed:CONTEXT-PROFESSIONAL.md")
+            added["rules"] += 1
 
     # --- rules from AGENTS.md + ASK-LATER.md ---
     ag = _read("AGENTS.md")
