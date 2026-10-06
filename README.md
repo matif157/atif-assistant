@@ -200,7 +200,9 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `GET /api/memory?q=` | FTS5 search across all memory kinds |
 | `GET /api/health` | status and counts |
 | `GET /api/history/{session}` | conversation history |
-| `GET/POST /api/decisions` | decision ledger |
+| `GET/POST /api/decisions` | decision ledger, due and open |
+| `POST /api/decisions/{id}/resolve` | record what actually happened |
+| `GET /api/evidence?q=` | full-text search over raw source lines |
 
 ---
 
@@ -228,6 +230,47 @@ search-index entries whose parent row was deleted, so re-seeding does not leave
 orphans that retrieval could cite.
 
 Search memory from the UI with the **MEM** button.
+
+### Raw evidence
+
+A confidence number is a claim about how much to trust something. On its own it
+is an opinion. `scripts/ingest_evidence.py` loads the actual chat exports so a
+stored fact can be traced back to the line it came from:
+
+```bash
+.venv/bin/python scripts/ingest_evidence.py --dry-run   # parse, write nothing
+.venv/bin/python scripts/ingest_evidence.py             # ingest
+```
+
+It reads WhatsApp `.txt` exports, currently **41,634 messages** from 10 Jan to
+2 Jun 2026 across 8 threads. Each line is hashed on its fields, so re-running
+an unchanged export adds nothing; the second run reports 0 new. It sniffs a
+prefix of each file rather than trusting the extension, because a blanket
+`*.txt` sweep over a home directory picked up 848 files, 800 of them licences
+and build artifacts.
+
+Raw messages are stored verbatim on purpose. Retrieval that rewrites a
+quotation is retrieval that cannot be checked. Access is local-only, the
+database is gitignored, and the exports are read in place, never copied into
+this repo.
+
+Note the coverage gap: the ChatGPT export is not ingested, and no evidence
+exists after 2 Jun 2026, so the 13 Jul doctor visit asserted in `AGENTS.md`
+cannot be verified from raw lines yet.
+
+---
+
+## Decision ledger
+
+A decision is only worth logging if you come back and check it. The ledger
+stores a prediction, a confidence and a review date, then asks what actually
+happened.
+
+**LEDGER** in the header opens it. **LOG A DECISION** records one. Predictions
+are stored exactly as typed and never rewritten, because the point of a
+prediction is that it was made before the outcome. Resolving requires an
+outcome to be written: an empty one is rejected, because resolving with a blank
+string would discard the only datum that makes the entry worth keeping.
 
 ---
 
@@ -354,7 +397,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-91 checks across nine groups:
+112 checks across eleven groups:
 
 | Group | Covers |
 |---|---|
@@ -367,6 +410,8 @@ you almost certainly won't.
 | extraction | strict format parsing, dedup, EMPTY marker, offline no-op |
 | question ledger | counts, distribution |
 | fts integrity | orphan detection, prune, re-index without duplicates |
+| evidence | idempotent ingest, digest stability, duplicate refusal, orphan cleanup |
+| evidence parsing | banner removal, multi-line join, timestamp normalisation, U+202F |
 | isolation | the real database is unchanged, by row count and by content hash |
 
 Every group runs against a scratch database. At the end of the run the test

@@ -288,6 +288,132 @@ def test_extraction() -> None:
     check("offline provider extracts nothing", offline == [])
 
 
+def test_evidence() -> None:
+    """Raw source lines are stored once, findable, and cannot outlive a delete."""
+    from raees import db
+
+    print("\nevidence")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "ev.db")
+        db.init_db()
+
+        eid = db.add_evidence(
+            source="chat.txt",
+            body="But sometimes you upgrade yourself and change",
+            occurred_at="2026-04-21 11:06am",
+            speaker="hmm",
+        )
+        check("evidence row is created", eid is not None)
+        check(
+            "evidence is indexed",
+            db.search_evidence("upgrade", limit=3) != [],
+        )
+        check(
+            "same line again is a duplicate",
+            db.add_evidence(
+                source="chat.txt",
+                body="But sometimes you upgrade yourself and change",
+                occurred_at="2026-04-21 11:06am",
+                speaker="hmm",
+            ) is None,
+        )
+        check(
+            "a different timestamp is a different line",
+            db.add_evidence(
+                source="chat.txt",
+                body="But sometimes you upgrade yourself and change",
+                occurred_at="2026-04-21 11:07am",
+                speaker="hmm",
+            ) is not None,
+        )
+        check("blank body is refused", db.add_evidence("chat.txt", "   ") is None)
+
+        # The digest is what makes ingestion idempotent, so it must key on the
+        # line's content and not on a row id the database assigns.
+        a = db.evidence_digest("chat.txt", "2026-01-01 1:00am", "s", "body")
+        b = db.evidence_digest("chat.txt", "2026-01-01 1:00am", "s", "body")
+        c = db.evidence_digest("chat.txt", "2026-01-01 1:00am", "other", "body")
+        check("digest is stable for the same line", a == b)
+        check("digest distinguishes the speaker", a != c)
+
+        hits = db.search_evidence("upgrade", limit=2)
+        check("search returns the timestamp", bool(hits[0]["occurred_at"]))
+        check("search returns the body", "upgrade" in hits[0]["body"])
+        check("empty query returns nothing", db.search_evidence("   ") == [])
+
+        conn = db.connect()
+        # Delete the indexed row the way a plain SQL delete would, which is how
+        # the orphan arose in the first place.
+        conn.execute("DELETE FROM evidence WHERE id=?", (eid,))
+        conn.commit()
+        check(
+            "deleting evidence orphans its index row",
+            conn.execute(
+                "SELECT COUNT(*) c FROM evidence_fts WHERE ref_id=?", (eid,)
+            ).fetchone()["c"] == 1,
+        )
+        check("prune clears the evidence orphan", db.prune_fts_orphans() == 1)
+        check(
+            "the orphan is gone from search",
+            all(h["id"] != eid for h in db.search_evidence("upgrade", limit=5)),
+        )
+
+    db.reset_db_path()
+
+
+def test_evidence_parsing() -> None:
+    """The WhatsApp export parser must keep lines and drop system noise."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ingest_evidence",
+        Path(__file__).resolve().parent.parent / "scripts" / "ingest_evidence.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    print("\nevidence parsing")
+    sample = "\n".join(
+        [
+            "19/04/2026, 3:57 am - Messages and calls are end-to-end encrypted.",
+            "19/04/2026, 3:56 am - Churhail: Assalamualaikum",
+            "19/04/2026, 4:07 am - Churhail: You wanted to talk",
+            "19/04/2026, 4:09 am - hmm: Can we have a meeting",
+            "continuation of the previous message",
+            "20/04/2026, 9:02 am - Messages and calls are end-to-end encrypted.",
+            "20/04/2026, 9:03 pm - hmm: Mny dad sy aj tk paisy ni leye",
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chat.txt"
+        path.write_text(sample, encoding="utf-8")
+        rows = mod.parse_file(path)
+
+    bodies = [r[2] for r in rows]
+    check("encryption banners are dropped", not any("end-to-end" in b for b in bodies))
+    # Three speakers lines plus the continuation, so four stored messages.
+    check("every real message is kept", len(rows) == 4)
+    check(
+        "multi-line messages are joined",
+        any("continuation of the previous" in b for b in bodies),
+    )
+    check(
+        "date and time are normalised",
+        rows[0][0] == "2026-04-19 3:56am",
+    )
+    check("speaker is captured", rows[0][1] == "Churhail")
+
+    # Modern exports put U+202F before am/pm; it must not reach the database.
+    narrow = mod.normalize_ts("21/04/2026", "11:06\u202fam")
+    check("narrow no-break space is stripped", "\u202f" not in narrow)
+    check("narrow no-break timestamp is clean", narrow == "2026-04-21 11:06am")
+
+    check(
+        "a file with no chat lines yields nothing",
+        mod.parse_file(Path(tempfile.gettempdir()) / "definitely_missing.txt") == [],
+    )
+
+
 def test_question_ledger() -> None:
     """Repetition counting, which drives router escalation."""
     from raees import db
@@ -442,6 +568,8 @@ def main() -> int:
     test_extraction()
     test_question_ledger()
     test_fts_integrity()
+    test_evidence()
+    test_evidence_parsing()
     test_critique_parsing()
     test_isolation()
 

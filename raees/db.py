@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     occurred_at TEXT,
     speaker    TEXT,
     body       TEXT NOT NULL,
+    digest     TEXT UNIQUE,
     created_at TEXT NOT NULL
 );
 
@@ -143,6 +144,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     tokenize = 'porter unicode61'
 );
 
+-- Raw source lines, indexed for retrieval. A stored fact can be traced back to
+-- the message it came from instead of only carrying a confidence number.
+CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
+    ref_id UNINDEXED,
+    speaker UNINDEXED,
+    body,
+    tokenize = 'porter unicode61'
+);
+
 -- Contradiction candidates: same subject, different asserted value.
 CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
     fact_id UNINDEXED,
@@ -153,10 +163,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session);
 CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source);
+CREATE INDEX IF NOT EXISTS idx_evidence_at ON evidence(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_decisions_review ON decisions(review_date);
 CREATE INDEX IF NOT EXISTS idx_questions_class ON questions(qclass);
 CREATE INDEX IF NOT EXISTS idx_learned_status ON learned(status);
 """
+
+# Columns introduced after the first schema. (table, column, declaration)
+# `_add_missing_columns` applies these to databases created by older versions,
+# which is why the evidence table can grow a digest without a new build.
+_ADDED_COLUMNS = (
+    ("evidence", "digest", "TEXT"),
+)
 
 
 def now() -> str:
@@ -209,9 +227,45 @@ def reset_db_path() -> None:
     _local.path = ""
 
 
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add columns added after a database was first created.
+
+    `CREATE TABLE IF NOT EXISTS` silently leaves an existing table alone, so a
+    new column never reaches a database created by an older version. Without
+    this the first query touching a new column fails with "no such column".
+    """
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table not created yet
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # SQLite cannot add a UNIQUE constraint to an existing column, so the
+    # uniqueness of evidence.digest is enforced by an index instead. Backfill
+    # first: rows added before the column existed have no digest, and a unique
+    # index allows several NULLs but nothing else to collide on.
+    rows = conn.execute(
+        "SELECT id, source, occurred_at, speaker, body FROM evidence "
+        "WHERE digest IS NULL"
+    ).fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE evidence SET digest=? WHERE id=?",
+            (
+                evidence_digest(r["source"], r["occurred_at"], r["speaker"], r["body"]),
+                r["id"],
+            ),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_digest ON evidence(digest)"
+    )
+
+
 def init_db() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     conn.commit()
 
 
@@ -624,6 +678,50 @@ def due_decisions() -> list[dict[str, Any]]:
     ]
 
 
+def open_decisions(limit: int = 50) -> list[dict[str, Any]]:
+    """Unresolved decisions, soonest review first, nulls last.
+
+    A decision with no review date is still open but has nothing to prompt for,
+    so it sorts after everything that is actually due.
+    """
+    conn = connect()
+    return [
+        dict(r)
+        for r in conn.execute(
+            """SELECT * FROM decisions
+               WHERE resolved_at IS NULL
+               ORDER BY review_date IS NULL, review_date, id DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    ]
+
+
+def resolve_decision(decision_id: int, actual_outcome: str) -> bool:
+    """Close a decision by recording what actually happened.
+
+    Returns False if the decision does not exist or was already resolved, so
+    the caller can answer 404 instead of silently pretending it worked. An
+    outcome must be recorded: resolving with a blank string would lose the one
+    piece of data that makes the ledger worth keeping.
+    """
+    outcome = (actual_outcome or "").strip()
+    if not outcome:
+        return False
+    conn = connect()
+    row = conn.execute(
+        "SELECT resolved_at FROM decisions WHERE id=?", (decision_id,)
+    ).fetchone()
+    if not row or row["resolved_at"]:
+        return False
+    conn.execute(
+        "UPDATE decisions SET actual_outcome=?, resolved_at=? WHERE id=?",
+        (outcome, now(), decision_id),
+    )
+    conn.commit()
+    return True
+
+
 def save_message(
     session: str,
     role: str,
@@ -698,6 +796,92 @@ def content_digest() -> str:
     return digest.hexdigest()
 
 
+def evidence_digest(source: str, occurred_at: str | None, speaker: str | None, body: str) -> str:
+    """Stable identity for one raw line, used to keep ingestion idempotent.
+
+    Hashes the fields rather than the row id, because the same line exported
+    twice has two different ids but must not be stored twice.
+    """
+    parts = "\x00".join((source or "", occurred_at or "", speaker or "", body or ""))
+    return hashlib.sha256(parts.encode("utf-8", errors="replace")).hexdigest()
+
+
+def add_evidence(
+    source: str,
+    body: str,
+    occurred_at: str | None = None,
+    speaker: str | None = None,
+) -> int | None:
+    """Store one raw source line. Returns None if it is already present.
+
+    Idempotent: re-ingesting an unchanged export adds nothing.
+    """
+    body = (body or "").strip()
+    if not body:
+        return None
+    digest = evidence_digest(source, occurred_at, speaker, body)
+    conn = connect()
+    row = conn.execute(
+        "SELECT id FROM evidence WHERE digest=?", (digest,)
+    ).fetchone()
+    if row:
+        return None
+    cur = conn.execute(
+        """INSERT INTO evidence(source, occurred_at, speaker, body, digest, created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (source, occurred_at, speaker, body, digest, now()),
+    )
+    conn.commit()
+    eid = int(cur.lastrowid)
+    conn.execute(
+        "INSERT INTO evidence_fts(ref_id, speaker, body) VALUES (?,?,?)",
+        (eid, speaker or "", body),
+    )
+    conn.commit()
+    return eid
+
+
+def search_evidence(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Full-text search over raw source lines.
+
+    Same stopword and OR handling as `search_memory`, so a natural question
+    returns partial matches instead of nothing.
+    """
+    conn = connect()
+    terms = [
+        "".join(ch for ch in w if ch.isalnum())
+        for w in query.lower().split()
+    ]
+    terms = sorted({t for t in terms if len(t) > 2})
+    if not terms:
+        return []
+    match = " OR ".join(f'"{t}"' for t in terms[:12])
+    try:
+        rows = conn.execute(
+            """SELECT ref_id, speaker,
+                      bm25(evidence_fts, 0, 0, 1.0) AS score
+               FROM evidence_fts
+               WHERE evidence_fts MATCH ?
+               ORDER BY score LIMIT ?""",
+            (match, limit * 3),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        detail = conn.execute(
+            "SELECT * FROM evidence WHERE id=?", (row["ref_id"],)
+        ).fetchone()
+        if detail:
+            d = dict(detail)
+            d["score"] = round(float(row["score"]), 4)
+            out.append(d)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def prune_fts_orphans() -> int:
     """Delete FTS rows whose parent row no longer exists. Returns rows removed.
 
@@ -724,6 +908,11 @@ def prune_fts_orphans() -> int:
             (kind,),
         )
         removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    cur = conn.execute(
+        """DELETE FROM evidence_fts
+           WHERE ref_id NOT IN (SELECT id FROM evidence)"""
+    )
+    removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     conn.commit()
     return removed
 

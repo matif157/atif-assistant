@@ -34,6 +34,10 @@ class DecisionIn(BaseModel):
     review_date: str | None = None
 
 
+class ResolveIn(BaseModel):
+    actual_outcome: str
+
+
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
@@ -193,9 +197,17 @@ def history(session: str) -> dict:
     return {"messages": db.history(session)}
 
 
+@app.get("/api/evidence")
+def evidence(q: str = "", limit: int = 20) -> JSONResponse:
+    """Search the raw source lines behind stored memory."""
+    if not q.strip():
+        return JSONResponse({"results": []})
+    return JSONResponse({"results": db.search_evidence(q, limit=min(limit, 100))})
+
+
 @app.get("/api/decisions")
 def decisions() -> dict:
-    return {"due": db.due_decisions()}
+    return {"due": db.due_decisions(), "open": db.open_decisions()}
 
 
 @app.post("/api/decisions")
@@ -209,6 +221,16 @@ def add_decision(payload: DecisionIn) -> dict:
         decided_at=db.now(),
     )
     return {"id": did}
+
+
+@app.post("/api/decisions/{decision_id}/resolve")
+def resolve_decision(decision_id: int, payload: ResolveIn) -> JSONResponse:
+    if not db.resolve_decision(decision_id, payload.actual_outcome):
+        return JSONResponse(
+            {"error": "not found, already resolved, or no outcome given"},
+            status_code=404,
+        )
+    return JSONResponse({"ok": True, "id": decision_id})
 
 
 @app.get("/")

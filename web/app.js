@@ -294,6 +294,149 @@ document.getElementById("btn-insights").addEventListener("click", async () => {
 });
 document.getElementById("close-insights").addEventListener("click", () => (iSheet.hidden = true));
 
+/* decision ledger */
+const dSheet = document.getElementById("decisions-sheet");
+const dBody = document.getElementById("decisions-body");
+const dForm = document.getElementById("decision-form");
+
+function decisionCard(d, due) {
+  const row = document.createElement("div");
+  row.className = due ? "mrow due" : "mrow";
+
+  const k = document.createElement("div");
+  k.className = "k";
+  const conf = d.confidence != null ? ` conf ${d.confidence}` : "";
+  if (due) {
+    k.textContent = `REVIEW DUE ${d.review_date}${conf}`;
+  } else {
+    k.textContent = d.review_date
+      ? `review ${d.review_date}${conf}`
+      : `no review date${conf}`;
+  }
+  row.appendChild(k);
+
+  const topic = document.createElement("div");
+  topic.className = "t";
+  topic.textContent = d.topic || "(untitled)";
+  row.appendChild(topic);
+
+  const what = document.createElement("div");
+  what.className = "m";
+  what.textContent = d.decision || "";
+  row.appendChild(what);
+
+  if (d.prediction) {
+    const p = document.createElement("div");
+    p.className = "m";
+    // Kept verbatim as typed. No model rewrites a prediction after the fact,
+    // because the point of the prediction is that it was made in advance.
+    p.textContent = `predicted: ${d.prediction}`;
+    row.appendChild(p);
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "resolve-row";
+  const input = document.createElement("input");
+  input.placeholder = "what actually happened";
+  const btn = document.createElement("button");
+  btn.className = "ghost small";
+  btn.textContent = "RESOLVE";
+  btn.addEventListener("click", async () => {
+    const text = input.value.trim();
+    if (!text) {
+      input.focus();
+      return;
+    }
+    btn.disabled = true;
+    const res = await fetch(`/api/decisions/${d.id}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actual_outcome: text }),
+    });
+    btn.disabled = false;
+    if (!res.ok) {
+      btn.textContent = "FAILED";
+      return;
+    }
+    row.remove();
+    if (!dBody.querySelector(".mrow")) {
+      dBody.textContent = "Nothing open.";
+    }
+  });
+  wrap.append(input, btn);
+  row.appendChild(wrap);
+  return row;
+}
+
+async function loadDecisions() {
+  dBody.textContent = "loading...";
+  try {
+    const { due = [], open = [] } = await (await fetch("/api/decisions")).json();
+    dBody.innerHTML = "";
+
+    const dueIds = new Set(due.map((d) => d.id));
+    const rest = open.filter((d) => !dueIds.has(d.id));
+
+    if (due.length) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = `DUE FOR REVIEW - ${due.length}`;
+      dBody.appendChild(h);
+      for (const d of due) dBody.appendChild(decisionCard(d, true));
+    }
+    if (rest.length) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = `OPEN - ${rest.length}`;
+      dBody.appendChild(h);
+      for (const d of rest) dBody.appendChild(decisionCard(d, false));
+    }
+    if (!dBody.childNodes.length) dBody.textContent = "Nothing open.";
+  } catch {
+    dBody.textContent = "Could not load decisions.";
+  }
+}
+
+document.getElementById("btn-decisions").addEventListener("click", () => {
+  dSheet.hidden = false;
+  loadDecisions();
+});
+document.getElementById("close-decisions").addEventListener("click", () => {
+  dSheet.hidden = true;
+});
+document.getElementById("toggle-log").addEventListener("click", () => {
+  dForm.hidden = !dForm.hidden;
+});
+document.getElementById("cancel-log").addEventListener("click", () => {
+  dForm.hidden = true;
+  dForm.reset();
+});
+dForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(dForm));
+  const conf = f.confidence === "" ? null : Number(f.confidence);
+  if (conf != null && (Number.isNaN(conf) || conf < 0 || conf > 1)) {
+    return;
+  }
+  const save = document.getElementById("save-decision");
+  save.disabled = true;
+  await fetch("/api/decisions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: f.topic,
+      decision: f.decision,
+      prediction: f.prediction || null,
+      confidence: conf,
+      review_date: f.review_date || null,
+    }),
+  });
+  save.disabled = false;
+  dForm.reset();
+  dForm.hidden = true;
+  loadDecisions();
+});
+
 /* learned facts sheet */
 const lSheet = document.getElementById("learned-sheet");
 const lBody = document.getElementById("learned-body");

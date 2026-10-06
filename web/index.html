@@ -19,6 +19,7 @@
   </div>
   <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
   <button class="ghost" id="btn-insights" title="What you keep asking">INSIGHTS</button>
+  <button class="ghost" id="btn-decisions" title="Decisions you owe a review">LEDGER</button>
 </header>
 
 <main id="chat"></main>
@@ -58,6 +59,26 @@
     <button class="ghost" id="close-learned">CLOSE</button>
   </div>
   <div id="learned-body"></div>
+</div>
+
+<div class="sheet" id="decisions-sheet" hidden>
+  <div class="sheet-head">
+    <strong>DECISION LEDGER</strong>
+    <button class="ghost" id="toggle-log">LOG A DECISION</button>
+    <button class="ghost" id="close-decisions">CLOSE</button>
+  </div>
+  <form id="decision-form" hidden>
+    <label>TOPIC<input name="topic" required placeholder="the thing you are deciding"></label>
+    <label>WHAT YOU ARE DOING<input name="decision" required placeholder="the action, concretely"></label>
+    <label>PREDICTION - what you expect to happen<textarea name="prediction" rows="2" placeholder="be specific enough to be wrong"></textarea></label>
+    <label>CONFIDENCE 0-1<input name="confidence" type="number" min="0" max="1" step="0.05" placeholder="0.6"></label>
+    <label>REVIEW ON<input name="review_date" type="date"></label>
+    <div class="form-actions">
+      <button type="submit" id="save-decision">SAVE</button>
+      <button type="button" class="ghost" id="cancel-log">CANCEL</button>
+    </div>
+  </form>
+  <div id="decisions-body"></div>
 </div>
 
 <script src="/static/app.js"></script>
