@@ -336,6 +336,36 @@ you want this to survive reboots.
 
 ---
 
+## Where this lives
+
+The repo is at `~/Projects/raees`, not `~/Documents`. macOS protects
+`~/Documents` from launchd agents, so an app living there cannot auto-start:
+`run.sh` fails with `Operation not permitted` and the server never comes up,
+with nothing in the log to suggest the cause.
+
+`~/Projects` avoids that entirely and needs no Full Disk Access grant, which
+matters because the alternative is granting `/bin/bash` read access to every
+file on the machine just to start one app.
+
+Both processes are LaunchAgents and come back at login:
+
+| Label | What |
+|---|---|
+| `io.raees.tailscaled` | Tailscale daemon, custom socket, userspace mode |
+| `io.raees.server` | this app, bound to loopback only |
+
+```bash
+launchctl kickstart -k gui/$(id -u)/io.raees.server   # restart the app
+launchctl kickstart -k gui/$(id -u)/io.raees.tailscaled # restart the tunnel
+launchctl list | grep raees                           # check both
+```
+
+`RAEES_ARCHIVE_DIR` in `.env` points back at the archive in `~/Documents`.
+That is fine because the archive is read only when you seed, not at runtime,
+and seeding runs in a shell rather than under launchd.
+
+---
+
 ## Privacy
 
 - The database lives in `data/raees.db` and is gitignored. It is never pushed.
