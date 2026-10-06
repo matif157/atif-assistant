@@ -142,7 +142,13 @@ async function ask(question) {
       session = data.session;
       localStorage.setItem("raees.session", session);
     }
-    if (data.learned?.length) refreshLearned();
+    // Learning runs server-side after the reply is sent, so the response no
+    // longer carries `learned`. Poll once after a short delay instead.
+    if (data.learned?.length) {
+      refreshLearned();
+    } else {
+      setTimeout(refreshLearnedIfAny, 2500);
+    }
   } catch (e) {
     removeTyping();
     const detail = e instanceof SyntaxError
@@ -293,33 +299,44 @@ const lSheet = document.getElementById("learned-sheet");
 const lBody = document.getElementById("learned-body");
 
 async function refreshLearned() {
+  let candidates = [];
+  try {
+    ({ candidates } = await (await fetch("/api/learned")).json());
+  } catch {
+    return; // non-critical
+  }
+  if (!candidates?.length) return;
+  lSheet.hidden = false;
+  lBody.innerHTML = "";
+  for (const c of candidates) {
+    const row = document.createElement("div");
+    row.className = "mrow";
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = c.text;
+    const btns = document.createElement("div");
+    btns.className = "m";
+    for (const [label, act] of [["APPROVE", "approve"], ["REJECT", "reject"]]) {
+      const b = document.createElement("button");
+      b.className = "ghost small";
+      b.textContent = label;
+      b.addEventListener("click", async () => {
+        await fetch(`/api/learned/${c.id}/${act}`, { method: "POST" });
+        row.remove();
+        if (!lBody.childNodes.length) lSheet.hidden = true;
+      });
+      btns.appendChild(b);
+    }
+    row.append(t, btns);
+    lBody.appendChild(row);
+  }
+}
+
+/* Poll for background-extracted candidates without blocking the reply. */
+async function refreshLearnedIfAny() {
   try {
     const { candidates } = await (await fetch("/api/learned")).json();
-    if (!candidates?.length) return;
-    lSheet.hidden = false;
-    lBody.innerHTML = "";
-    for (const c of candidates) {
-      const row = document.createElement("div");
-      row.className = "mrow";
-      const t = document.createElement("div");
-      t.className = "t";
-      t.textContent = c.text;
-      const btns = document.createElement("div");
-      btns.className = "m";
-      for (const [label, act] of [["APPROVE", "approve"], ["REJECT", "reject"]]) {
-        const b = document.createElement("button");
-        b.className = "ghost small";
-        b.textContent = label;
-        b.addEventListener("click", async () => {
-          await fetch(`/api/learned/${c.id}/${act}`, { method: "POST" });
-          row.remove();
-          if (!lBody.childNodes.length) lSheet.hidden = true;
-        });
-        btns.appendChild(b);
-      }
-      row.append(t, btns);
-      lBody.appendChild(row);
-    }
+    if (candidates?.length) refreshLearned();
   } catch {
     /* non-critical */
   }

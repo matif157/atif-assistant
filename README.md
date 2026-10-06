@@ -222,7 +222,10 @@ Re-seed any time:
 .venv/bin/python scripts/seed_memory.py
 ```
 
-It deletes and rebuilds seeded rows, so it is safe to repeat.
+It deletes and rebuilds seeded rows, so it is safe to repeat: running it twice
+in a row leaves the database byte-identical by content hash. It also prunes
+search-index entries whose parent row was deleted, so re-seeding does not leave
+orphans that retrieval could cite.
 
 Search memory from the UI with the **MEM** button.
 
@@ -234,17 +237,28 @@ Raees binds to `127.0.0.1` by default. Tailscale gives you a private URL that
 works on any device on your account, with no port forwarding and no auth to
 build.
 
-**One-time setup (needs your login):**
+On this machine Tailscale runs in **userspace mode**, which has no tun device.
+That has one consequence worth knowing: the tailnet IP cannot be bound by a
+local process, so `RAEES_BIND=tailnet` falls back to loopback and says so. Serve
+proxies loopback and does not need a tun device, so it still works.
 
-```bash
-open -a Tailscale
+**Serve must be enabled once in the admin console** (it is off by default):
+
+```
+https://login.tailscale.com/f/serve
 ```
 
-Sign in, approve the Mac, then expose Raees:
+Approve the prompt for this node. Then start Raees and expose it:
 
 ```bash
-tailscale serve --bg 8770
+./run.sh
+export PATH="$HOME/.local/bin:$PATH"
+ts serve --bg 8770
 ```
+
+`ts` is a wrapper that passes the custom socket this installation uses. If you
+are using the standard system Tailscale instead, `tailscale serve --bg 8770`
+works and `ts` is unnecessary.
 
 Raees is then reachable at `http://<your-machine-name>.<tailnet>.ts.net:8770`
 from your phone or any other device signed into the same account.
@@ -255,8 +269,12 @@ reach it.
 To undo:
 
 ```bash
-tailscale serve reset
+ts serve reset
 ```
+
+Note that the `tailscaled` process here was started by hand, so it does not come
+back automatically after a restart. Re-run it, or install the Tailscale app if
+you want this to survive reboots.
 
 ---
 
@@ -302,9 +320,14 @@ app.py
    └── llm.py         Groq → Gemini → OpenRouter → Ollama
 ```
 
-Every answer costs up to three model calls: draft, audit, and a revision if
-the audit found defects. Without a key, one call is skipped and the answer is
-honest about not having reasoned.
+An answer costs up to two model calls: a draft, then an adversarial audit that
+returns a corrected version in the same response if it found defects. The third
+stage in the diagram, the brake, is deterministic regex work and costs nothing.
+Without a key the model calls are skipped entirely and the answer is honest
+about not having reasoned.
+
+Memory extraction is a separate call that runs after the answer, and only when
+the reply looks like it contains a durable fact.
 
 Swap SQLite for Postgres later only if you actually need it. For one user,
 you almost certainly won't.
@@ -331,7 +354,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-81 checks across eight groups:
+91 checks across nine groups:
 
 | Group | Covers |
 |---|---|
@@ -343,10 +366,14 @@ you almost certainly won't.
 | learning gates | feelings, beliefs, clinical claims, third parties rejected; approve and reject round trips |
 | extraction | strict format parsing, dedup, EMPTY marker, offline no-op |
 | question ledger | counts, distribution |
-| isolation | the real database is unchanged |
+| fts integrity | orphan detection, prune, re-index without duplicates |
+| isolation | the real database is unchanged, by row count and by content hash |
 
-Every group runs against a scratch database. `test_isolation` asserts the real
-one is byte-for-byte unchanged after the whole run.
+Every group runs against a scratch database. At the end of the run the test
+suite compares the real database against a snapshot taken before it started,
+both by row count and by a SHA-256 over every row. The digest is what makes the
+claim meaningful: counts alone cannot distinguish "unchanged" from "one row
+deleted and another added".
 
 ---
 
@@ -362,6 +389,15 @@ should be rare.
 **Port busy** — `RAEES_PORT=8780 ./run.sh`
 
 **Reinstall Python** — `uv python install 3.12 && uv venv --python 3.12`
+
+**Rebuild the venv** — `requirements.lock` pins the exact dependency set the
+working venv was built from, so a fresh rebuild is reproducible:
+
+```bash
+rm -rf .venv
+uv venv --python 3.12
+uv pip install -r requirements.lock
+```
 
 ---
 

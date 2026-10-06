@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -75,8 +75,21 @@ def memory(q: str = "", limit: int = 20) -> JSONResponse:
     return JSONResponse({"results": rows})
 
 
+async def _extract_in_background(question: str, answer: str, provider: str) -> None:
+    """Learn from one exchange after the reply has already gone out.
+
+    Runs as a background task so an extra provider call cannot slow the user
+    down. Errors are swallowed: a failed extraction must not surface as a
+    failed request, and must never crash the worker.
+    """
+    try:
+        await learn.extract(question, answer, provider)
+    except Exception:
+        pass
+
+
 @app.post("/api/ask")
-async def ask(payload: Ask) -> dict:
+async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     session = payload.session or uuid.uuid4().hex[:12]
 
     # No mode in, no mode out. The router decides, and the user sees why.
@@ -119,12 +132,15 @@ async def ask(payload: Ask) -> dict:
 
     result["session"] = session
 
-    # Learn after answering, so a slow extraction never delays the reply.
-    learned = await learn.extract(
-        payload.question, result["text"], result.get("provider", "offline")
+    # Memory extraction runs after the response is sent. It was awaited inline
+    # before, which meant a slow extra provider call delayed the answer even
+    # though the comment claimed otherwise.
+    background.add_task(
+        _extract_in_background,
+        payload.question,
+        result["text"],
+        result.get("provider", "offline"),
     )
-    if learned:
-        result["learned"] = learned
 
     return result
 

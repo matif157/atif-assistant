@@ -197,6 +197,12 @@ def seed(archive_dir: Path | None = None) -> dict[str, int]:
     conn.execute("DELETE FROM rules WHERE source LIKE 'seed:%'")
     conn.commit()
 
+    # Those deletes are plain SQL, so they bypass _fts_index and leave the
+    # search index pointing at rows that are gone. Re-seeding used to leave a
+    # trail of orphans that retrieval would happily return. Prune them before
+    # adding anything back, otherwise the same content gets indexed twice.
+    db.prune_fts_orphans()
+
     added = {"facts": 0, "episodes": 0, "patterns": 0, "rules": 0}
 
     # --- patterns (curated) ---

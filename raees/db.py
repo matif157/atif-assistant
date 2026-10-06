@@ -12,6 +12,7 @@ and conversation history so memory survives restarts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -656,20 +657,75 @@ def history(session: str, limit: int = 12) -> list[dict[str, Any]]:
     return [dict(r) for r in reversed(rows)]
 
 
+COUNTED_TABLES = (
+    "facts",
+    "episodes",
+    "patterns",
+    "rules",
+    "decisions",
+    "messages",
+    "evidence",
+    "questions",
+    "learned",
+)
+
+
 def counts() -> dict[str, int]:
     conn = connect()
-    tables = (
-        "facts",
-        "episodes",
-        "patterns",
-        "rules",
-        "decisions",
-        "messages",
-        "evidence",
-        "questions",
-        "learned",
-    )
-    return {t: conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] for t in tables}
+    return {t: conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] for t in COUNTED_TABLES}
+
+
+def content_digest() -> str:
+    """Hash of every row in every counted table, order-independent per table.
+
+    `counts()` alone cannot tell "one row deleted, one row added" from "no
+    change at all". A test asserting only on counts can pass while rows are
+    being rewritten, so anything claiming to protect the real database should
+    compare this instead.
+    """
+    conn = connect()
+    digest = hashlib.sha256()
+    for table in COUNTED_TABLES:
+        digest.update(f"\n##{table}\n".encode())
+        rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+        # Sort by the row's own JSON so row order in the table cannot make two
+        # identical databases hash differently.
+        for raw in sorted(
+            json.dumps(dict(r), sort_keys=True, default=str) for r in rows
+        ):
+            digest.update(raw.encode("utf-8", errors="replace"))
+            digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def prune_fts_orphans() -> int:
+    """Delete FTS rows whose parent row no longer exists. Returns rows removed.
+
+    Memory rows are removed by `source LIKE 'seed:%'` and by approve/reject
+    flows. Any deletion done as plain SQL bypasses `_fts_index`, so the search
+    index keeps pointing at rows that are gone. Those orphans are worse than
+    noise: `search_memory()` happily returns them, so retrieval can cite a
+    fact that no longer exists and was never user-approved.
+    """
+    conn = connect()
+    parents = {
+        "fact": "facts",
+        "episode": "episodes",
+        "pattern": "patterns",
+        "rule": "rules",
+        "learned": "learned",
+    }
+    removed = 0
+    for kind, table in parents.items():
+        cur = conn.execute(
+            f"""DELETE FROM memory_fts
+                 WHERE kind = ?
+                   AND ref_id NOT IN (SELECT id FROM {table})""",
+            (kind,),
+        )
+        removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    conn.commit()
+    return removed
 
 
 def is_seeded() -> bool:

@@ -311,6 +311,72 @@ def test_question_ledger() -> None:
     db.reset_db_path()
 
 
+def test_fts_integrity() -> None:
+    """The search index must not outlive the rows it points at."""
+    from raees import db
+
+    print("\nfts integrity")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "fts.db")
+        db.init_db()
+        conn = db.connect()
+
+        fid = db.add_fact(text="my father never took money from me", source="seed:test")
+        check("indexed fact is findable", bool(db.search_memory("father", limit=3)))
+        check(
+            "index row exists",
+            conn.execute(
+                "SELECT COUNT(*) c FROM memory_fts WHERE kind='fact' AND ref_id=?", (fid,)
+            ).fetchone()["c"] == 1,
+        )
+
+        # Reproduce the re-seed path: plain SQL delete, no _fts_index call.
+        conn.execute("DELETE FROM facts WHERE id=?", (fid,))
+        conn.commit()
+        check(
+            "plain SQL delete leaves an orphan",
+            conn.execute(
+                "SELECT COUNT(*) c FROM memory_fts WHERE kind='fact' AND ref_id=?", (fid,)
+            ).fetchone()["c"] == 1,
+        )
+
+        removed = db.prune_fts_orphans()
+        check("prune reports the orphan", removed == 1)
+        check("orphan is gone from the index", db.search_memory("father", limit=3) == [])
+
+        # Re-indexing the same content must not duplicate index rows.
+        db.add_fact(text="my father never took money from me", source="seed:test")
+        check(
+            "re-index does not duplicate",
+            conn.execute(
+                "SELECT COUNT(*) c FROM memory_fts WHERE kind='fact' AND ref_id=?", (fid,)
+            ).fetchone()["c"] == 1,
+        )
+        check("prune is a no-op when clean", db.prune_fts_orphans() == 0)
+
+        learned_id = db.add_learned(
+            text="i bought a road bike in march 2026",
+            kind="fact",
+            source="learned:test",
+            subject="bicycle",
+        )
+        check(
+            "learned candidate is indexed",
+            conn.execute(
+                "SELECT COUNT(*) c FROM memory_fts WHERE kind='learned' AND ref_id=?",
+                (learned_id,),
+            ).fetchone()["c"] == 1,
+        )
+        conn.execute("DELETE FROM learned WHERE id=?", (learned_id,))
+        conn.commit()
+        check(
+            "prune also cleans learned orphans",
+            db.prune_fts_orphans() == 1,
+        )
+
+    db.reset_db_path()
+
+
 def test_critique_parsing() -> None:
     """The self-audit must never let a bad revision replace a good draft."""
     from raees.engine import _self_critique, audit_response
@@ -357,11 +423,13 @@ def test_isolation() -> None:
 
 def main() -> int:
     before = None
+    before_digest = None
     try:
         from raees import db
 
         db.init_db()
         before = db.counts()
+        before_digest = db.content_digest()
     except Exception:
         pass
 
@@ -373,6 +441,7 @@ def main() -> int:
     test_learning_gates()
     test_extraction()
     test_question_ledger()
+    test_fts_integrity()
     test_critique_parsing()
     test_isolation()
 
@@ -383,8 +452,12 @@ def main() -> int:
         db.init_db()
         after = db.counts()
         check(
-            "real database unchanged by tests",
+            "real database row counts unchanged by tests",
             before == after,
+        )
+        check(
+            "real database content unchanged by tests",
+            before_digest == db.content_digest(),
         )
 
     print(f"\n{PASS} passed, {FAIL} failed")
