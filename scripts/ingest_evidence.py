@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from raees import db  # noqa: E402
+from atif_assistant import db  # noqa: E402
 
 # "19/04/2026, 3:57 am - Speaker: body", also the bracketed iOS variant
 # "[19/04/2026, 3:57:58 am] Speaker: body".

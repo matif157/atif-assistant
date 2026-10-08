@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from raees import db  # noqa: E402
-from raees.config import ARCHIVE_DIR  # noqa: E402
+from atif_assistant import db  # noqa: E402
+from atif_assistant.config import ARCHIVE_DIR  # noqa: E402
 
 # Patterns are the highest-value memory, so they're curated explicitly rather
 # than blindly parsed. Triggers are the keywords the Pattern Radar matches on.

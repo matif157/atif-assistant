@@ -6,7 +6,7 @@ const sendBtn = document.getElementById("send");
 const statusline = document.getElementById("statusline");
 const dot = document.getElementById("dot");
 
-let session = localStorage.getItem("raees.session") || null;
+let session = localStorage.getItem("atif-assistant.session") || null;
 
 const ROUTE_LABEL = {
   ask: "ANSWERED",
@@ -140,7 +140,7 @@ async function ask(question) {
     addBot(data);
     if (data.session) {
       session = data.session;
-      localStorage.setItem("raees.session", session);
+      localStorage.setItem("atif-assistant.session", session);
     }
     // Learning runs server-side after the reply is sent, so the response no
     // longer carries `learned`. Poll once after a short delay instead.

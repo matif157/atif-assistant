@@ -24,7 +24,7 @@ BIND="${RAEES_HOST:-127.0.0.1}"
 # internet. If the IP is not bindable it falls back to loopback and says so,
 # rather than failing to start.
 if [ "${RAEES_BIND:-}" = "tailnet" ]; then
-  TS_SOCK="${TS_SOCKET:-$HOME/.local/share/raees-tailscale/tailscaled.sock}"
+  TS_SOCK="${TS_SOCKET:-$HOME/.local/share/atif-assistant-tailscale/tailscaled.sock}"
   TS_BIN="$(command -v tailscale || echo /opt/homebrew/bin/tailscale)"
   if [ -S "$TS_SOCK" ]; then
     TS_IP="$("$TS_BIN" --socket="$TS_SOCK" status --json 2>/dev/null \
@@ -64,6 +64,6 @@ else
 fi
 echo "          local:  http://127.0.0.1:${PORT}"
 
-exec .venv/bin/python -m uvicorn raees.app:app \
+exec .venv/bin/python -m uvicorn atif_assistant.app:app \
   --host "$BIND" \
   --port "$PORT"

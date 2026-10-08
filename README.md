@@ -1,4 +1,4 @@
-# Raees
+# Atif Assistant
 
 A personal intelligence system. Persistent memory, a Reality Engine that
 labels every claim, a Challenge Mode that argues against you, and a Pattern
@@ -24,17 +24,17 @@ cp .env.example .env
 ./run.sh
 ```
 
-Without a key, Raees still runs: retrieval, the Pattern Radar, the brake and
+Without a key, Atif Assistant still runs: retrieval, the Pattern Radar, the brake and
 memory search all work. Only free-text generation is disabled.
 
 ---
 
-## No modes. Raees routes.
+## No modes. Atif Assistant routes.
 
-There is no mode picker. You ask; Raees decides how the question deserves to
+There is no mode picker. You ask; Atif Assistant decides how the question deserves to
 be answered, and shows you its reasoning above each reply.
 
-| Your question looks like | Raees does | Why |
+| Your question looks like | Atif Assistant does | Why |
 |---|---|---|
 | *"does she love me more"* | CHALLENGED | Comparing feelings is not measurable. Answering it would invent certainty. |
 | *"am I worth it"* | CHALLENGED | Nobody can hand out a verdict on your worth. The underlying need gets answered instead. |
@@ -47,7 +47,7 @@ The route strip under each answer shows the mode and the one-line reason.
 
 ### Repetition escalation
 
-Raees counts how often you ask each *class* of question. Ask the same class
+Atif Assistant counts how often you ask each *class* of question. Ask the same class
 three times and the loop itself becomes the subject:
 
 > This class of question has come up 5 times. Stop re-answering it. Name the
@@ -106,12 +106,12 @@ After the audit, a deterministic pass runs over the final text:
 
 Subject/value pairs are extracted from every fact and indexed separately. When
 two stored facts about the same subject cannot both be true, the conflict is
-injected into context ahead of the answer and surfaced in Insights. Raees must
+injected into context ahead of the answer and surfaced in Insights. Atif Assistant must
 state the conflict rather than silently pick a side.
 
 ### Memory learning
 
-After each answer Raees reads the exchange and proposes durable facts. Three
+After each answer Atif Assistant reads the exchange and proposes durable facts. Three
 gates must all pass:
 
 1. the model proposes it in strict `FACT | subject | statement` format
@@ -140,7 +140,7 @@ Every substantive claim gets a label.
 [PREDICTION]  likely, not certain
 ```
 
-A post-generation brake in `raees/engine.py` then audits the answer:
+A post-generation brake in `atif-assistant/engine.py` then audits the answer:
 
 - Any manufactured comparison or percentage is flagged and withdrawn.
 - An answer with no labels at all is flagged as unverified.
@@ -187,7 +187,7 @@ curl -s -X POST http://127.0.0.1:8770/api/ask \
   -d '{"question":"should I quit my job"}'
 ```
 
-No `mode` field. The response carries the route Raees chose, why, the Reality
+No `mode` field. The response carries the route Atif Assistant chose, why, the Reality
 labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 
 | Endpoint | Purpose |
@@ -235,12 +235,12 @@ Search memory from the UI with the **MEM** button.
 `CONTEXT-PROFESSIONAL.md` holds the professional side: name, role, location,
 every profile URL, and what is deployed where. It is a separate file because it
 has a different half-life than the rest. URLs go stale; relationships do not.
-Each claim carries a date it was last checked against a live source, so Raees
+Each claim carries a date it was last checked against a live source, so Atif Assistant
 knows the difference between confirmed and merely claimed.
 
 Unverified professional claims are stored as **rules**, not facts. A question is
 not a fact, and storing "the Fiverr handle might be wrong" at high confidence
-would let Raees assert it. Right now three are outstanding: which Fiverr handle
+would let Atif Assistant assert it. Right now three are outstanding: which Fiverr handle
 is live, whether the Upwork id changed, and whether to repair or retire the
 InfinityFree mirror.
 
@@ -291,7 +291,7 @@ string would discard the only datum that makes the entry worth keeping.
 
 ## Access from any device
 
-Raees binds to `127.0.0.1` by default. Tailscale gives you a private URL that
+Atif Assistant binds to `127.0.0.1` by default. Tailscale gives you a private URL that
 works on any device on your account, with no port forwarding and no auth to
 build.
 
@@ -306,7 +306,7 @@ proxies loopback and does not need a tun device, so it still works.
 https://login.tailscale.com/f/serve
 ```
 
-Approve the prompt for this node. Then start Raees and expose it:
+Approve the prompt for this node. Then start Atif Assistant and expose it:
 
 ```bash
 ./run.sh
@@ -318,7 +318,7 @@ ts serve --bg 8770
 are using the standard system Tailscale instead, `tailscale serve --bg 8770`
 works and `ts` is unnecessary.
 
-Raees is then reachable at `http://<your-machine-name>.<tailnet>.ts.net:8770`
+Atif Assistant is then reachable at `http://<your-machine-name>.<tailnet>.ts.net:8770`
 from your phone or any other device signed into the same account.
 
 Nothing is exposed to the public internet. Only devices on your tailnet can
@@ -338,7 +338,7 @@ you want this to survive reboots.
 
 ## Where this lives
 
-The repo is at `~/Projects/raees`, not `~/Documents`. macOS protects
+The repo is at `~/Projects/atif-assistant`, not `~/Documents`. macOS protects
 `~/Documents` from launchd agents, so an app living there cannot auto-start:
 `run.sh` fails with `Operation not permitted` and the server never comes up,
 with nothing in the log to suggest the cause.
@@ -351,13 +351,13 @@ Both processes are LaunchAgents and come back at login:
 
 | Label | What |
 |---|---|
-| `io.raees.tailscaled` | Tailscale daemon, custom socket, userspace mode |
-| `io.raees.server` | this app, bound to loopback only |
+| `io.atif.assistant.tailscaled` | Tailscale daemon, custom socket, userspace mode |
+| `io.atif.assistant.server` | this app, bound to loopback only |
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/io.raees.server   # restart the app
-launchctl kickstart -k gui/$(id -u)/io.raees.tailscaled # restart the tunnel
-launchctl list | grep raees                           # check both
+launchctl kickstart -k gui/$(id -u)/io.atif.assistant.server   # restart the app
+launchctl kickstart -k gui/$(id -u)/io.atif.assistant.tailscaled # restart the tunnel
+launchctl list | grep atif-assistant                           # check both
 ```
 
 `RAEES_ARCHIVE_DIR` in `.env` points back at the archive in `~/Documents`.
@@ -368,7 +368,7 @@ and seeding runs in a shell rather than under launchd.
 
 ## Privacy
 
-- The database lives in `data/raees.db` and is gitignored. It is never pushed.
+- The database lives in `data/atif-assistant.db` and is gitignored. It is never pushed.
 - Your archive files are read at seed time only; they are not copied in.
 - The PWA caches the app shell for offline opening, but `/api/*` is never
   cached, so answers are always live.
@@ -427,15 +427,15 @@ you almost certainly won't.
 
 | File | Role |
 |---|---|
-| `raees/config.py` | env-driven settings |
-| `raees/db.py` | schema, FTS5, contradictions, question ledger, test isolation |
-| `raees/constitution.py` | invariants, brake rules, intent classifier |
-| `raees/router.py` | mode selection and repetition escalation |
-| `raees/radar.py` | pattern matching |
-| `raees/llm.py` | provider failover, live Ollama probe, offline fallback |
-| `raees/engine.py` | Reality Engine, challenge, decide, self-audit, brake |
-| `raees/learn.py` | gated memory extraction |
-| `raees/app.py` | API + static serving |
+| `atif-assistant/config.py` | env-driven settings |
+| `atif-assistant/db.py` | schema, FTS5, contradictions, question ledger, test isolation |
+| `atif-assistant/constitution.py` | invariants, brake rules, intent classifier |
+| `atif-assistant/router.py` | mode selection and repetition escalation |
+| `atif-assistant/radar.py` | pattern matching |
+| `atif-assistant/llm.py` | provider failover, live Ollama probe, offline fallback |
+| `atif-assistant/engine.py` | Reality Engine, challenge, decide, self-audit, brake |
+| `atif-assistant/learn.py` | gated memory extraction |
+| `atif-assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `tests/test_core.py` | 81 tests |
 

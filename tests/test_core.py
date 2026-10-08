@@ -26,8 +26,8 @@ def check(name: str, cond: bool) -> None:
 
 
 def test_brake() -> None:
-    from raees.engine import audit_response, parse_labels
-    from raees import constitution as C
+    from atif_assistant.engine import audit_response, parse_labels
+    from atif_assistant import constitution as C
 
     print("\nbrake")
     check(
@@ -61,7 +61,7 @@ def test_brake() -> None:
 
 
 def test_radar() -> None:
-    from raees import db, radar
+    from atif_assistant import db, radar
 
     print("\nradar")
     check("keeps clock tokens like 3am", "3am" in radar._tokens("i miss her at 3am"))
@@ -103,7 +103,7 @@ def test_radar() -> None:
 
 
 def test_retrieval() -> None:
-    from raees import db
+    from atif_assistant import db
 
     print("\nretrieval")
     with tempfile.TemporaryDirectory() as tmp:
@@ -133,7 +133,7 @@ def test_retrieval() -> None:
 
 def test_router() -> None:
     """The router decides the treatment. No user-visible mode."""
-    from raees.router import route, question_class
+    from atif_assistant.router import route, question_class
 
     print("\nrouter")
     cases = [
@@ -183,7 +183,7 @@ def test_router() -> None:
 
 def test_contradictions() -> None:
     """Two stored facts that cannot both be true must be surfaced."""
-    from raees import db
+    from atif_assistant import db
 
     print("\ncontradictions")
     with tempfile.TemporaryDirectory() as tmp:
@@ -210,8 +210,8 @@ def test_contradictions() -> None:
 
 def test_learning_gates() -> None:
     """Nothing becomes durable memory without passing every gate."""
-    from raees import learn
-    from raees import db
+    from atif_assistant import learn
+    from atif_assistant import db
 
     print("\nlearning gates")  # noqa: E501
     check("rejects a feeling", not learn._is_durable("my mood", "I feel anxious about it"))
@@ -242,14 +242,14 @@ def test_learning_gates() -> None:
 def test_extraction() -> None:
     """End-to-end: proposal text in, gated candidates out."""
     import asyncio
-    from raees import learn
+    from atif_assistant import learn
 
     print("\nextraction")
 
     async def run() -> list[dict]:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "e.db"
-            from raees import db
+            from atif_assistant import db
 
             db.use_test_db(db_path)
             db.init_db()
@@ -290,7 +290,7 @@ def test_extraction() -> None:
 
 def test_evidence() -> None:
     """Raw source lines are stored once, findable, and cannot outlive a delete."""
-    from raees import db
+    from atif_assistant import db
 
     print("\nevidence")
     with tempfile.TemporaryDirectory() as tmp:
@@ -416,7 +416,7 @@ def test_evidence_parsing() -> None:
 
 def test_question_ledger() -> None:
     """Repetition counting, which drives router escalation."""
-    from raees import db
+    from atif_assistant import db
 
     print("\nquestion ledger")
     with tempfile.TemporaryDirectory() as tmp:
@@ -439,7 +439,7 @@ def test_question_ledger() -> None:
 
 def test_fts_integrity() -> None:
     """The search index must not outlive the rows it points at."""
-    from raees import db
+    from atif_assistant import db
 
     print("\nfts integrity")
     with tempfile.TemporaryDirectory() as tmp:
@@ -505,7 +505,7 @@ def test_fts_integrity() -> None:
 
 def test_critique_parsing() -> None:
     """The self-audit must never let a bad revision replace a good draft."""
-    from raees.engine import _self_critique, audit_response
+    from atif_assistant.engine import _self_critique, audit_response
     import inspect
 
     print("\nself-audit")
@@ -538,7 +538,7 @@ def test_critique_parsing() -> None:
 
 def test_isolation() -> None:
     """The real database must be untouched by a test run."""
-    from raees import db
+    from atif_assistant import db
 
     print("\nisolation")
     check(
@@ -556,7 +556,7 @@ def test_remote_web() -> None:
     """
     from fastapi.testclient import TestClient
 
-    from raees.app import app
+    from atif_assistant.app import app
 
     client = TestClient(app)
 
@@ -602,7 +602,7 @@ def main() -> int:
     before = None
     before_digest = None
     try:
-        from raees import db
+        from atif_assistant import db
 
         db.init_db()
         before = db.counts()
@@ -626,7 +626,7 @@ def main() -> int:
     test_remote_web()
 
     if before is not None:
-        from raees import db
+        from atif_assistant import db
 
         db.reset_db_path()
         db.init_db()
