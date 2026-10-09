@@ -1087,6 +1087,7 @@ function createLocalRecorder() {
     ctx: null,
     source: null,
     proc: null,
+    gain: null,
     chunks: [],
     sampleRate: 16000,
     running: false,
@@ -1124,12 +1125,19 @@ function createLocalRecorder() {
       if (rec.onTick) rec.onTick(rec, rms);
     };
     rec.source.connect(rec.proc);
-    rec.proc.connect(rec.ctx.destination);
+    // ScriptProcessor only runs while connected to a destination, but sending
+    // the mic straight there would echo every word through the speakers and the
+    // recogniser would hear itself. Route it through a muted gain instead.
+    rec.gain = rec.ctx.createGain();
+    rec.gain.gain.value = 0;
+    rec.proc.connect(rec.gain);
+    rec.gain.connect(rec.ctx.destination);
   };
   rec.stop = async () => {
     if (!rec.running) return null;
     rec.running = false;
     try { rec.proc.disconnect(); } catch { /* ignore */ }
+    try { rec.gain.disconnect(); } catch { /* ignore */ }
     try { rec.source.disconnect(); } catch { /* ignore */ }
     try { rec.stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
     try { await rec.ctx.close(); } catch { /* ignore */ }
@@ -1258,6 +1266,9 @@ function callResume() {
 
 function stopCallRecognition() {
   clearTimeout(callRetry);
+  // Always release the offline recorder's busy flag, or a new call after END
+  // would find the loop "busy" and never listen again.
+  callLocalBusy = false;
   if (callLocalRec) {
     try {
       callLocalRec.stop();
@@ -1455,7 +1466,11 @@ async function callListenLocal() {
     callLocalBusy = false;
     if (!callActive) return;
     if (!blob || blob.size < 100) {
-      callResume();
+      // Nothing recorded: arm the next turn directly. callResume() would be a
+      // no-op here because the phase is still "listening".
+      callRetry = setTimeout(() => {
+        if (callActive) callListen();
+      }, 350);
       return;
     }
     let text = "";
@@ -1464,7 +1479,9 @@ async function callListenLocal() {
     } catch (err) {
       if (!callActive) return;
       callTranscriptEl.textContent = "Offline speech failed: " + err.message;
-      callResume();
+      callRetry = setTimeout(() => {
+        if (callActive) callListen();
+      }, 600);
       return;
     }
     if (!callActive) return;
