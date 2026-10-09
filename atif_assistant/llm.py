@@ -24,7 +24,7 @@ async def _groq(model: str, messages: list[dict], **kw: Any) -> str:
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         raise ProviderError("no GROQ_API_KEY")
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
@@ -58,7 +58,7 @@ async def _gemini(model: str, messages: list[dict], **kw: Any) -> str:
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={key}"
     )
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
         r = await client.post(
             url,
             json={
@@ -78,7 +78,7 @@ async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         raise ProviderError("no OPENROUTER_API_KEY")
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
         r = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -106,7 +106,7 @@ async def _ollama(model: str, messages: list[dict], **kw: Any) -> str:
         for m in messages
         if m["role"] != "system"
     )
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=kw.get("timeout", 120)) as client:
         r = await client.post(
             f"{base}/api/generate",
             json={
@@ -166,33 +166,99 @@ async def ollama_is_up() -> bool:
         return False
 
 
-def available_providers() -> list[dict[str, Any]]:
-    """Sync snapshot of provider configuration.
+PROVIDER_KEYS = {
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
 
-    Ollama reports ready=False here because reachability cannot be checked
-    without I/O. Use ``ready_providers()`` for the live check.
+
+def available_providers() -> list[dict[str, Any]]:
+    """Sync snapshot of provider *configuration* only.
+
+    ``ready`` here is false for everything on purpose. A non-empty key string
+    is not proof the key is accepted: a revoked or wrong-provider key (a
+    ``sk-or-`` OpenRouter key pasted into GROQ_API_KEY, for instance) is still
+    "configured" and would be reported ready by a presence check alone. Use
+    ``probe_providers()`` for the live answer.
     """
-    keys = {
-        "groq": "GROQ_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-    }
     out = []
     for name in PROVIDER_ORDER:
-        if name == "ollama":
-            out.append(
-                {
-                    "name": name,
-                    "ready": False,
-                    "note": "local - probed live at request time",
-                }
-            )
-        else:
-            out.append(
-                {
-                    "name": name,
-                    "ready": bool(os.environ.get(keys.get(name, ""))),
-                    "note": MODEL_DEFAULTS.get(name, ""),
-                }
-            )
+        out.append(
+            {
+                "name": name,
+                "ready": False,
+                "configured": bool(os.environ.get(PROVIDER_KEYS.get(name, "")))
+                if name != "ollama"
+                else True,
+                "note": MODEL_DEFAULTS.get(name, ""),
+            }
+        )
+    return out
+
+
+# Live probe results, cached so a status poll does not spend API quota.
+_PROBE_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
+_PROBE_TTL = 120.0
+
+
+async def _probe_one(name: str) -> dict[str, Any]:
+    """Make the smallest possible real call to one provider."""
+    key = PROVIDER_KEYS.get(name)
+    if name != "ollama" and not os.environ.get(key or ""):
+        return {"ready": False, "configured": False, "error": "no key set"}
+    if name == "ollama":
+        ok = await ollama_is_up()
+        return {
+            "ready": ok,
+            "configured": True,
+            "error": None if ok else "ollama not reachable",
+        }
+    handler = HANDLERS.get(name)
+    try:
+        text = await handler(
+            MODEL_DEFAULTS.get(name, ""),
+            [{"role": "user", "content": "ping"}],
+            temperature=0.0,
+            max_tokens=1,
+            timeout=6,
+        )
+        return {"ready": bool(text is not None), "configured": True, "error": None}
+    except httpx.HTTPStatusError as exc:
+        return {
+            "ready": False,
+            "configured": True,
+            "error": f"HTTP {exc.response.status_code}",
+        }
+    except Exception as exc:  # noqa: BLE001 - any failure means not ready
+        return {"ready": False, "configured": True, "error": type(exc).__name__}
+
+
+async def probe_providers(force: bool = False) -> list[dict[str, Any]]:
+    """Live readiness for every provider, cached for ``_PROBE_TTL`` seconds."""
+    import time
+
+    now = time.monotonic()
+    if (
+        not force
+        and _PROBE_CACHE["result"] is not None
+        and now - _PROBE_CACHE["at"] < _PROBE_TTL
+    ):
+        return _PROBE_CACHE["result"]
+
+    import asyncio
+
+    probes = await asyncio.gather(*(_probe_one(n) for n in PROVIDER_ORDER))
+    out = [
+        {
+            "name": name,
+            "ready": probe["ready"],
+            "configured": probe["configured"],
+            "note": MODEL_DEFAULTS.get(name, ""),
+            "error": probe["error"],
+        }
+        for name, probe in zip(PROVIDER_ORDER, probes)
+    ]
+    _PROBE_CACHE["at"] = now
+    _PROBE_CACHE["result"] = out
     return out

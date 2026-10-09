@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from . import db, engine, learn, router
 from .config import TAILSCALE_HOST, WEB_DIR
-from .llm import available_providers, ollama_is_up
+from .llm import probe_providers
 
 app = FastAPI(title="Atif Assistant", version="0.1.0")
 
@@ -45,15 +45,10 @@ def _startup() -> None:
 
 
 @app.get("/api/health")
-async def health() -> dict:
-    providers = available_providers()
-    if not any(p["ready"] for p in providers):
-        # No key set anywhere - check whether a local model is actually
-        # serving before telling the user there is nothing available.
-        if await ollama_is_up():
-            for p in providers:
-                if p["name"] == "ollama":
-                    p["ready"] = True
+async def health(probe: bool = False) -> dict:
+    # `ready` is a live result, not just "a key string exists". Cached for two
+    # minutes unless ?probe=1 forces a fresh check.
+    providers = await probe_providers(force=probe)
     return {
         "ok": True,
         "seeded": db.is_seeded(),
