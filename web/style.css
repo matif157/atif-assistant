@@ -212,6 +212,8 @@ textarea:focus { outline: none; border-color: var(--acc); }
    stays in the layout and blocks clicks on the composer. */
 .sheet[hidden] { display: none; }
 .sheet-head { display: flex; gap: 10px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.sheet-head strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sheet-head > button:last-child { margin-left: auto; }
 .sheet-head input {
   flex: 1;
   background: var(--panel);
@@ -270,17 +272,33 @@ textarea:focus { outline: none; border-color: var(--acc); }
   font-weight: 600;
 }
 #decisions-body { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+#insights-body,
+#learned-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+#insights-body > .ihead:first-child,
+#learned-body > .ihead:first-child { margin-top: 0; }
 .resolve-row { display: flex; gap: 6px; margin-top: 8px; }
 .resolve-row input { flex: 1; min-width: 0; }
 
 /* upload + settings sheets */
 .upload-body,
 .settings-body {
+  flex: 1;
+  min-height: 0;
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .upload-body label,
 .settings-body label {
