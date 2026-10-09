@@ -16,6 +16,21 @@ if [ -f .env ]; then
   set +a
 fi
 
+# First run on a fresh machine: the offline zip deliberately ships without
+# .venv, so create it and install the pinned set before starting. No-op once
+# .venv exists, so it never touches an already-working install.
+if [ ! -x .venv/bin/python ]; then
+  echo "Atif Assistant  ->  creating .venv and installing dependencies..." >&2
+  if command -v uv >/dev/null 2>&1; then
+    uv venv .venv >/dev/null
+    uv pip install --python .venv/bin/python -r requirements.lock
+  else
+    python3 -m venv .venv
+    .venv/bin/python -m pip install --upgrade pip >/dev/null
+    .venv/bin/python -m pip install -r requirements.lock
+  fi
+fi
+
 PORT="${ATIF_ASSISTANT_PORT:-8770}"
 BIND="${ATIF_ASSISTANT_HOST:-127.0.0.1}"
 

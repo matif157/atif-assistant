@@ -476,6 +476,19 @@ def test_evidence_parsing() -> None:
         mod.parse_file(Path(tempfile.gettempdir()) / "definitely_missing.txt") == [],
     )
 
+    # A message that is only invisible direction marks must be dropped, while a
+    # message that merely contains one is kept.
+    with tempfile.TemporaryDirectory() as tmp:
+        p2 = Path(tmp) / "invisible.txt"
+        p2.write_text(
+            "19/04/2026, 3:57 am - a: \u200e\u200f\u200b\n"
+            "19/04/2026, 3:58 am - a: hello\u200eworld\n",
+            encoding="utf-8",
+        )
+        rows2 = mod.parse_file(p2)
+    check("a message of only invisible marks is dropped", len(rows2) == 1)
+    check("a message containing an invisible mark is kept", "hello" in rows2[0][2])
+
 
 def test_question_ledger() -> None:
     """Repetition counting, which drives router escalation."""

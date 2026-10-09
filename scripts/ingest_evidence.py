@@ -50,8 +50,13 @@ _NOISE = (
     "null",
 )
 
-# "‎" and friends: invisible direction marks that break exact matching.
-_INVISIBLE = re.compile(r"[‎‏‪-‮⁦-⁩﻿]")
+# Zero-width and bidi formatting characters: invisible marks that break exact
+# matching and can leave a "message" that renders as nothing. Written with
+# escapes so the set is unambiguous: zero-width space/joiners, LRM/RLM, the
+# bidi embedding/override/isolate ranges, invisible operators, and the BOM.
+_INVISIBLE = re.compile(
+    "[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]"
+)
 
 
 def normalize_ts(date: str, time: str) -> str:
@@ -90,10 +95,17 @@ def parse_file(path: Path) -> list[tuple[str | None, str | None, str, str]]:
 
     def flush() -> None:
         body = "\n".join(current_body).strip()
-        if body and current_speaker is not None:
-            low = body.lower()
-            if not any(n in low for n in _NOISE) and not _INVISIBLE.search(body) == body:
-                out.append((current_ts, current_speaker, body, source))
+        if not body or current_speaker is None:
+            return
+        low = body.lower()
+        if any(n in low for n in _NOISE):
+            return
+        # Drop messages that are nothing but direction marks / zero-width
+        # joiners. (The old check compared a regex Match to a string, which was
+        # never true, so this filter never actually ran.)
+        if not _INVISIBLE.sub("", body).strip():
+            return
+        out.append((current_ts, current_speaker, body, source))
 
     for raw in text.splitlines():
         line = raw.rstrip()
