@@ -1676,15 +1676,32 @@ def test_tts() -> None:
     check("wav sample rate is written", struct.unpack("<I", wav[24:28])[0] == 24000)
 
     orig_key = tts.llm.provider_key
+    orig_espeak = tts.ESPEAK
     tts.llm.provider_key = lambda name: ""
+    tts.ESPEAK = None  # pretend espeak-ng is not installed
     try:
         r = tts.synthesize("hello")
         check(
-            "speech without a key fails soft",
+            "speech without a key or offline voice fails soft",
             r["audio"] is None and "gemini" in (r["reason"] or "").lower(),
         )
     finally:
         tts.llm.provider_key = orig_key
+        tts.ESPEAK = orig_espeak
+
+    if orig_espeak:
+        # The offline voice must rescue spoken replies when the server voice is
+        # unavailable, which is what makes Urdu work with no network.
+        tts.llm.provider_key = lambda name: ""
+        try:
+            r = tts.synthesize("hello", "en")
+            check(
+                "speech falls back to the offline voice",
+                bool(r.get("audio")) and (r.get("model") or "").startswith("espeak"),
+            )
+            check("offline speech is a wav", bytes(r["audio"])[:4] == b"RIFF")
+        finally:
+            tts.llm.provider_key = orig_key
 
     with tempfile.TemporaryDirectory() as tmp:
         db.use_test_db(Path(tmp) / "tts.db")
@@ -1716,6 +1733,88 @@ def test_tts() -> None:
             )
         finally:
             tts.synthesize = orig_syn
+
+    db.reset_db_path()
+
+
+def test_stt() -> None:
+    """Offline speech recognition (whisper.cpp) and its endpoint fail soft."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, stt
+    from atif_assistant.app import app
+
+    print("\nstt (offline speech)")
+
+    check(
+        "stt maps browser language codes",
+        stt._lang("ur-PK") == "ur" and stt._lang("en-US") == "en" and stt._lang(None) == "auto",
+    )
+
+    orig_bin = stt._BIN
+    orig_model = stt._MODEL
+    stt._BIN = None
+    try:
+        r = stt.transcribe(b"RIFF....")
+        check(
+            "offline speech without the tool fails soft",
+            r["text"] is None and "whisper" in (r["reason"] or "").lower(),
+        )
+    finally:
+        stt._BIN = orig_bin
+
+    stt._MODEL = str(Path("/nonexistent/ggml.bin"))
+    try:
+        r = stt.transcribe(b"RIFF....")
+        check(
+            "offline speech without the model fails soft",
+            r["text"] is None and "model" in (r["reason"] or "").lower(),
+        )
+        check("offline status is honest", stt.status()["available"] is False)
+    finally:
+        stt._MODEL = orig_model
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "stt.db")
+        db.init_db()
+        client = TestClient(app)
+
+        h = client.get("/api/health").json()
+        check("health reports offline speech", "speech" in h and "offline_in" in h["speech"])
+
+        orig_tr = stt.transcribe
+        stt.transcribe = lambda raw, lang="auto": {
+            "text": "السلام علیکم",
+            "reason": None,
+            "meta": {"model": "stub"},
+        }
+        try:
+            import base64 as _b64
+
+            r = client.post(
+                "/api/stt",
+                json={"audio": _b64.b64encode(b"RIFF0000").decode(), "lang": "ur-PK"},
+            )
+            check(
+                "stt endpoint returns the transcript",
+                r.status_code == 200 and r.json().get("text") == "السلام علیکم",
+            )
+        finally:
+            stt.transcribe = orig_tr
+
+        stt.transcribe = lambda raw, lang="auto": {
+            "text": None,
+            "reason": "offline speech model is not downloaded",
+            "meta": {},
+        }
+        try:
+            r = client.post("/api/stt", json={"audio": _b64.b64encode(b"x").decode()})
+            check(
+                "stt endpoint reports an honest failure",
+                r.status_code == 503 and "model" in r.json().get("error", "").lower(),
+            )
+        finally:
+            stt.transcribe = orig_tr
 
     db.reset_db_path()
 
@@ -1758,6 +1857,7 @@ def main() -> int:
     test_read_fallbacks()
     test_plan()
     test_tts()
+    test_stt()
     test_structure_guard()
 
     if before is not None:

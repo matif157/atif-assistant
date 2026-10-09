@@ -6,6 +6,7 @@ you remote access without exposing a port.
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, location, plan, router, tts, uploads
+from . import db, engine, learn, location, plan, router, stt, tts, uploads
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .llm import (
     invalidate_probe_cache,
@@ -37,6 +38,11 @@ class Ask(BaseModel):
 
 class TtsIn(BaseModel):
     text: str
+    lang: str | None = None
+
+
+class SttIn(BaseModel):
+    audio: str
     lang: str | None = None
 
 
@@ -74,6 +80,11 @@ async def health(probe: bool = False) -> dict:
         "seeded": db.is_seeded(),
         "counts": db.counts(),
         "providers": providers,
+        "speech": {
+            "server": tts.server_available(),
+            "offline_out": tts.offline_available(),
+            "offline_in": stt.status(),
+        },
         "tailscale_host": TAILSCALE_HOST,
     }
 
@@ -111,6 +122,30 @@ def make_speech(payload: TtsIn) -> Response:
     return Response(
         content=audio,
         media_type="audio/wav",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/stt")
+def make_transcript(payload: SttIn) -> JSONResponse:
+    """Transcribe a recorded WAV clip locally with whisper.cpp.
+
+    The browser Web Speech API needs a network; this endpoint turns a recorded
+    clip into text offline (Urdu included) when whisper.cpp and a model are
+    installed. It fails with a clear reason so the client can fall back.
+    """
+    try:
+        raw = base64.b64decode(payload.audio, validate=False)
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "audio was not valid base64"}, status_code=400)
+    result = stt.transcribe(raw, payload.lang or "auto")
+    if not result.get("text"):
+        return JSONResponse(
+            {"error": result.get("reason") or "speech recognition unavailable"},
+            status_code=503,
+        )
+    return JSONResponse(
+        {"text": result["text"], "meta": result.get("meta") or {}},
         headers={"Cache-Control": "no-store"},
     )
 

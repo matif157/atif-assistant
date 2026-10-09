@@ -622,6 +622,7 @@ const settings = {
   speak: "off",
   voice: "",
   stt: "en-US",
+  sttEngine: "auto",
   detail: "normal",
   accent: "",
   theme: "dark",
@@ -653,6 +654,8 @@ const STRINGS = {
     uploadedNoVision: "Saved. Images and scans need a vision provider - add a Gemini key in Settings.",
     uploadFailed: "Upload failed. The file may be too large (max 25 MB).",
     saved: "Settings saved.",
+    offlineReady: "On-device speech is installed. The mic and calls work offline, including Urdu.",
+    offlineMissing: "On-device speech isn't installed. Browser speech needs an internet connection.",
   },
   ur: {
     placeholder: "پوچھیں۔ عاطف اسسٹنٹ خود جواب دے گا۔",
@@ -664,6 +667,8 @@ const STRINGS = {
     uploadedNoVision: "محفوظ ہو گیا۔ تصویر یا اسکین پڑھنے کے لیے سیٹنگز میں Gemini کلید شامل کریں۔",
     uploadFailed: "اپ لوڈ ناکام۔ فائل بہت بڑی ہو سکتی ہے (زیادہ سے زیادہ 25 MB)۔",
     saved: "سیٹنگز محفوظ ہو گئیں۔",
+    offlineReady: "آن ڈیوائس آواز انسٹال ہے۔ مائیک اور کال بغیر انٹرنیٹ، اردو میں بھی، کام کرتے ہیں۔",
+    offlineMissing: "آن ڈیوائس آواز انسٹال نہیں ہے۔ براؤزر کی آواز کے لیے انٹرنیٹ درکار ہے۔",
   },
 };
 
@@ -700,6 +705,7 @@ async function saveSettings() {
     speak: settings.speak,
     voice: settings.voice,
     stt: settings.stt,
+    sttEngine: settings.sttEngine,
     detail: settings.detail,
     accent: settings.accent,
     theme: settings.theme,
@@ -965,6 +971,14 @@ function toggleMic() {
     return;
   }
 
+  // Offline / on-device recognition (whisper.cpp on the server). Tap to start,
+  // tap again to stop; it also stops by itself once you finish a sentence.
+  if (wantLocalStt()) {
+    if (localMicRec) stopLocalMic();
+    else startLocalMic();
+    return;
+  }
+
   if (!recognizer) recognizer = setupRecognizer();
   if (!recognizer) {
     alert("Speech recognition is not supported in this browser.");
@@ -984,6 +998,215 @@ function toggleMic() {
   }
 }
 
+/* ------------------------------------------------- offline speech input */
+
+// The browser's SpeechRecognition sends audio to Google, so it needs a network.
+// When whisper.cpp is installed on the server we record a clip and transcribe it
+// there instead, which is what lets the mic and the call work with no internet
+// and in Urdu.
+let localSttReady = false;
+let localMicRec = null;
+
+function wantLocalStt() {
+  if (settings.sttEngine === "local") return true;
+  if (settings.sttEngine === "browser") return false;
+  return localSttReady; // "auto": use the offline engine when it is installed
+}
+
+function browserSttAvailable() {
+  return Boolean(
+    (window.SpeechRecognition || window.webkitSpeechRecognition) ||
+      (window.AndroidVoice && typeof window.AndroidVoice.listen === "function")
+  );
+}
+
+function pcmToWav(chunks, sampleRate) {
+  let length = 0;
+  for (const c of chunks) length += c.length;
+  const buffer = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, length * 2, true);
+  let offset = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Blob([view], { type: "audio/wav" });
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(new Error("could not read the recording"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function transcribeLocal(blob) {
+  const b64 = await blobToBase64(blob);
+  const res = await fetch("/api/stt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audio: b64, lang: settings.stt }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  return (data.text || "").trim();
+}
+
+// Record 16 kHz mono audio into a WAV the server can transcribe. A simple
+// energy test tracks whether the user has started and finished speaking.
+function createLocalRecorder() {
+  const rec = {
+    stream: null,
+    ctx: null,
+    source: null,
+    proc: null,
+    chunks: [],
+    sampleRate: 16000,
+    running: false,
+    speaking: false,
+    started: 0,
+    lastVoice: 0,
+    onTick: null,
+  };
+  rec.start = async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("microphone not available");
+    }
+    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    rec.ctx = new AC({ sampleRate: 16000 });
+    rec.sampleRate = rec.ctx.sampleRate || 16000;
+    rec.source = rec.ctx.createMediaStreamSource(rec.stream);
+    rec.proc = rec.ctx.createScriptProcessor(4096, 1, 1);
+    rec.chunks = [];
+    rec.running = true;
+    rec.speaking = false;
+    rec.started = performance.now();
+    rec.lastVoice = rec.started;
+    rec.proc.onaudioprocess = (e) => {
+      if (!rec.running) return;
+      const ch = e.inputBuffer.getChannelData(0);
+      rec.chunks.push(new Float32Array(ch));
+      let sum = 0;
+      for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+      const rms = Math.sqrt(sum / ch.length);
+      if (rms > 0.012) {
+        rec.speaking = true;
+        rec.lastVoice = performance.now();
+      }
+      if (rec.onTick) rec.onTick(rec, rms);
+    };
+    rec.source.connect(rec.proc);
+    rec.proc.connect(rec.ctx.destination);
+  };
+  rec.stop = async () => {
+    if (!rec.running) return null;
+    rec.running = false;
+    try { rec.proc.disconnect(); } catch { /* ignore */ }
+    try { rec.source.disconnect(); } catch { /* ignore */ }
+    try { rec.stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+    try { await rec.ctx.close(); } catch { /* ignore */ }
+    return pcmToWav(rec.chunks, rec.sampleRate);
+  };
+  return rec;
+}
+
+function fallBackToBrowserMic() {
+  if (!recognizer) recognizer = setupRecognizer();
+  if (!recognizer) return;
+  recognizer.lang = settings.stt;
+  try {
+    recognizer.start();
+    listening = true;
+    mic?.classList.add("active");
+  } catch {
+    listening = false;
+  }
+}
+
+async function startLocalMic() {
+  if (localMicRec) return;
+  let rec;
+  try {
+    rec = createLocalRecorder();
+    await rec.start();
+  } catch (err) {
+    if (browserSttAvailable()) {
+      fallBackToBrowserMic();
+      return;
+    }
+    alert("Microphone unavailable: " + err.message);
+    return;
+  }
+  localMicRec = rec;
+  mic?.classList.add("active");
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    stopLocalMic();
+  };
+  rec.onTick = (r) => {
+    const now = performance.now();
+    const dur = (now - r.started) / 1000;
+    if (dur > 15 || (r.speaking && now - r.lastVoice > 1100) || (!r.speaking && dur > 7)) {
+      finish();
+    }
+  };
+}
+
+async function stopLocalMic() {
+  const rec = localMicRec;
+  if (!rec) return;
+  localMicRec = null;
+  mic?.classList.remove("active");
+  const blob = await rec.stop();
+  if (!blob || blob.size < 100) return;
+  let text = "";
+  try {
+    text = await transcribeLocal(blob);
+  } catch (err) {
+    if (browserSttAvailable()) {
+      fallBackToBrowserMic();
+      return;
+    }
+    alert("Offline speech failed: " + err.message);
+    return;
+  }
+  if (text) {
+    input.value = text;
+    input.focus();
+    voiceInputPending = true;
+  }
+}
+
 /* ------------------------------------------------------------- voice call */
 
 const callSheet = document.getElementById("call-sheet");
@@ -998,12 +1221,17 @@ const CALL_LABEL = { listening: "LISTENING", thinking: "THINKING", speaking: "SP
 let callActive = false;
 let callPhase = "idle"; // listening | thinking | speaking
 let callRecognizer = null;
+let callLocalRec = null;
+let callLocalBusy = false;
 let callGotResult = false;
 let callRetry = null;
 let callResumeTimer = null;
 let callErrorStreak = 0;
 
 function callSupported() {
+  // The offline engine makes a call possible even in browsers with no built-in
+  // speech recognition.
+  if (wantLocalStt()) return true;
   return Boolean(
     (window.SpeechRecognition || window.webkitSpeechRecognition) ||
       (window.AndroidVoice && typeof window.AndroidVoice.listen === "function")
@@ -1030,6 +1258,14 @@ function callResume() {
 
 function stopCallRecognition() {
   clearTimeout(callRetry);
+  if (callLocalRec) {
+    try {
+      callLocalRec.stop();
+    } catch {
+      /* already stopped */
+    }
+    callLocalRec = null;
+  }
   if (callRecognizer) {
     try {
       callRecognizer.onend = null;
@@ -1079,6 +1315,10 @@ function endCall() {
 
 function callListen() {
   if (!callActive) return;
+  if (wantLocalStt()) {
+    callListenLocal();
+    return;
+  }
   clearTimeout(callRetry);
   callGotResult = false;
   callSetPhase("listening");
@@ -1165,6 +1405,81 @@ function callListen() {
   } catch {
     callRetry = setTimeout(callListen, 400);
   }
+}
+
+async function callListenLocal() {
+  if (!callActive || callLocalBusy || callLocalRec) return;
+  callLocalBusy = true;
+  clearTimeout(callRetry);
+  callGotResult = false;
+  callSetPhase("listening");
+  callTranscriptEl.textContent = "";
+  callHeardEl.textContent = "Listening…";
+
+  let rec;
+  try {
+    rec = createLocalRecorder();
+    await rec.start();
+  } catch (err) {
+    callLocalBusy = false;
+    // If "auto" picked offline and the mic is the problem, retry once online.
+    if (
+      settings.sttEngine === "auto" &&
+      (window.SpeechRecognition || window.webkitSpeechRecognition)
+    ) {
+      settings.sttEngine = "browser";
+      callListen();
+      return;
+    }
+    callTranscriptEl.textContent = "Microphone unavailable: " + err.message;
+    endCall();
+    return;
+  }
+  if (!callActive) {
+    try {
+      rec.stop();
+    } catch {
+      /* ignore */
+    }
+    callLocalBusy = false;
+    return;
+  }
+  callLocalRec = rec;
+
+  let finished = false;
+  const finish = async () => {
+    if (finished) return;
+    finished = true;
+    callLocalRec = null;
+    const blob = await rec.stop();
+    callLocalBusy = false;
+    if (!callActive) return;
+    if (!blob || blob.size < 100) {
+      callResume();
+      return;
+    }
+    let text = "";
+    try {
+      text = await transcribeLocal(blob);
+    } catch (err) {
+      if (!callActive) return;
+      callTranscriptEl.textContent = "Offline speech failed: " + err.message;
+      callResume();
+      return;
+    }
+    if (!callActive) return;
+    if (text) callSubmit(text);
+    else callResume();
+  };
+
+  rec.onTick = (r, rms) => {
+    const now = performance.now();
+    const dur = (now - r.started) / 1000;
+    if (rms > 0.012) callHeardEl.textContent = "Hearing you…";
+    if (dur > 20 || (r.speaking && now - r.lastVoice > 1100) || (!r.speaking && dur > 8)) {
+      finish();
+    }
+  };
 }
 
 async function callSubmit(text) {
@@ -1447,6 +1762,7 @@ const setLang = document.getElementById("set-lang");
 const setSpeak = document.getElementById("set-speak");
 const setVoice = document.getElementById("set-voice");
 const setStt = document.getElementById("set-stt");
+const setSttEngine = document.getElementById("set-stt-engine");
 const setDetail = document.getElementById("set-detail");
 const settingsStatus = document.getElementById("settings-status");
 
@@ -1454,6 +1770,14 @@ function syncSettingsForm() {
   if (setLang) setLang.value = settings.lang;
   if (setSpeak) setSpeak.value = settings.speak;
   if (setStt) setStt.value = settings.stt;
+  if (setSttEngine) {
+    setSttEngine.value = settings.sttEngine || "auto";
+    const note = document.getElementById("stt-engine-note");
+    if (note) {
+      const s = STRINGS[settings.lang === "ur" ? "ur" : "en"];
+      note.textContent = localSttReady ? s.offlineReady : s.offlineMissing;
+    }
+  }
   if (setDetail) setDetail.value = settings.detail;
   const setAccentEl = document.getElementById("set-accent");
   if (setAccentEl) setAccentEl.value = settings.accent;
@@ -1491,6 +1815,8 @@ if (setLang) {
 }
 if (setSpeak) setSpeak.addEventListener("change", () => (settings.speak = setSpeak.value));
 if (setStt) setStt.addEventListener("change", () => (settings.stt = setStt.value));
+if (setSttEngine)
+  setSttEngine.addEventListener("change", () => (settings.sttEngine = setSttEngine.value));
 if (setDetail) setDetail.addEventListener("change", () => (settings.detail = setDetail.value));
 if (setVoice) setVoice.addEventListener("change", () => (settings.voice = setVoice.value));
 {
@@ -1857,6 +2183,7 @@ document.getElementById("install-app").addEventListener("click", async () => {
   try {
     const r = await fetch("/api/health");
     const h = await r.json();
+    localSttReady = Boolean(h.speech && h.speech.offline_in && h.speech.offline_in.available);
     const ready = h.providers.find((p) => p.ready);
     dot.className = "dot on";
     statusline.textContent = ready ? `${ready.name} · ${h.counts.facts}f ${h.counts.episodes}e ${h.counts.patterns}p` : "no model key";

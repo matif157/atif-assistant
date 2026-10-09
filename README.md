@@ -215,6 +215,7 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `POST /api/rules/{id}/approve` | enforce a candidate rule |
 | `DELETE /api/rules/{id}` | remove a rule |
 | `POST /api/tts` | synthesize a spoken reply (WAV) for languages with no device voice |
+| `POST /api/stt` | transcribe a recorded clip locally (whisper.cpp), for offline speech |
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
@@ -486,14 +487,43 @@ Most systems ship **no Urdu voice**, so the browser would read Urdu text with an
 English voice and it comes out as gibberish. When the language has no matching
 device voice the reply is synthesized **on the server** instead (`/api/tts`,
 Gemini speech) and played back as audio; a device voice is used only when one
-matches. This also makes **TEST VOICE** work for Urdu. Speaking a question with
-the mic makes the assistant answer **out loud** even if SPEAK REPLIES is off, so
-the mic button is a real voice assistant. The Android bridge (`AndroidVoice`) is
+matches. If the Gemini voice is turned off or unreachable, `/api/tts` falls back
+to the **offline `espeak-ng` voice** (which has Urdu), so spoken replies still
+work with no network and no key. This also makes **TEST VOICE** work for Urdu.
+Speaking a question with the mic makes the assistant answer **out loud** even if
+SPEAK REPLIES is off, so the mic button is a real voice assistant. The Android bridge (`AndroidVoice`) is
 used inside the app, otherwise the browser Web Speech API. Speech recognition
 needs HTTPS (or localhost) and mic permission; browsers without it show a clear
 message instead of failing silently. A stuck text-to-speech engine cannot stall
 the call: a word-count fallback releases the loop if the speech event never
 arrives.
+
+### Offline speech (no internet, Urdu included)
+
+The browser's Web Speech API sends audio to Google, so it cannot recognise
+speech offline. If **whisper.cpp** and a GGML model are installed, Atif
+Assistant records the clip and transcribes it **on the server** instead:
+
+```sh
+brew install whisper.cpp espeak-ng
+mkdir -p ~/.local/share/atif-assistant/models
+curl -L -o ~/.local/share/atif-assistant/models/ggml-base.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+```
+
+**Settings → SPEECH RECOGNITION** then offers *Automatic* (use the offline
+engine whenever it is installed), *Browser (online)* or *On-device (offline)*.
+The choice applies to both the mic button and the call, and the call becomes
+possible even in browsers with no built-in recogniser. `/api/health` reports
+`speech.offline_in` (recognition) and `speech.offline_out` (speech synthesis) so
+the app knows what is available. Everything fails soft: if the tool or model is
+missing, the browser recogniser is used and a clear reason is shown.
+
+The server locates `whisper-cli` and `espeak-ng` even under launchd's minimal
+`PATH` (it also searches `/opt/homebrew/bin` and `/usr/local/bin`), and the
+LaunchAgent sets a PATH for good measure. Model and binary paths are
+overridable with `ATIF_ASSISTANT_WHISPER_MODEL`, `ATIF_ASSISTANT_MODEL_DIR`,
+`ATIF_ASSISTANT_WHISPER_BIN` and `ATIF_ASSISTANT_ESPEAK_BIN`.
 
 The call stays **on-brand**: it is not a chatty companion. Social
 pleasantries ("how are you", "what's your name", greetings) are routed to a single
@@ -645,12 +675,13 @@ you almost certainly won't.
 | `atif_assistant/extract.py` | text/PDF/Office/WhatsApp extraction |
 | `atif_assistant/vision.py` | images and scans via a vision model (Gemini) |
 | `atif_assistant/transcribe.py` | voice notes via Groq Whisper |
-| `atif_assistant/tts.py` | server-side speech for languages with no device voice (Gemini) |
+| `atif_assistant/tts.py` | server speech (Gemini) with an offline `espeak-ng` fallback |
+| `atif_assistant/stt.py` | offline speech recognition via whisper.cpp |
 | `atif_assistant/plan.py` | document → strict checkable plan |
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 323 checks |
+| `tests/test_core.py` | 332 checks |
 
 ---
 
@@ -660,7 +691,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-323 checks across twenty-seven groups:
+332 checks across twenty-eight groups:
 
 | Group | Covers |
 |---|---|
@@ -685,7 +716,8 @@ you almost certainly won't.
 | upload reading | readable uploads report read + chars and reach evidence search; images report read=false |
 | read fallbacks | images go to the vision model, audio to transcription when configured; honest reason when not |
 | plan | document → grounded TITLE/RULE draft; strict rules enforced, candidates approvable, rules removable |
-| tts | server speech for voice-less languages, label stripping, valid WAV, honest 503 when it cannot |
+| tts | server speech for voice-less languages, offline `espeak-ng` fallback, label stripping, valid WAV, honest 503 when it cannot |
+| stt | offline recognition language mapping, missing tool/model fail soft, `/api/stt` transcript and honest 503, health reports the engines |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
 | providers | key/model precedence, masking, settings/export redaction, save/clear, on/off toggle, TEST endpoint |
 | ask endpoint | every question class routes to the honest mode; exchange persisted; repeat counting |
