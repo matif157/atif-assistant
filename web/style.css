@@ -148,7 +148,7 @@ footer { border-top: 1px solid var(--line); background: var(--bg); padding: 10px
 }
 .route-mode.challenge { color: var(--warn); border-color: rgba(251,191,36,.4); }
 .route-mode.decide { color: var(--acc); border-color: rgba(94,234,212,.35); }
-.route-why { color: var(--dim2, var(--dim)); opacity: .8; }
+.route-why { color: var(--dim); opacity: .8; }
 
 .chip.crit { color: #c4b5fd; border-color: rgba(196,181,253,.35); }
 .chip.repeat { color: var(--warn); border-color: rgba(251,191,36,.3); }

@@ -571,7 +571,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 225 checks |
+| `tests/test_core.py` | 230 checks |
 
 ---
 
@@ -581,7 +581,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-225 checks across twenty groups:
+230 checks across twenty groups:
 
 | Group | Covers |
 |---|---|
