@@ -721,6 +721,34 @@ function loadVoices() {
   }
 }
 
+// Some browsers populate the voice list asynchronously.
+if ("speechSynthesis" in window) {
+  try { window.speechSynthesis.onvoiceschanged = loadVoices; } catch { /* ignore */ }
+}
+
+// The spoken language follows the reply language, not the microphone language.
+// A microphone set to English while the answer is Urdu must still be spoken
+// with an Urdu voice.
+function speechLang() {
+  return settings.lang === "ur" ? "ur-PK" : "en-US";
+}
+
+function pickVoice(lang) {
+  const pref = lang.slice(0, 2);
+  const chosen = settings.voice && voices.find((v) => v.name === settings.voice);
+  return (
+    chosen ||
+    voices.find((v) => (v.lang || "").replace("_", "-").startsWith(lang)) ||
+    voices.find((v) => (v.lang || "").replace("_", "-").startsWith(pref)) ||
+    null
+  );
+}
+
+function hasVoiceFor(lang) {
+  const pref = lang.slice(0, 2);
+  return voices.some((v) => (v.lang || "").replace("_", "-").startsWith(pref));
+}
+
 function speak(text, opts = {}) {
   if (!opts.force && settings.speak !== "on") return;
   if (!text) return;
@@ -741,9 +769,10 @@ function speak(text, opts = {}) {
   // Inside the Android app, prefer the native text-to-speech engine. WebView
   // does not implement the Web Speech API. There is no completion callback in
   // the bridge, so estimate from the word count.
+  const lang = speechLang();
   if (window.AndroidVoice && typeof window.AndroidVoice.speak === "function") {
     try {
-      window.AndroidVoice.speak(clean, settings.stt);
+      window.AndroidVoice.speak(clean, lang);
       const words = clean.split(/\s+/).filter(Boolean).length;
       const estimate = Math.min(Math.max(words * 380, 1200), 30000);
       setTimeout(done, estimate);
@@ -760,12 +789,9 @@ function speak(text, opts = {}) {
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(clean);
-    const pref = settings.lang === "ur" ? "ur" : "en";
-    const chosen = settings.voice && voices.find((v) => v.name === settings.voice);
-    const match = chosen || voices.find((v) => (v.lang || "").startsWith(settings.stt))
-      || voices.find((v) => (v.lang || "").startsWith(pref));
+    const match = pickVoice(lang);
     if (match) u.voice = match;
-    u.lang = settings.stt;
+    u.lang = lang;
     u.onend = done;
     u.onerror = done;
     window.speechSynthesis.speak(u);
@@ -863,6 +889,7 @@ let callRecognizer = null;
 let callGotResult = false;
 let callRetry = null;
 let callResumeTimer = null;
+let callErrorStreak = 0;
 
 function callSupported() {
   return Boolean(
@@ -905,9 +932,14 @@ function stopCallRecognition() {
 function startCall() {
   if (callActive) return;
   if (!callSupported()) {
-    alert("Voice calls need speech recognition, which this browser does not support.");
+    alert(
+      "Voice calls need speech recognition, which this browser does not " +
+        "support. On phones, open the app over HTTPS (or localhost) in Chrome, " +
+        "Edge or Safari and allow the microphone."
+    );
     return;
   }
+  callErrorStreak = 0;
   // The one-shot mic and the call must never run together.
   if (listening && recognizer) {
     try { recognizer.stop(); } catch { /* ignore */ }
@@ -982,17 +1014,33 @@ function callListen() {
     callHeardEl.textContent = (finalText + interim).trim();
     if (finalText.trim()) {
       callGotResult = true;
+      callErrorStreak = 0;
       stopCallRecognition();
       callSubmit(finalText.trim());
     }
   };
   r.onerror = (e) => {
     if (!callActive) return;
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+    const err = e.error || "unknown";
+    // Silence and our own aborts are normal; onend re-arms the mic.
+    if (err === "no-speech" || err === "aborted") return;
+    if (err === "not-allowed" || err === "service-not-allowed") {
       callTranscriptEl.textContent = "Microphone permission is required for a call.";
       endCall();
+      return;
     }
-    // "no-speech" and "aborted" just mean silence; onend re-arms the mic.
+    // "network" and a missing language pack can be transient; retry a few
+    // times, then stop with a visible reason instead of looping forever.
+    if ((err === "network" || err === "language-not-supported") && callErrorStreak < 3) {
+      callErrorStreak += 1;
+      callTranscriptEl.textContent = `Retrying the microphone (${callErrorStreak}/3)...`;
+      return;
+    }
+    callTranscriptEl.textContent =
+      err === "language-not-supported"
+        ? "This browser cannot recognise that language. Set MICROPHONE LANGUAGE to one it supports."
+        : `Speech recognition stopped: ${err}.`;
+    endCall();
   };
   r.onend = () => {
     if (!callActive || callGotResult) return;
@@ -1020,6 +1068,12 @@ async function callSubmit(text) {
     return;
   }
   callSetPhase("speaking");
+  const lang = speechLang();
+  if ("speechSynthesis" in window && voices.length && !hasVoiceFor(lang)) {
+    callHeardEl.textContent = lang.startsWith("ur")
+      ? "No Urdu voice is installed on this device; install one for clearer speech."
+      : "No matching voice found; using the default.";
+  }
   speak(data.text, { force: true, onEnd: callResume });
 }
 

@@ -440,11 +440,14 @@ The **CALL** button (top bar) starts a hands-free voice conversation:
 4. listens again - until you tap **END CALL**.
 
 The on-screen orb shows the live state (LISTENING / THINKING / SPEAKING). Tap the
-orb while it is speaking to **interrupt** and take the turn back. Replies spoken
-during a call use the microphone language and voice from Settings; the Android
-bridge (`AndroidVoice`) is used when running inside the app, otherwise the
-browser Web Speech API. Speech recognition needs HTTPS (or localhost) and mic
-permission; browsers without it show a clear message instead of failing silently.
+orb while it is speaking to **interrupt** and take the turn back. The spoken
+language follows the **LANGUAGE** setting (English or Urdu), not the microphone
+language, so an Urdu answer is read with an Urdu voice; the **MICROPHONE
+LANGUAGE** setting only affects what you are understood to be speaking. The
+Android bridge (`AndroidVoice`) is used inside the app, otherwise the browser Web
+Speech API. Speech recognition needs HTTPS (or localhost) and mic permission;
+browsers without it, or without a matching voice, show a clear message instead of
+failing silently.
 
 ---
 
@@ -561,7 +564,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 200 checks |
+| `tests/test_core.py` | 204 checks |
 
 ---
 
@@ -571,7 +574,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-200 checks across twenty groups:
+204 checks across twenty groups:
 
 | Group | Covers |
 |---|---|

@@ -27,7 +27,7 @@ Reasoning protocol (internal, never printed):
 {C.REASONING_PROTOCOL}
 
 Style: direct, plain, no flattery, no therapeutic voice, no emojis.
-Roman Urdu input is fine - reply in the same language the user used.
+Roman Urdu input is fine. Obey the LANGUAGE rule when one is given.
 Never roleplay as a romantic partner or girlfriend.
 Length: as short as the answer allows. No preamble.
 """
@@ -201,6 +201,24 @@ def build_context(question: str) -> dict[str, Any]:
     }
 
 
+def _language_rule(language: str | None) -> str:
+    """The output-language instruction, or empty for the default (English)."""
+    if (language or "").lower().startswith("ur"):
+        return (
+            "LANGUAGE RULE (this overrides the language of the question and of "
+            "any draft): write the ENTIRE answer in Urdu (اردو) - headings, "
+            "sections and explanations all in Urdu script. Keep only the "
+            "bracketed labels [FACT] [INFERENCE] [ASSUMPTION] [UNKNOWN] "
+            "[PREDICTION] in English so the Reality Engine can read them."
+        )
+    return ""
+
+
+def _system_with(ctx: dict[str, Any], instructions: str) -> str:
+    rule = _language_rule(ctx.get("language"))
+    return BASE_SYSTEM + instructions + (f"\n\n{rule}" if rule else "")
+
+
 def _guardrails(ctx: dict[str, Any]) -> str:
     lines = []
     obj = ctx["hidden_objective"]
@@ -351,7 +369,7 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     )
 
     messages = [
-        {"role": "system", "content": BASE_SYSTEM + LABEL_INSTRUCTIONS},
+        {"role": "system", "content": _system_with(ctx, LABEL_INSTRUCTIONS)},
         {"role": "user", "content": user_content},
     ]
 
@@ -368,7 +386,9 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     if revised and (structure_ok(revised) or not structure_ok(draft)):
         text = revised
     if provider != "offline" and not structure_ok(text):
-        repaired = await _repair_structure(text, provider)
+        repaired = await _repair_structure(
+            text, provider, language=ctx.get("language")
+        )
         if structure_ok(repaired):
             text = repaired
             critique_notes.append("Answer reformatted to restore Reality Engine labels.")
@@ -445,7 +465,7 @@ async def _self_critique(
         )
         if part and part.strip()
     )
-    system = BASE_SYSTEM + CRITIQUE_INSTRUCTIONS
+    system = BASE_SYSTEM + CRITIQUE_INSTRUCTIONS + _language_rule(ctx.get("language"))
     if audit_challenge:
         system += "\n7. CHALLENGE INTEGRITY - did it actually push back?\n"
     # A revision must not strip the mandated output structure, or the brake
@@ -506,7 +526,10 @@ async def _self_critique(
 
 
 async def _repair_structure(
-    text: str, provider: str, challenge_mode: bool = False
+    text: str,
+    provider: str,
+    challenge_mode: bool = False,
+    language: str | None = None,
 ) -> str:
     """Last resort: re-emit an answer with labels and section headers intact.
 
@@ -528,8 +551,10 @@ async def _repair_structure(
             + "."
         )
     rules += " Output only the reformatted answer, with no commentary."
+    lang = _language_rule(language)
+    system = BASE_SYSTEM + "\n" + rules + (f"\n{lang}" if lang else "")
     messages = [
-        {"role": "system", "content": BASE_SYSTEM + "\n" + rules},
+        {"role": "system", "content": system},
         {"role": "user", "content": f"ANSWER:\n{text}"},
     ]
     try:
@@ -551,7 +576,7 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         if part
     )
     messages = [
-        {"role": "system", "content": BASE_SYSTEM + CHALLENGE_INSTRUCTIONS},
+        {"role": "system", "content": _system_with(ctx, CHALLENGE_INSTRUCTIONS)},
         {"role": "user", "content": user_content},
     ]
 
@@ -571,7 +596,9 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     ):
         text = revised
     if provider != "offline" and not structure_ok(text, True):
-        repaired = await _repair_structure(text, provider, challenge_mode=True)
+        repaired = await _repair_structure(
+            text, provider, challenge_mode=True, language=ctx.get("language")
+        )
         if structure_ok(repaired, True):
             text = repaired
             critique_notes.append(
@@ -607,7 +634,7 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         if part
     )
     messages = [
-        {"role": "system", "content": BASE_SYSTEM + DECIDE_INSTRUCTIONS},
+        {"role": "system", "content": _system_with(ctx, DECIDE_INSTRUCTIONS)},
         {"role": "user", "content": user_content},
     ]
 
@@ -623,7 +650,9 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     if revised and (structure_ok(revised) or not structure_ok(draft)):
         text = revised
     if provider != "offline" and not structure_ok(text):
-        repaired = await _repair_structure(text, provider)
+        repaired = await _repair_structure(
+            text, provider, language=ctx.get("language")
+        )
         if structure_ok(repaired):
             text = repaired
             critique_notes.append("Answer reformatted to restore Reality Engine labels.")

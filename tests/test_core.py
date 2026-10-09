@@ -559,6 +559,17 @@ def test_structure_guard() -> None:
         ),
     )
 
+    check("english has no language rule", engine._language_rule("en") == "")
+    check("urdu rule mentions Urdu", "اردو" in engine._language_rule("ur"))
+    check(
+        "system prompt carries the urdu rule when lang=ur",
+        "اردو" in engine._system_with({"language": "ur"}, "X"),
+    )
+    check(
+        "system prompt stays english otherwise",
+        "اردو" not in engine._system_with({"language": "en"}, "X"),
+    )
+
     original = engine.complete
     try:
         # The draft is unlabelled and the revision loses the sections; the
