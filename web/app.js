@@ -503,7 +503,13 @@ const settings = {
   voice: "",
   stt: "en-US",
   detail: "normal",
+  accent: "",
 };
+
+function applyAccent(color) {
+  if (color) document.documentElement.style.setProperty("--acc", color);
+  else document.documentElement.style.removeProperty("--acc");
+}
 
 const STRINGS = {
   en: {
@@ -534,6 +540,7 @@ async function loadSettings() {
     /* defaults are fine */
   }
   applyLang(settings.lang);
+  applyAccent(settings.accent);
 }
 
 function applyLang(code) {
@@ -553,6 +560,7 @@ async function saveSettings() {
     voice: settings.voice,
     stt: settings.stt,
     detail: settings.detail,
+    accent: settings.accent,
   };
   try {
     await fetch("/api/settings", {
@@ -630,7 +638,7 @@ function setupRecognizer() {
   };
   r.onend = () => {
     listening = false;
-    document.getElementById("btn-mic")?.classList.remove("active");
+    mic?.classList.remove("active");
   };
   r.onerror = r.onend;
   return r;
@@ -642,7 +650,7 @@ function toggleMic() {
     alert("Speech recognition is not supported in this browser.");
     return;
   }
-  const btn = document.getElementById("btn-mic");
+  const btn = mic;
   if (listening) {
     recognizer.stop();
     return;
@@ -728,6 +736,8 @@ function syncSettingsForm() {
   if (setSpeak) setSpeak.value = settings.speak;
   if (setStt) setStt.value = settings.stt;
   if (setDetail) setDetail.value = settings.detail;
+  const setAccentEl = document.getElementById("set-accent");
+  if (setAccentEl) setAccentEl.value = settings.accent;
   if (setVoice) {
     loadVoices();
     setVoice.value = settings.voice || "";
@@ -754,6 +764,15 @@ if (setSpeak) setSpeak.addEventListener("change", () => (settings.speak = setSpe
 if (setStt) setStt.addEventListener("change", () => (settings.stt = setStt.value));
 if (setDetail) setDetail.addEventListener("change", () => (settings.detail = setDetail.value));
 if (setVoice) setVoice.addEventListener("change", () => (settings.voice = setVoice.value));
+{
+  const setAccentEl = document.getElementById("set-accent");
+  if (setAccentEl) {
+    setAccentEl.addEventListener("change", () => {
+      settings.accent = setAccentEl.value;
+      applyAccent(settings.accent);
+    });
+  }
+}
 
 document.getElementById("save-settings").addEventListener("click", async () => {
   await saveSettings();
