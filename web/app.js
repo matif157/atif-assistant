@@ -881,6 +881,8 @@ const callStateEl = document.getElementById("call-state");
 const callTranscriptEl = document.getElementById("call-transcript");
 const callHeardEl = document.getElementById("call-heard");
 const callOrb = document.getElementById("call-orb");
+const callBtn = document.getElementById("btn-call");
+const endCallBtn = document.getElementById("end-call");
 
 const CALL_LABEL = { listening: "LISTENING", thinking: "THINKING", speaking: "SPEAKING" };
 let callActive = false;
@@ -900,9 +902,10 @@ function callSupported() {
 
 function callSetPhase(phase) {
   callPhase = phase;
+  if (!callSheet) return;
   callSheet.classList.remove("listening", "thinking", "speaking");
   callSheet.classList.add(phase);
-  callStateEl.textContent = CALL_LABEL[phase] || "";
+  if (callStateEl) callStateEl.textContent = CALL_LABEL[phase] || "";
 }
 
 // Re-open the mic once, debounced, so a cancelled utterance's onend and an
@@ -930,7 +933,7 @@ function stopCallRecognition() {
 }
 
 function startCall() {
-  if (callActive) return;
+  if (callActive || !callSheet) return;
   if (!callSupported()) {
     alert(
       "Voice calls need speech recognition, which this browser does not " +
@@ -961,7 +964,7 @@ function endCall() {
   if (window.AndroidVoice && typeof window.AndroidVoice.stop === "function") {
     try { window.AndroidVoice.stop(); } catch { /* ignore */ }
   }
-  callSheet.hidden = true;
+  if (callSheet) callSheet.hidden = true;
 }
 
 function callListen() {
@@ -1077,15 +1080,17 @@ async function callSubmit(text) {
   speak(data.text, { force: true, onEnd: callResume });
 }
 
-document.getElementById("btn-call").addEventListener("click", startCall);
-document.getElementById("end-call").addEventListener("click", endCall);
+if (callBtn) callBtn.addEventListener("click", startCall);
+if (endCallBtn) endCallBtn.addEventListener("click", endCall);
 // Tap the orb to barge in while the answer is being spoken.
-callOrb.addEventListener("click", () => {
-  if (callActive && callPhase === "speaking") {
-    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
-    callResume();
-  }
-});
+if (callOrb) {
+  callOrb.addEventListener("click", () => {
+    if (callActive && callPhase === "speaking") {
+      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+      callResume();
+    }
+  });
+}
 
 /* --------------------------------------------------------------- uploads */
 
