@@ -413,6 +413,16 @@ textarea:focus { outline: none; border-color: var(--acc); }
 
 @media (prefers-reduced-motion: reduce) {
   .call-orb::after { animation: none; }
+  #mic.active[data-phase="listening"] { animation: none; }
+}
+
+#mic.active[data-phase="listening"] {
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+#mic.active[data-phase="speaking"] { opacity: .7; }
+@keyframes mic-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
 }
 
 .typing { display: inline-block; }

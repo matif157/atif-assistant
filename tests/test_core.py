@@ -1928,7 +1928,24 @@ def test_language() -> None:
         bad = client.post("/api/speech/model", json={"name": "bogus.bin"})
         check("model endpoint rejects unknown names", bad.status_code == 400)
 
+        client.post(
+            "/api/settings", json={"handsfree": "on", "reply_language": "ur"}
+        )
+        saved = client.get("/api/settings").json()
+        check("handsfree setting persists", saved.get("handsfree") == "on")
+        check("reply language setting persists", saved.get("reply_language") == "ur")
+
     db.reset_db_path()
+
+    web = Path(__file__).resolve().parent.parent / "web"
+    app_js = (web / "app.js").read_text()
+    index_html = (web / "index.html").read_text()
+    check("hands-free setting is in the UI", 'id="set-handsfree"' in index_html)
+    check(
+        "hands-free loop is wired",
+        "startHandsFree" in app_js and "handsFreeSubmit" in app_js,
+    )
+    check("hands-free is persisted", "handsfree: settings.handsfree" in app_js)
 
 
 def main() -> int:

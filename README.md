@@ -506,6 +506,19 @@ message instead of failing silently. A stuck text-to-speech engine cannot stall
 the call: a word-count fallback releases the loop if the speech event never
 arrives.
 
+### Hands-free chat
+
+With **HANDS-FREE CHAT** on (**Settings → HANDS-FREE CHAT**), tapping the mic
+starts a live conversation in the normal chat instead of a single question: the
+assistant listens, answers **out loud**, then re-opens the mic and keeps going
+until you tap the mic once more. The composer hint line shows the phase
+(**Listening / Thinking / Speaking**) and the mic pulses while listening, so the
+state is always visible. Typing and sending, opening a call, or tapping the mic
+all end the loop cleanly. It uses the same engines as a call (offline
+whisper.cpp when installed, otherwise the browser recogniser), so with the
+offline model it works with no internet. Echo is avoided the same way as in a
+call: the mic is only armed after the reply has finished speaking.
+
 ### Offline speech (no internet, Urdu included)
 
 The browser's Web Speech API sends audio to Google, so it cannot recognise

@@ -207,6 +207,8 @@ function showRoute(route) {
 sendBtn.addEventListener("click", () => {
   const raw = input.value.trim();
   if (!raw) return;
+  // Typing takes over from a running hands-free conversation.
+  if (handsFreeActive) stopHandsFree();
   input.value = "";
   input.style.height = "auto";
   ask(raw);
@@ -622,6 +624,7 @@ const settings = {
   lang: "en",
   replyLanguage: "auto",
   speak: "off",
+  handsfree: "off",
   voice: "",
   stt: "en-US",
   sttEngine: "auto",
@@ -706,6 +709,7 @@ async function saveSettings() {
     lang: settings.lang,
     reply_language: settings.replyLanguage,
     speak: settings.speak,
+    handsfree: settings.handsfree,
     voice: settings.voice,
     stt: settings.stt,
     sttEngine: settings.sttEngine,
@@ -957,6 +961,15 @@ function setupRecognizer() {
 
 function toggleMic() {
   const btn = mic;
+
+  // Hands-free mode turns the mic into a live conversation: a tap starts
+  // listening, and it keeps answering out loud and listening again until you
+  // tap it once more.
+  if (settings.handsfree === "on") {
+    if (handsFreeActive) stopHandsFree();
+    else startHandsFree();
+    return;
+  }
 
   // Inside the Android app, use the native recognizer via the JS bridge.
   if (window.AndroidVoice && typeof window.AndroidVoice.listen === "function") {
@@ -1313,6 +1326,8 @@ function startCall() {
     return;
   }
   callErrorStreak = 0;
+  // A call and the hands-free loop must never run together.
+  if (handsFreeActive) stopHandsFree();
   // The one-shot mic and the call must never run together.
   if (listening && recognizer) {
     try { recognizer.stop(); } catch { /* ignore */ }
@@ -1539,6 +1554,231 @@ if (callOrb) {
       callResume();
     }
   });
+}
+
+/* --------------------------------------------------------- hands-free chat */
+
+// With HANDS-FREE CHAT on, a tap on the mic starts a live conversation in the
+// normal chat: it listens, answers out loud, then listens again, and keeps
+// going until you tap the mic once more. It reuses the same engines as the call
+// (offline whisper.cpp, the Android bridge, or the browser recogniser) and shows
+// its state in the composer hint line.
+const hintEl = document.getElementById("hint");
+let handsFreeActive = false;
+let handsFreePhase = "idle";
+let handsFreeRec = null;
+let handsFreeRecognizer = null;
+let handsFreeRetry = null;
+let handsFreeBusy = false;
+let handsFreeGotResult = false;
+let handsFreeHintDefault = null;
+
+function setHandsFreePhase(phase) {
+  handsFreePhase = phase;
+  if (handsFreeHintDefault === null) handsFreeHintDefault = hintEl ? hintEl.textContent : "";
+  const btn = mic;
+  const on = phase !== "idle";
+  btn?.classList.toggle("active", on);
+  if (btn) btn.setAttribute("data-phase", phase);
+  if (!hintEl) return;
+  if (phase === "idle") {
+    hintEl.textContent = handsFreeHintDefault;
+  } else if (phase === "listening") {
+    hintEl.textContent = "Listening… (tap the mic to stop)";
+  } else if (phase === "thinking") {
+    hintEl.textContent = "Thinking…";
+  } else {
+    hintEl.textContent = "Speaking… (tap the mic to stop)";
+  }
+  if (btn) {
+    btn.title = on ? "Stop hands-free chat" : settings.handsfree === "on" ? "Start hands-free chat" : "Speak";
+  }
+}
+
+function startHandsFree() {
+  if (handsFreeActive) return;
+  // The one-shot mic and the hands-free loop must never run together.
+  if (listening && recognizer) {
+    try { recognizer.stop(); } catch { /* ignore */ }
+  }
+  stopSpeech();
+  handsFreeActive = true;
+  setHandsFreePhase("listening");
+  handsFreeListen();
+}
+
+function stopHandsFree() {
+  handsFreeActive = false;
+  handsFreeBusy = false;
+  clearTimeout(handsFreeRetry);
+  if (handsFreeRec) {
+    try { handsFreeRec.stop(); } catch { /* ignore */ }
+    handsFreeRec = null;
+  }
+  if (handsFreeRecognizer) {
+    try {
+      handsFreeRecognizer.onend = null;
+      handsFreeRecognizer.onresult = null;
+      handsFreeRecognizer.onerror = null;
+      handsFreeRecognizer.stop();
+    } catch { /* ignore */ }
+    handsFreeRecognizer = null;
+  }
+  if (window.AndroidVoice && typeof window.AndroidVoice.stop === "function") {
+    try { window.AndroidVoice.stop(); } catch { /* ignore */ }
+  }
+  stopSpeech();
+  setHandsFreePhase("idle");
+}
+
+function handsFreeResume() {
+  if (!handsFreeActive) return;
+  clearTimeout(handsFreeRetry);
+  handsFreeRetry = setTimeout(() => {
+    if (handsFreeActive && handsFreePhase !== "listening") handsFreeListen();
+  }, 400);
+}
+
+function handsFreeListen() {
+  if (!handsFreeActive) return;
+  setHandsFreePhase("listening");
+  if (wantLocalStt()) {
+    handsFreeListenLocal();
+    return;
+  }
+
+  if (window.AndroidVoice && typeof window.AndroidVoice.listen === "function") {
+    window.onAndroidSpeechResult = (text) => {
+      if (!handsFreeActive) return;
+      const said = (text || "").trim();
+      if (said) handsFreeSubmit(said);
+      else handsFreeResume();
+    };
+    try {
+      window.AndroidVoice.listen(settings.stt);
+    } catch {
+      handsFreeResume();
+    }
+    return;
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    stopHandsFree();
+    return;
+  }
+  let r;
+  try {
+    r = new SR();
+  } catch {
+    stopHandsFree();
+    return;
+  }
+  handsFreeRecognizer = r;
+  handsFreeGotResult = false;
+  r.lang = settings.stt;
+  r.continuous = false;
+  r.interimResults = false;
+  r.maxAlternatives = 1;
+  r.onresult = (e) => {
+    if (!handsFreeActive) return;
+    const said = (e.results[0][0].transcript || "").trim();
+    if (said) {
+      handsFreeGotResult = true;
+      handsFreeSubmit(said);
+    } else {
+      handsFreeResume();
+    }
+  };
+  r.onerror = (e) => {
+    if (!handsFreeActive) return;
+    const err = e.error || "unknown";
+    // Silence and our own aborts are normal; onend re-arms the mic.
+    if (err === "no-speech" || err === "aborted") return;
+    if (err === "not-allowed" || err === "service-not-allowed") stopHandsFree();
+  };
+  r.onend = () => {
+    if (!handsFreeActive || handsFreeGotResult) return;
+    if (handsFreePhase === "listening") handsFreeResume();
+  };
+  try {
+    r.start();
+  } catch {
+    handsFreeResume();
+  }
+}
+
+async function handsFreeListenLocal() {
+  if (!handsFreeActive || handsFreeBusy || handsFreeRec) return;
+  handsFreeBusy = true;
+  let rec;
+  try {
+    rec = createLocalRecorder();
+    await rec.start();
+  } catch {
+    handsFreeBusy = false;
+    // If "auto" picked offline and the mic is the problem, retry once online.
+    if (settings.sttEngine === "auto" && (window.SpeechRecognition || window.webkitSpeechRecognition)) {
+      settings.sttEngine = "browser";
+      handsFreeListen();
+      return;
+    }
+    stopHandsFree();
+    return;
+  }
+  if (!handsFreeActive) {
+    try { rec.stop(); } catch { /* ignore */ }
+    handsFreeBusy = false;
+    return;
+  }
+  handsFreeRec = rec;
+  const finish = async () => {
+    const live = handsFreeRec;
+    if (!live) return;
+    handsFreeRec = null;
+    const blob = await live.stop();
+    handsFreeBusy = false;
+    if (!handsFreeActive) return;
+    if (!blob || blob.size < 100) {
+      handsFreeResume();
+      return;
+    }
+    try {
+      const text = await transcribeLocal(blob);
+      if (!handsFreeActive) return;
+      if (text) handsFreeSubmit(text);
+      else handsFreeResume();
+    } catch {
+      handsFreeResume();
+    }
+  };
+  rec.onTick = () => {
+    const now = performance.now();
+    const dur = (now - rec.started) / 1000;
+    if (dur > 20 || (rec.speaking && now - rec.lastVoice > 1100) || (!rec.speaking && dur > 8)) finish();
+  };
+}
+
+async function handsFreeSubmit(text) {
+  if (!handsFreeActive) return;
+  if (handsFreeRecognizer) {
+    try {
+      handsFreeRecognizer.onend = null;
+      handsFreeRecognizer.stop();
+    } catch { /* ignore */ }
+    handsFreeRecognizer = null;
+  }
+  setHandsFreePhase("thinking");
+  // spokenQuestion-style: answer out loud even if SPEAK REPLIES is off.
+  voiceInputPending = true;
+  const data = await ask(text, { suppressSpeak: true });
+  if (!handsFreeActive) return;
+  if (!data || !data.text) {
+    handsFreeResume();
+    return;
+  }
+  setHandsFreePhase("speaking");
+  speak(data.text, { force: true, lang: data.language, onEnd: handsFreeResume });
 }
 
 /* --------------------------------------------------------------- uploads */
@@ -1791,6 +2031,7 @@ const setSheet = document.getElementById("settings-sheet");
 const setLang = document.getElementById("set-lang");
 const setReplyLang = document.getElementById("set-reply-lang");
 const setSpeak = document.getElementById("set-speak");
+const setHandsfree = document.getElementById("set-handsfree");
 const setVoice = document.getElementById("set-voice");
 const setStt = document.getElementById("set-stt");
 const setSttEngine = document.getElementById("set-stt-engine");
@@ -1800,6 +2041,7 @@ const settingsStatus = document.getElementById("settings-status");
 function syncSettingsForm() {
   if (setLang) setLang.value = settings.lang;
   if (setReplyLang) setReplyLang.value = settings.replyLanguage || "auto";
+  if (setHandsfree) setHandsfree.value = settings.handsfree || "off";
   if (setSpeak) setSpeak.value = settings.speak;
   if (setStt) setStt.value = settings.stt;
   if (setSttEngine) {
@@ -1849,6 +2091,11 @@ if (setLang) {
 if (setSpeak) setSpeak.addEventListener("change", () => (settings.speak = setSpeak.value));
 if (setReplyLang)
   setReplyLang.addEventListener("change", () => (settings.replyLanguage = setReplyLang.value));
+if (setHandsfree)
+  setHandsfree.addEventListener("change", () => {
+    settings.handsfree = setHandsfree.value;
+    if (settings.handsfree !== "on" && handsFreeActive) stopHandsFree();
+  });
 if (setStt) setStt.addEventListener("change", () => (settings.stt = setStt.value));
 if (setSttEngine)
   setSttEngine.addEventListener("change", () => (settings.sttEngine = setSttEngine.value));
