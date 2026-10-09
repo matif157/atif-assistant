@@ -1128,6 +1128,174 @@ def test_providers() -> None:
     db.reset_db_path()
 
 
+def test_ask_endpoint() -> None:
+    """/api/ask maps each question class to the honest mode and persists it.
+
+    The model is stubbed, so this drives the router, the label brake, the
+    background extractor and message persistence end-to-end with no network.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, engine, learn
+    from atif_assistant.app import app
+
+    print("\nask endpoint")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "ask.db")
+        db.init_db()
+        client = TestClient(app)
+
+        async def fake_complete(messages, **kw):
+            return (
+                "[FACT] Stable test answer.\n"
+                "[INFERENCE] Provided by the test stub.",
+                "groq",
+            )
+
+        orig_engine, orig_learn = engine.complete, learn.complete
+        engine.complete = fake_complete
+        learn.complete = fake_complete
+        try:
+            cases = {
+                "what is your name": "ask",
+                "should i quit my job": "decide",
+                "why am i like this": "challenge",
+                "what is photosynthesis": "ask",
+                "tell me a story about dragons": "challenge",
+            }
+            for q, want in cases.items():
+                res = client.post("/api/ask", json={"question": q}).json()
+                check(f"route {q!r} -> {want}", res["route"]["mode"] == want)
+                check(f"answer carries a label ({q!r})", bool(res["labels"]))
+                sess = res["session"]
+                hist = client.get(f"/api/history/{sess}").json()["messages"]
+                check(
+                    f"exchange persisted ({q!r})",
+                    len(hist) == 2
+                    and hist[0]["role"] == "user"
+                    and hist[1]["role"] == "assistant",
+                )
+
+            before = db.question_count("knowledge")
+            r1 = client.post("/api/ask", json={"question": "how to bake bread"}).json()
+            r2 = client.post("/api/ask", json={"question": "how to bake bread"}).json()
+            check("first ask of a class counts once", r1["asked_count"] == before + 1)
+            check("repeat ask increments the count", r2["asked_count"] == before + 2)
+
+            check(
+                "empty question does not error",
+                client.post("/api/ask", json={"question": ""}).status_code == 200,
+            )
+        finally:
+            engine.complete = orig_engine
+            learn.complete = orig_learn
+
+    db.reset_db_path()
+
+
+def test_misc_endpoints() -> None:
+    """Memory search, evidence, the decision ledger, learned gating and media
+    content lookups all behave through the HTTP layer."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\nmisc endpoints")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db.use_test_db(base / "misc.db")
+        db.init_db()
+        client = TestClient(app)
+
+        # --- memory: empty query lists facts, a query searches them.
+        db.add_fact("I prefer morning work", source="test", confidence=0.8)
+        listed = client.get("/api/memory?limit=5").json()["results"]
+        check("memory lists facts when no query", any("morning work" in r["body"] for r in listed))
+        found = client.get("/api/memory?q=morning").json()["results"]
+        check("memory search finds the fact", any("morning work" in str(r) for r in found))
+
+        # --- evidence search and its empty-query guard.
+        db.add_evidence(source="test:ev", body="photosynthesis converts light to sugar")
+        check("empty evidence query returns nothing", client.get("/api/evidence").json() == {"results": []})
+        ev = client.get("/api/evidence?q=photosynthesis").json()["results"]
+        check("evidence search finds the line", any("photosynthesis" in e["body"] for e in ev))
+
+        # --- decision ledger: due, resolve, and the 404 guards.
+        did = client.post(
+            "/api/decisions",
+            json={
+                "topic": "job",
+                "decision": "stay",
+                "prediction": "calmer",
+                "review_date": "2000-01-01",
+            },
+        ).json()["id"]
+        due = client.get("/api/decisions").json()["due"]
+        check("past review date shows as due", any(d["id"] == did for d in due))
+        check(
+            "blank resolution is rejected",
+            client.post(f"/api/decisions/{did}/resolve", json={"actual_outcome": "  "}).status_code == 404,
+        )
+        ok = client.post(f"/api/decisions/{did}/resolve", json={"actual_outcome": "still employed"})
+        check("decision resolves", ok.json().get("ok") is True and ok.json()["id"] == did)
+        check(
+            "resolved decision leaves due",
+            not any(d["id"] == did for d in client.get("/api/decisions").json()["due"]),
+        )
+        check(
+            "double resolution is a 404",
+            client.post(f"/api/decisions/{did}/resolve", json={"actual_outcome": "again"}).status_code == 404,
+        )
+        check(
+            "resolving a missing decision is a 404",
+            client.post("/api/decisions/999999/resolve", json={"actual_outcome": "x"}).status_code == 404,
+        )
+
+        # --- learned gating: candidates surface; approve promotes; reject drops.
+        lid = db.add_learned("My sister lives in Oslo", kind="durable", source="test")
+        cands = client.get("/api/learned").json()["candidates"]
+        check("learned candidate appears", any(c["id"] == lid for c in cands))
+        check(
+            "approving a candidate is ok",
+            client.post(f"/api/learned/{lid}/approve").json().get("ok") is True,
+        )
+        check(
+            "approved candidate leaves the queue",
+            not any(c["id"] == lid for c in client.get("/api/learned").json()["candidates"]),
+        )
+        check(
+            "approving a missing candidate fails",
+            client.post("/api/learned/999999/approve").json()["ok"] is False,
+        )
+        lid2 = db.add_learned("My car is blue", kind="durable", source="test")
+        check(
+            "rejecting a candidate is ok",
+            client.post(f"/api/learned/{lid2}/reject").json().get("ok") is True,
+        )
+        check(
+            "rejected candidate leaves the queue",
+            not any(c["id"] == lid2 for c in client.get("/api/learned").json()["candidates"]),
+        )
+
+        # --- media content lookup.
+        real = base / "note.txt"
+        real.write_text("hello")
+        good = client.post("/api/media", json={"path": str(real), "kind": "text"}).json()["id"]
+        got = client.get(f"/api/media/{good}/content")
+        check("media content returns the size", got.status_code == 200 and got.json()["size"] == 5)
+        check("missing media id is a 404", client.get("/api/media/999999/content").status_code == 404)
+        missing = client.post(
+            "/api/media", json={"path": str(base / "gone.bin"), "kind": "file"}
+        ).json()["id"]
+        check(
+            "media row with no file on disk is a 404",
+            client.get(f"/api/media/{missing}/content").status_code == 404,
+        )
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -1159,6 +1327,8 @@ def main() -> int:
     test_uploads()
     test_backup()
     test_providers()
+    test_ask_endpoint()
+    test_misc_endpoints()
     test_structure_guard()
 
     if before is not None:

@@ -571,7 +571,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 230 checks |
+| `tests/test_core.py` | 267 checks |
 
 ---
 
@@ -581,7 +581,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-230 checks across twenty groups:
+267 checks across twenty-two groups:
 
 | Group | Covers |
 |---|---|
@@ -604,6 +604,8 @@ you almost certainly won't.
 | uploads | sha256 dedupe, text→evidence+episode, media-library listing |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
 | providers | key/model precedence, masking, settings/export redaction, save/clear, TEST endpoint |
+| ask endpoint | every question class routes to the honest mode; exchange persisted; repeat counting |
+| misc endpoints | memory search, evidence, decision resolve + 404 guards, learned approve/reject, media content |
 | structure guard | Reality Engine labels + CASE AGAINST enforced; revision repaired or rejected |
 
 Every group runs against a scratch database. At the end of the run the test
