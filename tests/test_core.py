@@ -647,6 +647,70 @@ def test_extended_api() -> None:
     db.reset_db_path()
 
 
+def test_location() -> None:
+    """GPS fixes are idempotent, cluster into places, and yield routines."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\nlocation")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "loc.db")
+        db.init_db()
+        client = TestClient(app)
+
+        a = client.post(
+            "/api/location",
+            json={"lat": 51.5074, "lon": -0.1278, "occurred_at": "2026-01-05 09:00:00"},
+        ).json()
+        check("first fix is stored", a.get("ok") and not a.get("duplicate"))
+        place_id = a["place_id"]
+        check("fix created a place", place_id is not None)
+
+        dup = client.post(
+            "/api/location",
+            json={"lat": 51.5074, "lon": -0.1278, "occurred_at": "2026-01-05 09:00:00"},
+        ).json()
+        check("same fix is a duplicate", dup.get("duplicate") is True)
+
+        near = client.post(
+            "/api/location",
+            json={"lat": 51.5076, "lon": -0.1279, "occurred_at": "2026-01-12 09:30:00"},
+        ).json()
+        check("nearby fix folds into the same place", near["place_id"] == place_id)
+
+        far = client.post(
+            "/api/location",
+            json={"lat": 48.8566, "lon": 2.3522, "occurred_at": "2026-01-12 15:00:00"},
+        ).json()
+        check("distant fix starts a new place", far["place_id"] != place_id)
+
+        named = client.post(f"/api/places/{place_id}/name", json={"name": "Office", "kind": "work"})
+        check("place can be named", named.json().get("ok") is True)
+        check("bad place id is rejected", client.post("/api/places/999999/name", json={"name": "x"}).status_code == 404)
+        check("empty name is rejected", client.post(f"/api/places/{place_id}/name", json={"name": "  "}).status_code == 400)
+
+        # A third Monday 09:xx visit makes the 09:00 bucket a routine.
+        client.post(
+            "/api/location",
+            json={"lat": 51.5074, "lon": -0.1278, "occurred_at": "2026-01-19 09:10:00"},
+        )
+        derived = client.post("/api/routines/derive?min_observations=3").json()
+        check("routine derived from repeated visits", derived["count"] >= 1)
+        rout = client.get("/api/routines").json()["routines"]
+        check("routine names the place", any("Office" in r["name"] for r in rout))
+        check(
+            "routine has candidate status, not certainty",
+            all(r["status"] == "candidate" for r in rout),
+        )
+
+        pts = client.get("/api/location").json()["points"]
+        check("points are listed", len(pts) == 4)
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -674,6 +738,7 @@ def main() -> int:
     test_isolation()
     test_remote_web()
     test_extended_api()
+    test_location()
 
     if before is not None:
         from atif_assistant import db

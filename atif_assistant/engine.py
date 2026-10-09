@@ -153,6 +153,30 @@ def build_context(question: str) -> dict[str, Any]:
             if c.get("b"):
                 parts.append(f"- ({c['subject']}) B: {c['b']}")
 
+    # Location memory, surfaced only when the question is about it, so it does
+    # not crowd every answer. These are observed visits and candidate patterns;
+    # a reason is never attached here.
+    loc_words = (
+        "where", "location", "routine", "routine", "place", "places",
+        "visit", "visits", "went", "gym", "office",
+    )
+    if any(w in question.lower() for w in loc_words):
+        routines = db.list_routines(limit=5)
+        places = [p for p in db.list_places(limit=8) if p.get("name")]
+        if routines or places:
+            lines = ["LOCATION MEMORY (observed visits only; reasons are NOT known):"]
+            for p in places:
+                lines.append(
+                    f"- place: {p['name']} ({p.get('kind') or 'unlabelled'}), "
+                    f"{p['visits']} visits"
+                )
+            for r in routines:
+                lines.append(
+                    f"- routine (candidate): {r['name']} "
+                    f"[confidence {r['confidence']}, {r['observations']} observations]"
+                )
+            parts.append("\n".join(lines))
+
     risks = C.detect_professional_risk(question)
     rumination = C.detect_rumination(question)
     objective = C.hidden_objective(question)

@@ -205,6 +205,45 @@ CREATE TABLE IF NOT EXISTS social_posts (
     created_at TEXT NOT NULL
 );
 
+-- Location. Raw GPS points land in location_points; nearby points are folded
+-- into a named place. A routine is a repeated (place, weekday, hour) visit and
+-- is only ever an observed pattern, never a claimed reason.
+CREATE TABLE IF NOT EXISTS places (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT,
+    lat        REAL NOT NULL,
+    lon        REAL NOT NULL,
+    radius_m   REAL DEFAULT 150,
+    kind       TEXT,
+    visits     INTEGER DEFAULT 0,
+    first_seen TEXT,
+    last_seen  TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS location_points (
+    id          INTEGER PRIMARY KEY,
+    occurred_at TEXT,
+    lat         REAL NOT NULL,
+    lon         REAL NOT NULL,
+    accuracy    REAL,
+    source      TEXT,
+    place_id    INTEGER,
+    digest      TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS routines (
+    id           INTEGER PRIMARY KEY,
+    name         TEXT,
+    place_id     INTEGER,
+    weekday      INTEGER,
+    hour_bucket  INTEGER,
+    observations INTEGER DEFAULT 0,
+    confidence   REAL DEFAULT 0.0,
+    status       TEXT DEFAULT 'candidate',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
 -- the message it came from instead of only carrying a confidence number.
 CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
@@ -833,6 +872,9 @@ COUNTED_TABLES = (
     "works",
     "social_accounts",
     "social_posts",
+    "places",
+    "location_points",
+    "routines",
 )
 
 
@@ -1021,6 +1063,211 @@ def list_notes(limit: int = 20) -> list[dict[str, Any]]:
     conn = connect()
     rows = conn.execute(
         "SELECT * FROM notes ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------ location
+
+EARTH_RADIUS_M = 6_371_000.0
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres between two coordinates."""
+    import math
+
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
+
+
+def location_digest(
+    occurred_at: str | None, lat: float, lon: float, source: str | None
+) -> str:
+    """Stable identity for one GPS fix, so re-importing a trace adds nothing."""
+    # Round the coordinates so a re-export with extra float digits still matches.
+    parts = "\x00".join(
+        (source or "", occurred_at or "", f"{lat:.5f}", f"{lon:.5f}")
+    )
+    return hashlib.sha256(parts.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _parse_when(value: str | None) -> datetime | None:
+    """Parse the timestamp formats seen in exports, or return None."""
+    if not value:
+        return None
+    text = value.strip()
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M%p",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(text[: len(fmt) + 2].strip(), fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _nearest_place(conn: sqlite3.Connection, lat: float, lon: float) -> sqlite3.Row | None:
+    """Closest existing place within its own radius, else None."""
+    best = None
+    best_d = None
+    for row in conn.execute("SELECT * FROM places").fetchall():
+        d = haversine_m(lat, lon, row["lat"], row["lon"])
+        if d <= (row["radius_m"] or 150) and (best_d is None or d < best_d):
+            best, best_d = row, d
+    return best
+
+
+def add_location_point(
+    lat: float,
+    lon: float,
+    occurred_at: str | None = None,
+    accuracy: float | None = None,
+    source: str | None = None,
+) -> int | None:
+    """Store one GPS fix, folding it into a place. None if already present.
+
+    A fix that lands within an existing place's radius is a visit; otherwise it
+    starts a new unnamed place at that coordinate. Naming is explicit, never
+    guessed from coordinates alone.
+    """
+    digest = location_digest(occurred_at, lat, lon, source)
+    conn = connect()
+    if conn.execute("SELECT id FROM location_points WHERE digest=?", (digest,)).fetchone():
+        return None
+
+    place = _nearest_place(conn, lat, lon)
+    if place is None:
+        cur = conn.execute(
+            """INSERT INTO places(lat, lon, radius_m, visits, first_seen, last_seen, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (lat, lon, 150, 0, occurred_at, occurred_at, now()),
+        )
+        place_id = int(cur.lastrowid)
+    else:
+        place_id = place["id"]
+
+    conn.execute(
+        """UPDATE places
+           SET visits = visits + 1,
+               last_seen = COALESCE(?, last_seen),
+               first_seen = COALESCE(first_seen, ?)
+           WHERE id = ?""",
+        (occurred_at, occurred_at, place_id),
+    )
+    cur = conn.execute(
+        """INSERT INTO location_points(occurred_at, lat, lon, accuracy, source, place_id, digest, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (occurred_at, lat, lon, accuracy, source, place_id, digest, now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def name_place(place_id: int, name: str, kind: str | None = None) -> bool:
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE places SET name=?, kind=COALESCE(?, kind) WHERE id=?",
+        (name, kind, place_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_places(limit: int = 50) -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM places ORDER BY visits DESC, id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_location_points(limit: int = 100) -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM location_points ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def derive_routines(min_observations: int = 3) -> list[dict[str, Any]]:
+    """Rebuild routines from stored visits.
+
+    A routine is a place visited at least ``min_observations`` times in the
+    same (weekday, 3-hour bucket). Confidence is observations over the number
+    of distinct days that bucket could have occurred. Only observed co-visiting
+    is recorded - reasons are never inferred here.
+    """
+    conn = connect()
+    points = conn.execute(
+        "SELECT occurred_at, place_id FROM location_points WHERE place_id IS NOT NULL"
+    ).fetchall()
+
+    buckets: dict[tuple[int, int, int], dict[str, Any]] = {}
+    days: dict[tuple[int, int], set[str]] = {}
+    for row in points:
+        when = _parse_when(row["occurred_at"])
+        if when is None:
+            continue
+        bucket = when.hour // 3
+        key = (row["place_id"], when.weekday(), bucket)
+        entry = buckets.setdefault(
+            key, {"obs": 0, "days": set()}
+        )
+        entry["obs"] += 1
+        entry["days"].add(when.date().isoformat())
+
+    conn.execute("DELETE FROM routines")
+    out: list[dict[str, Any]] = []
+    for (place_id, weekday, bucket), entry in buckets.items():
+        if entry["obs"] < min_observations:
+            continue
+        # Distinct days on which this bucket could have been seen, from the
+        # place's full history - a rough denominator, and labelled as such.
+        total_days = conn.execute(
+            "SELECT COUNT(DISTINCT substr(occurred_at,1,10)) c FROM location_points WHERE place_id=?",
+            (place_id,),
+        ).fetchone()["c"] or 1
+        confidence = round(min(1.0, len(entry["days"]) / total_days), 3)
+        place = conn.execute("SELECT name FROM places WHERE id=?", (place_id,)).fetchone()
+        label = (place["name"] if place and place["name"] else f"place {place_id}")
+        name = f"{label} around {bucket * 3:02d}:00 on day {weekday}"
+        cur = conn.execute(
+            """INSERT INTO routines(name, place_id, weekday, hour_bucket, observations, confidence, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (name, place_id, weekday, bucket, entry["obs"], confidence, "candidate", now(), now()),
+        )
+        out.append(
+            {
+                "id": int(cur.lastrowid),
+                "name": name,
+                "place_id": place_id,
+                "weekday": weekday,
+                "hour_bucket": bucket,
+                "observations": entry["obs"],
+                "confidence": confidence,
+                "status": "candidate",
+            }
+        )
+    conn.commit()
+    return out
+
+
+def list_routines(limit: int = 50) -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM routines ORDER BY confidence DESC, observations DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, router
+from . import db, engine, learn, location, router
 from .config import TAILSCALE_HOST, WEB_DIR
 from .llm import probe_providers
 
@@ -257,6 +257,77 @@ def set_settings(payload: dict):
             continue
         db.set_setting(str(k), str(v))
     return {"ok": True}
+
+
+class LocationIn(BaseModel):
+    lat: float
+    lon: float
+    occurred_at: str | None = None
+    accuracy: float | None = None
+    source: str | None = None
+
+
+@app.post("/api/location")
+async def add_location(payload: LocationIn, geocode: bool = False) -> dict:
+    """Ingest one GPS fix. Idempotent; nearby fixes fold into one place.
+
+    Geocoding is opt-in because it needs the network and the app is local-first.
+    An unnamed place still supports routine detection - the name is cosmetic.
+    """
+    before = {p["id"] for p in db.list_places(limit=10_000)}
+    pid = db.add_location_point(
+        payload.lat,
+        payload.lon,
+        occurred_at=payload.occurred_at,
+        accuracy=payload.accuracy,
+        source=payload.source,
+    )
+    if pid is None:
+        return {"ok": True, "duplicate": True}
+
+    point = db.connect().execute(
+        "SELECT place_id FROM location_points WHERE id=?", (pid,)
+    ).fetchone()
+    place_id = point["place_id"] if point else None
+    named = None
+    if geocode and place_id not in before:
+        geo = await location.reverse_geocode(payload.lat, payload.lon)
+        if geo["label"]:
+            db.name_place(place_id, geo["label"], geo["kind"])
+            named = geo["label"]
+    return {"ok": True, "id": pid, "place_id": place_id, "named": named}
+
+
+@app.get("/api/location")
+def list_location(limit: int = 100) -> dict:
+    return {"points": db.list_location_points(limit)}
+
+
+@app.get("/api/places")
+def list_places(limit: int = 50) -> dict:
+    return {"places": db.list_places(limit)}
+
+
+@app.post("/api/places/{place_id}/name")
+def name_place(place_id: int, payload: dict) -> JSONResponse:
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    ok = db.name_place(place_id, name, payload.get("kind"))
+    if not ok:
+        return JSONResponse({"error": "place not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": place_id})
+
+
+@app.get("/api/routines")
+def list_routines(limit: int = 50) -> dict:
+    return {"routines": db.list_routines(limit)}
+
+
+@app.post("/api/routines/derive")
+def derive_routines(min_observations: int = 3) -> dict:
+    routines = db.derive_routines(min_observations=min_observations)
+    return {"ok": True, "count": len(routines), "routines": routines}
 
 
 @app.post("/api/notes")

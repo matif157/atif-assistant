@@ -203,6 +203,18 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `GET/POST /api/decisions` | decision ledger, due and open |
 | `POST /api/decisions/{id}/resolve` | record what actually happened |
 | `GET /api/evidence?q=` | full-text search over raw source lines |
+| `POST /api/location` | ingest one GPS fix (idempotent; folds into a place) |
+| `GET /api/location` | recent fixes |
+| `GET /api/places` | clustered places and visit counts |
+| `POST /api/places/{id}/name` | give a place a name and kind |
+| `GET /api/routines` | observed place/routine candidates |
+| `POST /api/routines/derive` | rebuild routines from stored visits |
+| `GET/POST /api/settings` | stored key/value settings |
+| `GET/POST /api/notes` | quick notes |
+| `GET/POST /api/works` | tracked projects |
+| `GET/POST /api/media` | media references |
+| `GET/POST /api/social/accounts` | linked social accounts |
+| `GET /api/social/posts` | synced posts |
 
 ---
 
@@ -366,6 +378,29 @@ and seeding runs in a shell rather than under launchd.
 
 ---
 
+## Location and routines
+
+Location is opt-in and local. Fixes arrive at `POST /api/location` from a
+shortcut or an exported trace, are de-duplicated by a content digest, and are
+folded into a place when they land within the existing place's radius
+(default 150 m). A place is only *named* when you name it, or when you pass
+`?geocode=1` and the network lookup succeeds.
+
+`POST /api/routines/derive` groups visits by place, weekday and 3-hour bucket.
+A bucket with enough visits becomes a **candidate** routine with a confidence
+equal to distinct matching days over the place's total days. Candidates are
+surfaced to the model only when a question is about location.
+
+Two hard limits, by design:
+
+- **Where and when are observed. Why is not.** GPS never tells you a reason, so
+  the system never attaches one. Ask "why was I there" and the honest answer is
+  that it is not recorded - only that you were.
+- **No live tracking.** Nothing polls the phone. You push fixes in; the app does
+  not pull them, and there is no background location service.
+
+---
+
 ## Privacy
 
 - The database lives in `data/atif-assistant.db` and is gitignored. It is never pushed.
@@ -437,7 +472,7 @@ you almost certainly won't.
 | `atif-assistant/learn.py` | gated memory extraction |
 | `atif-assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
-| `tests/test_core.py` | 81 tests |
+| `tests/test_core.py` | 142 checks |
 
 ---
 
@@ -447,7 +482,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-112 checks across eleven groups:
+142 checks across sixteen groups:
 
 | Group | Covers |
 |---|---|
