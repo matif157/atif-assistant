@@ -129,6 +129,15 @@
         <option value="en">English</option>
         <option value="ur">اردو (Urdu)</option>
       </select>
+      <small class="hint">Interface language and text direction.</small>
+    </label>
+    <label>REPLY LANGUAGE
+      <select id="set-reply-lang">
+        <option value="auto">Automatic (match what I speak)</option>
+        <option value="en">English</option>
+        <option value="ur">اردو (Urdu)</option>
+      </select>
+      <small class="hint">Automatic answers in the language you wrote or spoke.</small>
     </label>
     <label>SPEAK REPLIES (text to speech)
       <select id="set-speak">
@@ -153,6 +162,10 @@
       </select>
       <small id="stt-engine-note" class="hint"></small>
     </label>
+    <div class="form-actions">
+      <button class="ghost" id="download-urdu-model" hidden>DOWNLOAD URDU MODEL</button>
+    </div>
+    <div id="urdu-model-status" class="hint"></div>
     <label>ANSWER DETAIL
       <select id="set-detail">
         <option value="normal">Normal</option>

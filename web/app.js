@@ -154,6 +154,7 @@ async function ask(question, opts = {}) {
         question,
         session,
         lang: settings.lang,
+        reply_language: settings.replyLanguage,
         detail: settings.detail,
       }),
     });
@@ -162,7 +163,7 @@ async function ask(question, opts = {}) {
     removeTyping();
     addBot(data);
     if (!opts.suppressSpeak && data.text && (settings.speak === "on" || spokeQuestion)) {
-      speak(data.text);
+      speak(data.text, { lang: data.language });
     }
     if (data.session) {
       session = data.session;
@@ -619,6 +620,7 @@ document.getElementById("close-learned").addEventListener("click", () => (lSheet
 
 const settings = {
   lang: "en",
+  replyLanguage: "auto",
   speak: "off",
   voice: "",
   stt: "en-US",
@@ -702,6 +704,7 @@ function applyLang(code) {
 async function saveSettings() {
   const payload = {
     lang: settings.lang,
+    reply_language: settings.replyLanguage,
     speak: settings.speak,
     voice: settings.voice,
     stt: settings.stt,
@@ -753,11 +756,18 @@ if ("speechSynthesis" in window) {
   try { window.speechSynthesis.onvoiceschanged = loadVoices; } catch { /* ignore */ }
 }
 
-// The spoken language follows the reply language, not the microphone language.
-// A microphone set to English while the answer is Urdu must still be spoken
-// with an Urdu voice.
-function speechLang() {
-  return settings.lang === "ur" ? "ur-PK" : "en-US";
+// The spoken language follows the reply, not the microphone. When the server
+// tells us the reply language we use it; otherwise we fall back to the setting,
+// and finally to a script test on the text itself so an Urdu answer is never
+// read by an English voice.
+function speechLang(replyLang) {
+  if (replyLang) return replyLang === "ur" ? "ur-PK" : "en-US";
+  return settings.lang === "ur" || settings.replyLanguage === "ur" ? "ur-PK" : "en-US";
+}
+
+const URDU_RE = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/;
+function looksUrdu(text) {
+  return URDU_RE.test(String(text || ""));
 }
 
 function pickVoice(lang) {
@@ -804,12 +814,12 @@ function stopSpeech() {
 // Play a server-synthesized clip. Resolves true once it has played to the end,
 // false if it could not play (no key, quota, autoplay blocked) so the caller
 // can fall back to a device voice.
-function playServerClip(text, onDone) {
+function playServerClip(text, onDone, lang) {
   const token = speechToken;
   return fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, lang: speechLang() }),
+    body: JSON.stringify({ text, lang: lang || speechLang() }),
   })
     .then((res) => (res.ok ? res.blob() : null))
     .then(
@@ -863,7 +873,10 @@ async function speak(text, opts = {}) {
     if (opts.onEnd) opts.onEnd();
   };
 
-  const lang = speechLang();
+  // The reply language decides the voice; a script test is the final guard so
+  // Urdu-script text is never spoken by an English voice.
+  const replyLang = opts.lang || (looksUrdu(clean) ? "ur" : null);
+  const lang = speechLang(replyLang);
   const words = clean.split(/\s+/).filter(Boolean).length;
   // Server speech needs generation time; the device engine should answer far
   // sooner. Either way, release a call stuck in SPEAKING if nothing arrives.
@@ -890,7 +903,7 @@ async function speak(text, opts = {}) {
   const needServer =
     opts.server === true || !hasWeb || urdu || (voices.length > 0 && !hasVoiceFor(lang));
   if (needServer) {
-    const played = await playServerClip(clean, done);
+    const played = await playServerClip(clean, done, lang);
     if (played) return;
     // Cancelled (barge-in) or already released - do not start another engine.
     if (myToken !== speechToken || ended) return;
@@ -1513,7 +1526,7 @@ async function callSubmit(text) {
     return;
   }
   callSetPhase("speaking");
-  speak(data.text, { force: true, onEnd: callResume });
+  speak(data.text, { force: true, lang: data.language, onEnd: callResume });
 }
 
 if (callBtn) callBtn.addEventListener("click", startCall);
@@ -1776,6 +1789,7 @@ document.getElementById("close-rules").addEventListener("click", () => {
 
 const setSheet = document.getElementById("settings-sheet");
 const setLang = document.getElementById("set-lang");
+const setReplyLang = document.getElementById("set-reply-lang");
 const setSpeak = document.getElementById("set-speak");
 const setVoice = document.getElementById("set-voice");
 const setStt = document.getElementById("set-stt");
@@ -1785,6 +1799,7 @@ const settingsStatus = document.getElementById("settings-status");
 
 function syncSettingsForm() {
   if (setLang) setLang.value = settings.lang;
+  if (setReplyLang) setReplyLang.value = settings.replyLanguage || "auto";
   if (setSpeak) setSpeak.value = settings.speak;
   if (setStt) setStt.value = settings.stt;
   if (setSttEngine) {
@@ -1809,6 +1824,7 @@ function syncSettingsForm() {
 document.getElementById("btn-settings").addEventListener("click", () => {
   syncSettingsForm();
   loadProviders();
+  loadSpeechStatus();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
 });
@@ -1831,6 +1847,8 @@ if (setLang) {
   });
 }
 if (setSpeak) setSpeak.addEventListener("change", () => (settings.speak = setSpeak.value));
+if (setReplyLang)
+  setReplyLang.addEventListener("change", () => (settings.replyLanguage = setReplyLang.value));
 if (setStt) setStt.addEventListener("change", () => (settings.stt = setStt.value));
 if (setSttEngine)
   setSttEngine.addEventListener("change", () => (settings.sttEngine = setSttEngine.value));
@@ -1863,15 +1881,68 @@ document.getElementById("save-settings").addEventListener("click", async () => {
 document.getElementById("test-voice").addEventListener("click", () => {
   const was = settings.speak;
   settings.speak = "on";
+  const urdu = settings.replyLanguage === "ur" || settings.lang === "ur";
   speak(
-    settings.lang === "ur"
-      ? "السلام علیکم، میں عاطف اسسٹنٹ ہوں۔"
-      : "This is the Atif Assistant voice."
+    urdu ? "السلام علیکم، میں عاطف اسسٹنٹ ہوں۔" : "This is the Atif Assistant voice.",
+    { force: true, lang: urdu ? "ur" : "en" }
   );
   settings.speak = was;
 });
 
-/* -------------------------------------------------- providers (API keys) */
+/* ------------------------------------------------ offline speech model */
+// The base Whisper model is weak for Urdu. This lets the user fetch the more
+// accurate "small" model in one tap; the server reports what it already has.
+const dlModelBtn = document.getElementById("download-urdu-model");
+const dlModelNote = document.getElementById("urdu-model-status");
+
+async function loadSpeechStatus() {
+  if (!dlModelBtn && !dlModelNote) return;
+  try {
+    const { stt: s } = await (await fetch("/api/speech")).json();
+    const hasSmall = Boolean(s && s.small_present);
+    if (dlModelBtn) dlModelBtn.hidden = hasSmall;
+    if (dlModelNote) {
+      dlModelNote.textContent = s && s.available
+        ? hasSmall
+          ? `On-device speech ready (${s.model}).`
+          : `On-device speech ready (${s.model}). A more accurate Urdu model is available.`
+        : "On-device speech is not set up yet (needs whisper.cpp).";
+    }
+  } catch {
+    /* leave the default note */
+  }
+}
+
+if (dlModelBtn) {
+  dlModelBtn.addEventListener("click", async () => {
+    dlModelBtn.disabled = true;
+    const original = dlModelBtn.textContent;
+    dlModelBtn.textContent = "DOWNLOADING...";
+    if (dlModelNote) dlModelNote.textContent = "Fetching the Urdu model (~466 MB). This can take a few minutes.";
+    try {
+      const res = await fetch("/api/speech/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "ggml-small.bin" }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (dlModelNote) dlModelNote.textContent = "Urdu model installed. On-device speech is more accurate now.";
+        dlModelBtn.hidden = true;
+        localSttReady = true;
+      } else if (dlModelNote) {
+        dlModelNote.textContent = "Download failed: " + (data.reason || data.error || "unknown error");
+      }
+    } catch (e) {
+      if (dlModelNote) dlModelNote.textContent = "Download failed: " + e.message;
+    } finally {
+      dlModelBtn.disabled = false;
+      dlModelBtn.textContent = original;
+    }
+  });
+}
+
+
 
 const providersEl = document.getElementById("providers-list");
 const providersStatus = document.getElementById("providers-status");

@@ -1752,7 +1752,7 @@ def test_stt() -> None:
     )
 
     orig_bin = stt._BIN
-    orig_model = stt._MODEL
+    orig_model = stt._MODEL_OVERRIDE
     stt._BIN = None
     try:
         r = stt.transcribe(b"RIFF....")
@@ -1763,7 +1763,7 @@ def test_stt() -> None:
     finally:
         stt._BIN = orig_bin
 
-    stt._MODEL = str(Path("/nonexistent/ggml.bin"))
+    stt._MODEL_OVERRIDE = "/nonexistent/ggml.bin"
     try:
         r = stt.transcribe(b"RIFF....")
         check(
@@ -1772,7 +1772,7 @@ def test_stt() -> None:
         )
         check("offline status is honest", stt.status()["available"] is False)
     finally:
-        stt._MODEL = orig_model
+        stt._MODEL_OVERRIDE = orig_model
 
     with tempfile.TemporaryDirectory() as tmp:
         db.use_test_db(Path(tmp) / "stt.db")
@@ -1819,6 +1819,118 @@ def test_stt() -> None:
     db.reset_db_path()
 
 
+def test_language() -> None:
+    """Reply language follows the question when set to auto (Urdu fix).
+
+    The bug being guarded against: an Urdu question answered in English because
+    a stale "English" setting overrode what the user actually wrote.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, engine, stt
+    from atif_assistant.app import app
+
+    print("\nlanguage routing")
+
+    check("urdu script is detected", engine.detect_language("آپ کیا سیو؟") == "ur")
+    check(
+        "roman urdu is detected",
+        engine.detect_language("sleep kyun zaroori hai") == "ur",
+    )
+    check("short roman urdu is detected", engine.detect_language("kya hua") == "ur")
+    check("english is not urdu", engine.detect_language("what is FTS5") == "en")
+    check("empty is english", engine.detect_language("") == "en")
+
+    check(
+        "auto follows urdu",
+        engine.resolve_language("auto", "نیند کیوں ضروری ہے؟") == "ur",
+    )
+    check(
+        "auto follows english",
+        engine.resolve_language("auto", "what is sleep") == "en",
+    )
+    check(
+        "explicit english wins over urdu text",
+        engine.resolve_language("en", "نیند کیوں ضروری ہے؟") == "en",
+    )
+    check(
+        "explicit urdu wins over english text",
+        engine.resolve_language("ur", "what is sleep") == "ur",
+    )
+    check("urdu rule is emitted", engine._language_rule("ur") != "")
+    check("english emits no rule", engine._language_rule("en") == "")
+
+    ctx = engine.build_context("نیند کیوں ضروری ہے؟")
+    check("context records the detected language", ctx["detected_language"] == "ur")
+
+    # The small model (best for Urdu) is preferred, with base as fallback.
+    check("preferred offline model is small", stt.PREFERRED_MODEL == "ggml-small.bin")
+    check(
+        "model candidates prefer small then base",
+        stt.MODEL_CANDIDATES[:2] == ("ggml-small.bin", "ggml-base.bin"),
+    )
+    check(
+        "unknown model download is rejected",
+        stt.download_model("nope.bin")["ok"] is False,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "lang.db")
+        db.init_db()
+        client = TestClient(app)
+
+        async def fake_respond(question, mode="ask", ctx=None):
+            return {
+                "text": "[FACT] stub",
+                "labels": [],
+                "warnings": [],
+                "patterns": [],
+                "provider": "stub",
+                "critique": [],
+            }
+
+        orig_respond = engine.respond
+        orig_extract = __import__(
+            "atif_assistant.app", fromlist=["_extract_in_background"]
+        )._extract_in_background
+        engine.respond = fake_respond
+        import atif_assistant.app as app_mod
+
+        async def noop_extract(*args, **kwargs):
+            return None
+
+        app_mod._extract_in_background = noop_extract
+        try:
+            r = client.post(
+                "/api/ask",
+                json={"question": "نیند کیوں ضروری ہے؟", "reply_language": "auto"},
+            )
+            check("ask echoes urdu", r.json().get("language") == "ur")
+
+            r2 = client.post(
+                "/api/ask", json={"question": "what is sleep", "reply_language": "auto"}
+            )
+            check("ask echoes english", r2.json().get("language") == "en")
+
+            r3 = client.post(
+                "/api/ask",
+                json={"question": "نیند کیوں ضروری ہے؟", "reply_language": "en"},
+            )
+            check("ask honours an explicit override", r3.json().get("language") == "en")
+        finally:
+            engine.respond = orig_respond
+            app_mod._extract_in_background = orig_extract
+
+        speech = client.get("/api/speech").json()
+        check("speech status endpoint responds", "stt" in speech and "tts" in speech)
+        check("speech status lists models", "models_present" in speech["stt"])
+
+        bad = client.post("/api/speech/model", json={"name": "bogus.bin"})
+        check("model endpoint rejects unknown names", bad.status_code == 400)
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -1850,6 +1962,7 @@ def main() -> int:
     test_uploads()
     test_backup()
     test_providers()
+    test_language()
     test_ask_endpoint()
     test_misc_endpoints()
     test_extract()

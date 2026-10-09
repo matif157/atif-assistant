@@ -215,8 +215,70 @@ def build_context(question: str) -> dict[str, Any]:
         "contradictions": relevant_contradictions,
         "escalations": [],
         "language": None,
+        "detected_language": detect_language(question),
         "detail": None,
     }
+
+
+# Urdu script blocks: Arabic, Arabic Supplement, Arabic Extended-A, Arabic
+# Presentation Forms A and B, and the Arabic presentation/indicator ranges.
+_URDU_SCRIPT_RE = re.compile(
+    "[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]"
+)
+
+# Roman Urdu is the way most people here type Urdu on a phone. These words are
+# strong, low-false-positive markers; ordinary English almost never contains
+# three of them in one sentence.
+_ROMAN_URDU = {
+    "kya", "kyun", "kyu", "kia", "nahi", "nahin", "nai", "hai", "hain", "ha",
+    "mera", "meri", "mere", "mujhe", "mujhy", "tum", "tumhara", "tumhari",
+    "aap", "apna", "apni", "kar", "karo", "karna", "kaise", "kaisay", "kab",
+    "kahan", "kaun", "kaunsi", "acha", "achha", "theek", "thik", "bahut",
+    "bohat", "zyada", "kam", "chahiye", "chahiyay", "raha", "rahi", "rahe",
+    "tha", "thi", "the", "hoga", "hogi", "aur", "lekin", "magar", "phir",
+    "abhi", "kal", "aaj", "raat", "din", "dil", "yaar", "bhai", "behen",
+    "paise", "paisa", "ghar", "kaam", "zindagi", "yaad", "bat", "baat",
+    "suno", "bata", "batao", "dekho", "dekha", "hua", "hui", "kuch", "koi",
+}
+
+
+def detect_language(text: str) -> str:
+    """Best-effort detection of Urdu vs English for a user's message.
+
+    Script detection is decisive: any Arabic-block character means Urdu.
+    Otherwise Roman Urdu is scored by distinct markers. Returns ``"ur"`` or
+    ``"en"`` and never raises.
+    """
+    if not text:
+        return "en"
+    if _URDU_SCRIPT_RE.search(text):
+        return "ur"
+    words = re.findall(r"[a-z']+", text.lower())
+    hits = sum(1 for w in words if w in _ROMAN_URDU)
+    # Two distinct markers is already strong; one only counts if the message is
+    # very short (e.g. "kya hua") so a stray English word cannot trigger Urdu.
+    if hits >= 2 or (hits == 1 and len(words) <= 4):
+        return "ur"
+    return "en"
+
+
+def resolve_language(forced: str | None, question: str) -> str:
+    """Turn the reply-language setting into a concrete ``"en"`` or ``"ur"``.
+
+    ``forced`` is the stored setting: ``"auto"`` (or empty/None) means follow
+    what the user actually wrote; ``"en"``/``"ur"`` pin the reply language.
+    """
+    want = (forced or "auto").strip().lower()
+    if want.startswith("en"):
+        return "en"
+    if want.startswith("ur"):
+        return "ur"
+    return detect_language(question)
+
+
+def _effective_language(ctx: dict[str, Any]) -> str:
+    """The language to answer in: an explicit ctx value, else the detection."""
+    return ctx.get("language") or ctx.get("detected_language") or "en"
 
 
 def _language_rule(language: str | None) -> str:
@@ -233,7 +295,7 @@ def _language_rule(language: str | None) -> str:
 
 
 def _system_with(ctx: dict[str, Any], instructions: str) -> str:
-    rule = _language_rule(ctx.get("language"))
+    rule = _language_rule(_effective_language(ctx))
     return BASE_SYSTEM + instructions + (f"\n\n{rule}" if rule else "")
 
 
@@ -271,7 +333,7 @@ def _guardrails(ctx: dict[str, Any]) -> str:
             lines.append(f"- {r['text']}")
     # Output language and length are user settings. The reality labels stay in
     # English brackets so the Reality Engine can still parse and colour them.
-    if (ctx.get("language") or "").lower().startswith("ur"):
+    if _effective_language(ctx).startswith("ur"):
         lines.append(
             "LANGUAGE: answer in Urdu (اردو). Keep the bracketed labels "
             "[FACT] [INFERENCE] [ASSUMPTION] [UNKNOWN] [PREDICTION] in English."
@@ -455,7 +517,7 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         text = revised
     if provider != "offline" and not structure_ok(text):
         repaired = await _repair_structure(
-            text, provider, language=ctx.get("language")
+            text, provider, language=_effective_language(ctx)
         )
         if structure_ok(repaired):
             text = repaired
@@ -533,7 +595,7 @@ async def _self_critique(
         )
         if part and part.strip()
     )
-    system = BASE_SYSTEM + CRITIQUE_INSTRUCTIONS + _language_rule(ctx.get("language"))
+    system = BASE_SYSTEM + CRITIQUE_INSTRUCTIONS + _language_rule(_effective_language(ctx))
     if audit_challenge:
         system += "\n7. CHALLENGE INTEGRITY - did it actually push back?\n"
     # A revision must not strip the mandated output structure, or the brake
@@ -665,7 +727,7 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         text = revised
     if provider != "offline" and not structure_ok(text, True):
         repaired = await _repair_structure(
-            text, provider, challenge_mode=True, language=ctx.get("language")
+            text, provider, challenge_mode=True, language=_effective_language(ctx)
         )
         if structure_ok(repaired, True):
             text = repaired
@@ -719,7 +781,7 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         text = revised
     if provider != "offline" and not structure_ok(text):
         repaired = await _repair_structure(
-            text, provider, language=ctx.get("language")
+            text, provider, language=_effective_language(ctx)
         )
         if structure_ok(repaired):
             text = repaired

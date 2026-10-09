@@ -33,6 +33,7 @@ class Ask(BaseModel):
     question: str
     session: str | None = None
     lang: str | None = None
+    reply_language: str | None = None
     detail: str | None = None
 
 
@@ -150,6 +151,24 @@ def make_transcript(payload: SttIn) -> JSONResponse:
     )
 
 
+@app.get("/api/speech")
+def speech_status() -> dict:
+    """What the offline speech stack currently has, and what it could fetch."""
+    return {"stt": stt.status(), "tts": tts.status()}
+
+
+@app.post("/api/speech/model")
+def download_speech_model(payload: dict | None = None) -> JSONResponse:
+    """Download a better offline Whisper model (default: small, best for Urdu)."""
+    name = (payload or {}).get("name") or stt.PREFERRED_MODEL
+    if name not in stt.MODEL_URLS:
+        return JSONResponse({"error": f"unknown model {name!r}"}, status_code=400)
+    result = stt.download_model(name)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=503)
+    return JSONResponse(result)
+
+
 async def _extract_in_background(question: str, answer: str, provider: str) -> None:
     """Learn from one exchange after the reply has already gone out.
 
@@ -175,13 +194,22 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
 
     ctx = engine.build_context(payload.question)
     ctx["escalations"] = route.escalations
-    ctx["language"] = payload.lang
+    # The reply language follows the question when the setting is "auto" (the
+    # default), so speaking Urdu is answered in Urdu without touching a setting.
+    forced = (
+        payload.reply_language
+        if payload.reply_language is not None
+        else db.get_setting("reply_language", "auto")
+    )
+    resolved_lang = engine.resolve_language(forced, payload.question)
+    ctx["language"] = resolved_lang
     ctx["detail"] = payload.detail
     result = await engine.respond(
         payload.question, mode=route.mode, ctx=ctx
     )
     result["route"] = route.to_dict()
     result["asked_count"] = repeats + 1
+    result["language"] = resolved_lang
 
     db.save_message(
         session,

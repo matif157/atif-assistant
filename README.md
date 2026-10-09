@@ -216,6 +216,8 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `DELETE /api/rules/{id}` | remove a rule |
 | `POST /api/tts` | synthesize a spoken reply (WAV) for languages with no device voice |
 | `POST /api/stt` | transcribe a recorded clip locally (whisper.cpp), for offline speech |
+| `GET /api/speech` | what the offline speech stack has (model in use, engines ready) |
+| `POST /api/speech/model` | download a better offline model (default `small`, best for Urdu) |
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
@@ -477,11 +479,17 @@ The **CALL** button (top bar) starts a hands-free voice conversation:
 4. listens again - until you tap **END CALL**.
 
 The on-screen orb shows the live state (LISTENING / THINKING / SPEAKING). Tap the
-orb while it is speaking to **interrupt** and take the turn back. The spoken
-language follows the **LANGUAGE** setting (English or Urdu), not the microphone
-language, so an Urdu answer is read in Urdu; the **MICROPHONE LANGUAGE** setting
-only affects what you are understood to be speaking. Switching **LANGUAGE** also
-moves the microphone and resets a mismatched voice to Automatic.
+orb while it is speaking to **interrupt** and take the turn back.
+
+**Reply language is automatic by default.** **Settings → REPLY LANGUAGE** offers
+*Automatic (match what I speak)*, *English* and *اردو (Urdu)*. On *Automatic* the
+answer follows the language you actually wrote or spoke — Urdu script or Roman
+Urdu get an Urdu answer, English gets English — so nobody has to remember to
+change a setting before speaking Urdu. Pick English or Urdu to pin the reply
+language regardless of the question. The spoken voice follows the resolved reply
+language (so an Urdu answer is always read in Urdu), with a script test on the
+answer as a final guard. **LANGUAGE / زبان** is the interface language and text
+direction; **MICROPHONE LANGUAGE** is what you are understood to be speaking.
 
 Most systems ship **no Urdu voice**, so the browser would read Urdu text with an
 English voice and it comes out as gibberish. When the language has no matching
@@ -507,9 +515,15 @@ Assistant records the clip and transcribes it **on the server** instead:
 ```sh
 brew install whisper.cpp espeak-ng
 mkdir -p ~/.local/share/atif-assistant/models
-curl -L -o ~/.local/share/atif-assistant/models/ggml-base.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+curl -L -o ~/.local/share/atif-assistant/models/ggml-small.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
+
+The **small** model is preferred because it is markedly more accurate for Urdu
+than **base**; if only base is present the app still uses it. **Settings →
+SPEECH RECOGNITION** shows what is installed and, when only a weaker model is
+present, offers a one-tap **DOWNLOAD URDU MODEL** (fetches `small` via
+`POST /api/speech/model`). `GET /api/speech` reports the current model.
 
 **Settings → SPEECH RECOGNITION** then offers *Automatic* (use the offline
 engine whenever it is installed), *Browser (online)* or *On-device (offline)*.

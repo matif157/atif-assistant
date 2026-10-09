@@ -77,6 +77,17 @@ def available() -> bool:
     return server_available() or offline_available()
 
 
+def status() -> dict[str, Any]:
+    """Which speech engines are ready, for the settings screen."""
+    return {
+        "available": available(),
+        "server": server_available(),
+        "offline": offline_available(),
+        "espeak": ESPEAK,
+        "model": DEFAULT_MODEL if server_available() else None,
+    }
+
+
 def _via_gemini(clean: str) -> dict[str, Any]:
     key = llm.provider_key("gemini")
     url = (
