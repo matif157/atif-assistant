@@ -1537,8 +1537,11 @@ function providerBadge(state) {
   const b = document.createElement("span");
   b.className = "pbadge";
   b.dataset.role = "badge";
-  b.classList.add(state === "ready" ? "pok" : state === "error" ? "pbad" : "punknown");
-  b.textContent = state === "ready" ? "READY" : state === "error" ? "ERROR" : "UNKNOWN";
+  b.classList.add(
+    state === "ready" ? "pok" : state === "error" ? "pbad" : state === "off" ? "poff" : "punknown"
+  );
+  b.textContent =
+    state === "ready" ? "READY" : state === "error" ? "ERROR" : state === "off" ? "OFF" : "UNKNOWN";
   return b;
 }
 
@@ -1546,12 +1549,21 @@ function renderProvider(p) {
   const card = document.createElement("div");
   card.className = "pcard";
   card.dataset.name = p.name;
+  const off = p.enabled === false;
 
   const head = document.createElement("div");
   head.className = "phead";
   const title = document.createElement("strong");
   title.textContent = p.label || p.name;
-  head.append(title, providerBadge(p.ready ? "ready" : p.error ? "error" : "unknown"));
+  const badge = providerBadge(off ? "off" : p.ready ? "ready" : p.error ? "error" : "unknown");
+  const toggle = document.createElement("button");
+  toggle.className = "ghost small ptoggle";
+  if (off) toggle.classList.add("off");
+  toggle.dataset.role = "toggle";
+  toggle.textContent = off ? "TURN ON" : "TURN OFF";
+  toggle.title = off ? "Enable this provider" : "Disable this provider";
+  if (off) head.append(title, badge, toggle);
+  else head.append(title, badge, toggle);
   card.appendChild(head);
 
   const mkRow = (labelText, role, value, placeholder, type) => {
@@ -1599,9 +1611,11 @@ function renderProvider(p) {
   const note = document.createElement("div");
   note.className = "hint";
   note.dataset.role = "note";
-  if (!p.key_set && p.name !== "ollama") note.textContent = "no key set";
+  if (off) note.textContent = "turned off - not used for answers";
+  else if (!p.key_set && p.name !== "ollama") note.textContent = "no key set";
   card.appendChild(note);
 
+  toggle.addEventListener("click", () => toggleProvider(card, off));
   save.addEventListener("click", () => saveProvider(card));
   test.addEventListener("click", () => testProvider(card));
   return card;
@@ -1636,8 +1650,30 @@ function providerPayload(card) {
 function setCardBadge(card, state, text) {
   const badge = card.querySelector('[data-role="badge"]');
   if (!badge) return;
-  badge.className = "pbadge " + (state === "ready" ? "pok" : state === "error" ? "pbad" : "punknown");
-  badge.textContent = text || (state === "ready" ? "READY" : state === "error" ? "ERROR" : "UNKNOWN");
+  const cls =
+    state === "ready" ? "pok" : state === "error" ? "pbad" : state === "off" ? "poff" : "punknown";
+  badge.className = "pbadge " + cls;
+  badge.textContent =
+    text || (state === "ready" ? "READY" : state === "error" ? "ERROR" : state === "off" ? "OFF" : "UNKNOWN");
+}
+
+async function toggleProvider(card, enable) {
+  const name = card.dataset.name;
+  const note = card.querySelector('[data-role="note"]');
+  const toggle = card.querySelector('[data-role="toggle"]');
+  if (toggle) toggle.disabled = true;
+  try {
+    const res = await fetch(`/api/providers/${name}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !!enable }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || "toggle failed");
+    await loadProviders();
+  } catch (err) {
+    if (toggle) toggle.disabled = false;
+    if (note) note.textContent = `Could not change: ${err.message}`;
+  }
 }
 
 async function saveProvider(card) {

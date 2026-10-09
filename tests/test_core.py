@@ -1095,6 +1095,48 @@ def test_providers() -> None:
         # --- unknown provider rejected.
         check("unknown provider is a 404", client.post("/api/providers/nope", json={}).status_code == 404)
 
+        # --- a provider can be turned off and on; a disabled provider is
+        #     skipped by the failover chain and is never probed.
+        db.set_setting("provider.groq.api_key", "toggle-key")
+        check("providers start enabled", llm.provider_enabled("groq") is True)
+        toggled = client.post("/api/providers/groq", json={"enabled": False}).json()
+        check("provider can be turned off", toggled["provider"]["enabled"] is False)
+        check("turning off keeps the key", llm.provider_key("groq") == "toggle-key")
+        listed = [p for p in client.get("/api/providers").json()["providers"] if p["name"] == "groq"][0]
+        check("disabled state shows in the listing", listed["enabled"] is False)
+        client.post("/api/providers/groq", json={"enabled": True})
+        check("provider can be turned on again", llm.provider_enabled("groq") is True)
+
+        import asyncio
+
+        async def skip_disabled():
+            called = []
+            original_handlers = {n: llm.HANDLERS.get(n) for n in llm.HANDLERS}
+
+            def make_spy(name):
+                async def spy(model, messages, **kw):
+                    called.append(name)
+                    return "spy"
+
+                return spy
+
+            for n in ("groq", "gemini", "openrouter", "ollama"):
+                llm.HANDLERS[n] = make_spy(n)
+            try:
+                await llm.complete([{"role": "user", "content": "hi"}])
+            except llm.ProviderError:
+                pass
+            finally:
+                for n, h in original_handlers.items():
+                    llm.HANDLERS[n] = h
+            return called
+
+        db.set_setting("provider.groq.enabled", "0")
+        called_order = asyncio.run(skip_disabled())
+        check("complete() skips a disabled provider", called_order and called_order[0] == "gemini")
+        db.delete_setting("provider.groq.enabled")
+
+
         # --- the TEST endpoint, with the network call stubbed out.
         original = llm.HANDLERS.get("groq")
 

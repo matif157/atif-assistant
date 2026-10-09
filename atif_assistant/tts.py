@@ -57,11 +57,13 @@ def _wav(pcm: bytes, rate: int = 24000, channels: int = 1, bits: int = 16) -> by
 
 
 def available() -> bool:
-    return bool(llm.provider_key("gemini"))
+    return bool(llm.provider_key("gemini")) and llm.provider_enabled("gemini")
 
 
 def synthesize(text: str, lang: str = "en") -> dict[str, Any]:
     """Return {"audio": <wav bytes|None>, "reason": <str|None>, "model": ...}."""
+    if not llm.provider_enabled("gemini"):
+        return {"audio": None, "reason": "server speech is turned off"}
     key = llm.provider_key("gemini")
     if not key:
         return {"audio": None, "reason": "server speech needs a Gemini key"}

@@ -90,6 +90,18 @@ def provider_model(name: str) -> str:
     return MODEL_DEFAULTS.get(name, "")
 
 
+def provider_enabled(name: str) -> bool:
+    """Whether a provider may be used. Defaults to enabled.
+
+    A disabled provider is skipped entirely (no calls, no quota), so the user
+    can force a local-only, offline setup by turning the hosted ones off.
+    """
+    override = _override(name, "enabled")
+    if override is None:
+        return True
+    return str(override).strip().lower() not in {"0", "false", "off", "no"}
+
+
 def ollama_url() -> str:
     """The local server URL: database override, else environment, else default."""
     override = _override("ollama", "url")
@@ -234,6 +246,8 @@ async def complete(
     last_error: Exception | None = None
 
     for name in PROVIDER_ORDER:
+        if not provider_enabled(name):
+            continue
         handler = HANDLERS.get(name)
         if handler is None:
             continue
@@ -281,6 +295,7 @@ def provider_status(name: str) -> dict[str, Any]:
         "name": name,
         "label": PROVIDER_LABELS.get(name, name),
         "configured": configured,
+        "enabled": provider_enabled(name),
         "model": provider_model(name),
         "key_set": bool(key),
         "key_hint": mask_key(key),
@@ -306,6 +321,9 @@ def available_providers() -> list[dict[str, Any]]:
 
 async def _probe_one(name: str) -> dict[str, Any]:
     """Make the smallest possible real call to one provider."""
+    if not provider_enabled(name):
+        configured = name == "ollama" or bool(provider_key(name))
+        return {"ready": False, "configured": configured, "error": "disabled"}
     if name == "ollama":
         ok = await ollama_is_up()
         return {
@@ -359,6 +377,7 @@ async def probe_providers(force: bool = False) -> list[dict[str, Any]]:
             "label": PROVIDER_LABELS.get(name, name),
             "ready": probe["ready"],
             "configured": probe["configured"],
+            "enabled": provider_enabled(name),
             "note": provider_model(name),
             "error": probe["error"],
         }

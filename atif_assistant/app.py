@@ -316,6 +316,7 @@ class ProviderIn(BaseModel):
     model: str | None = None
     url: str | None = None
     clear_key: bool = False
+    enabled: bool | None = None
 
 
 @app.get("/api/providers")
@@ -376,6 +377,8 @@ def save_provider(name: str, payload: ProviderIn) -> JSONResponse:
         elif payload.api_key and payload.api_key.strip():
             db.set_setting(f"provider.{name}.api_key", payload.api_key.strip())
         put_or_clear(f"provider.{name}.model", payload.model)
+    if payload.enabled is not None:
+        db.set_setting(f"provider.{name}.enabled", "1" if payload.enabled else "0")
     invalidate_probe_cache()
     return JSONResponse({"ok": True, "provider": provider_status(name)})
 

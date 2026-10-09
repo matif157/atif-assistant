@@ -33,7 +33,7 @@ MIME_BY_EXT = {
 
 
 def transcribe_available() -> bool:
-    return bool(llm.provider_key("groq"))
+    return bool(llm.provider_key("groq")) and llm.provider_enabled("groq")
 
 
 def transcribe(raw: bytes, filename: str) -> dict[str, Any]:
@@ -41,6 +41,13 @@ def transcribe(raw: bytes, filename: str) -> dict[str, Any]:
 
     Result mirrors ``extract.extract``: ``text``, ``source``, ``reason``, ``meta``.
     """
+    if not llm.provider_enabled("groq"):
+        return {
+            "text": None,
+            "source": None,
+            "reason": "audio transcription is turned off in Settings",
+            "meta": {},
+        }
     key = llm.provider_key("groq")
     if not key:
         return {

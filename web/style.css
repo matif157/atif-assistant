@@ -339,17 +339,20 @@ textarea:focus { outline: none; border-color: var(--acc); }
   gap: 8px;
 }
 .pcard .phead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.pcard .phead strong { font-size: 12px; letter-spacing: .04em; }
+.pcard .phead strong { font-size: 12px; letter-spacing: .04em; margin-right: auto; }
 .pbadge {
-  font-size: 9px;
-  letter-spacing: .1em;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--line);
+  font-size: 10px;
+  letter-spacing: .06em;
   color: var(--dim);
 }
 .pbadge.pok { color: var(--acc); border-color: var(--acc); }
 .pbadge.pbad { color: var(--warn); border-color: var(--warn); }
+.pbadge.poff { color: var(--dim); border-color: var(--line); opacity: .6; }
+.ptoggle { padding: 2px 8px; }
+.ptoggle.off { color: var(--dim); }
 .pcard .hint { margin-top: 0; }
 #providers-status:not(:empty) { color: var(--acc); }
 

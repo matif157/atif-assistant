@@ -219,7 +219,7 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
 | `GET /api/providers` | provider config with masked keys and live readiness |
-| `POST /api/providers/{name}` | set or clear a provider key/model/url |
+| `POST /api/providers/{name}` | set or clear a provider key/model/url, or toggle it on/off |
 | `POST /api/providers/{name}/test` | test one provider (optionally with unsaved values) |
 | `POST /api/providers/test` | test every provider |
 | `GET/POST /api/settings` | stored key/value settings |
@@ -506,9 +506,16 @@ the model ever slips into small talk or a fake-persona reply.
 
 Atif Assistant tries providers in order (`groq → gemini → openrouter → ollama`)
 and falls back to an offline answer if none is reachable. **Settings → MODELS &
-API KEYS** manages them without editing files: each provider has a key field, a
-model field, a **TEST** button, and there is a **TEST ALL**. A key can be tested
-before it is saved.
+API KEYS** manages them without editing files: each provider has an on/off
+**toggle**, a key field, a model field, a **TEST** button, and there is a
+**TEST ALL**. A key can be tested before it is saved.
+
+The toggle is stored as `provider.<name>.enabled`; a **disabled provider is
+skipped entirely** — no call, no quota — and is never probed. Turning all hosted
+providers off leaves only local Ollama, which gives a **private, offline chat**:
+answers keep working with the network gone. (The toggle is why the same masked
+keys can stay saved while a provider is parked.)
+
 
 Resolution order for a key or model is **saved setting → `.env` → built-in
 default**. Saving an empty key (or CLEAR) stores a blank, which *is* an override,
@@ -643,7 +650,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 317 checks |
+| `tests/test_core.py` | 323 checks |
 
 ---
 
@@ -653,7 +660,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-317 checks across twenty-seven groups:
+323 checks across twenty-seven groups:
 
 | Group | Covers |
 |---|---|
@@ -680,7 +687,7 @@ you almost certainly won't.
 | plan | document → grounded TITLE/RULE draft; strict rules enforced, candidates approvable, rules removable |
 | tts | server speech for voice-less languages, label stripping, valid WAV, honest 503 when it cannot |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
-| providers | key/model precedence, masking, settings/export redaction, save/clear, TEST endpoint |
+| providers | key/model precedence, masking, settings/export redaction, save/clear, on/off toggle, TEST endpoint |
 | ask endpoint | every question class routes to the honest mode; exchange persisted; repeat counting |
 | misc endpoints | memory search, evidence, decision resolve + 404 guards, learned approve/reject, media content |
 | structure guard | Reality Engine labels + CASE AGAINST enforced; revision repaired or rejected |

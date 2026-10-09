@@ -46,8 +46,8 @@ VISION_PROMPT = (
 
 
 def vision_available() -> bool:
-    """True when a key for a vision-capable provider is configured."""
-    return bool(llm.provider_key("gemini"))
+    """True when a key for a vision-capable provider is configured and enabled."""
+    return bool(llm.provider_key("gemini")) and llm.provider_enabled("gemini")
 
 
 def describe(raw: bytes, filename: str) -> dict[str, Any]:
@@ -56,6 +56,13 @@ def describe(raw: bytes, filename: str) -> dict[str, Any]:
     Result mirrors ``extract.extract``: ``text`` (or ``None``), ``source``,
     ``reason`` and ``meta``.
     """
+    if not llm.provider_enabled("gemini"):
+        return {
+            "text": None,
+            "source": None,
+            "reason": "the vision provider is turned off in Settings",
+            "meta": {},
+        }
     key = llm.provider_key("gemini")
     if not key:
         return {
