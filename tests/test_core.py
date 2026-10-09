@@ -739,6 +739,13 @@ def test_uploads() -> None:
 
         conn = db.connect()
         check("media row written", conn.execute("SELECT COUNT(*) c FROM media").fetchone()["c"] == 1)
+        lib = client.get("/api/media").json()["media"]
+        check("upload appears in media library", len(lib) == 1)
+        import json as _json
+
+        meta = _json.loads(lib[0]["meta"] or "{}")
+        check("media library carries the filename", meta.get("filename") == "plan.txt")
+        check("media library carries related_to as tags", lib[0]["tags"] == "business plan")
         check(
             "uploaded text is searchable as evidence",
             any("Secret" in h["body"] for h in db.search_evidence("growth", limit=3)),

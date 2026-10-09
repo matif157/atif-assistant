@@ -54,6 +54,8 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
@@ -61,7 +63,8 @@ header {
   top: 0;
   z-index: 10;
 }
-.brand { display: flex; align-items: center; gap: 8px; letter-spacing: .12em; font-size: 13px; }
+header .ghost { flex: 0 0 auto; }
+.brand { display: flex; align-items: center; gap: 8px; letter-spacing: .12em; font-size: 13px; flex: 1 1 auto; min-width: 0; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .dot.on { background: var(--acc); box-shadow: 0 0 8px var(--acc); }
 .dot.off { background: var(--warn); }
@@ -185,6 +188,15 @@ textarea:focus { outline: none; border-color: var(--acc); }
   font-size: 17px;
 }
 #send:disabled { opacity: .4; }
+#mic {
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border-radius: 10px;
+  font-size: 16px;
+  margin: 0;
+  flex: 0 0 auto;
+}
 .hint { margin-top: 7px; font-size: 10.5px; color: var(--dim); }
 
 /* memory sheet */
@@ -315,4 +327,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
 @media (max-width: 560px) {
   .msg { max-width: 96%; }
   .sub { display: none; }
+  header { padding: 10px 10px; }
+  header .ghost { padding: 4px 7px; font-size: 10px; letter-spacing: .06em; }
+  .brand { font-size: 12px; }
 }
