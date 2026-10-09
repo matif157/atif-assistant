@@ -39,6 +39,7 @@
     <button id="send" aria-label="Send">&#10148;</button>
   </div>
   <div class="hint" id="hint">Every claim labelled. No mode to pick - Atif Assistant routes each question itself.</div>
+  <div class="hint" id="voice-who" hidden></div>
 </footer>
 
 <div class="sheet" id="memory-sheet" hidden>
@@ -208,6 +209,18 @@
       <button class="ghost" id="test-all-providers">TEST ALL</button>
     </div>
     <div id="providers-status" class="hint"></div>
+
+    <label>VOICE PROFILES</label>
+    <p class="hint">Save a few seconds of someone's voice so the assistant can tell who is speaking. Identification is a labelled guess - it never changes memory on its own.</p>
+    <div id="voiceprints-list" class="providers"></div>
+    <div class="form-actions">
+      <input id="voice-name" placeholder="name" aria-label="Name" style="flex:1;min-width:0">
+      <button class="ghost" id="voice-enroll">RECORD &amp; SAVE VOICE</button>
+    </div>
+    <div class="form-actions">
+      <button class="ghost" id="download-voice-model" hidden>DOWNLOAD VOICE MODEL</button>
+    </div>
+    <div id="voice-status" class="hint"></div>
 
     <label>BACKUP</label>
     <div class="form-actions">

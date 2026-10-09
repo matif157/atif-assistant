@@ -1948,6 +1948,132 @@ def test_language() -> None:
     check("hands-free is persisted", "handsfree: settings.handsfree" in app_js)
 
 
+def test_voice() -> None:
+    """Speaker identification: matching, averaging, and advisory endpoints.
+
+    The voice engine is stubbed so the test needs neither the model nor a
+    microphone; what it guards is the matching maths, the enrolment averaging,
+    and that a spoken answer is attributed without that attribution becoming a
+    stored fact.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, stt, voice_id
+    from atif_assistant.app import app
+
+    print("\nvoice id")
+
+    check(
+        "default voice model is downloadable",
+        voice_id.DEFAULT_MODEL in voice_id.MODEL_URLS,
+    )
+    check(
+        "unknown voice model is rejected",
+        voice_id.download_model("nope.onnx")["ok"] is False,
+    )
+    status = voice_id.status()
+    check(
+        "voice status reports the engine",
+        "available" in status and "threshold" in status and "model" in status,
+    )
+
+    a = voice_id.normalize([1.0, 0.0, 0.0])
+    close = voice_id.normalize([0.9, 0.1, 0.0])
+    far = voice_id.normalize([0.0, 0.0, 1.0])
+    match = voice_id.identify(a, [{"id": 1, "name": "A", "embedding": close}])
+    check("same voice matches the saved print", match and match["name"] == "A")
+    check("a close voice is reported known", match["known"] is True)
+    check(
+        "a different voice is not known",
+        voice_id.identify(a, [{"id": 1, "name": "A", "embedding": far}])["known"] is False,
+    )
+    check("no saved prints means no match", voice_id.identify(a, []) is None)
+    check("no embedding means no match", voice_id.identify(None, [{"id": 1, "name": "A", "embedding": close}]) is None)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "voice.db")
+        db.init_db()
+
+        vid = db.add_voiceprint("Atif", [1.0, 0.0])
+        again = db.add_voiceprint("Atif", [0.0, 1.0])
+        check("the same name reuses the row", vid == again)
+        saved = db.list_voiceprints()
+        check("one voiceprint is stored", len(saved) == 1)
+        check("re-enrolment counts samples", saved[0]["samples"] == 2)
+        check("the list API never exposes the embedding", "embedding" not in saved[0])
+        check(
+            "the raw embedding is kept for matching",
+            len(db.voiceprints()[0]["embedding"]) == 2,
+        )
+        check("a voiceprint can be removed", db.remove_voiceprint(vid) is True)
+        check("removing it again reports nothing", db.remove_voiceprint(vid) is False)
+
+        client = TestClient(app)
+        orig_available = voice_id.available
+        orig_embed = voice_id.embed_wav
+        voice_id.available = lambda: True
+        voice_id.embed_wav = lambda data: [1.0, 0.0, 0.0]
+        try:
+            r = client.post("/api/voiceprints", json={"name": "Atif", "audio": "AAAA"})
+            check("the enrol endpoint accepts a clip", r.status_code == 200 and r.json()["ok"])
+            r = client.get("/api/voiceprints")
+            check(
+                "the voiceprints endpoint lists people",
+                r.status_code == 200 and r.json()["count"] == 1,
+            )
+            r = client.post("/api/voice/identify", json={"audio": "AAAA"})
+            check(
+                "the identify endpoint returns a match",
+                (r.json().get("match") or {}).get("name") == "Atif",
+            )
+            vp_id = r.json()["match"]["id"]
+            check(
+                "the delete endpoint removes a voice",
+                client.delete(f"/api/voiceprints/{vp_id}").json()["ok"] is True,
+            )
+            check(
+                "deleting a missing voice is a 404",
+                client.delete(f"/api/voiceprints/{vp_id}").status_code == 404,
+            )
+            check(
+                "a blank name is refused",
+                client.post("/api/voiceprints", json={"name": "  ", "audio": "AAAA"}).status_code == 400,
+            )
+
+            orig_transcribe = stt.transcribe
+            stt.transcribe = lambda raw, lang: {"text": "hello", "meta": {}}
+            try:
+                client.post("/api/voiceprints", json={"name": "Atif", "audio": "AAAA"})
+                r = client.post("/api/stt", json={"audio": "AAAA", "lang": "en"})
+                check(
+                    "stt attaches the identified speaker",
+                    (r.json().get("speaker") or {}).get("name") == "Atif",
+                )
+                r = client.post("/api/stt", json={"audio": "AAAA", "lang": "en", "identify": False})
+                check("stt can skip identification", r.json().get("speaker") is None)
+            finally:
+                stt.transcribe = orig_transcribe
+        finally:
+            voice_id.available = orig_available
+            voice_id.embed_wav = orig_embed
+
+        # With no engine the endpoints say so instead of guessing.
+        voice_id.available = lambda: False
+        try:
+            check(
+                "enrolling without an engine is a 503",
+                client.post("/api/voiceprints", json={"name": "X", "audio": "AAAA"}).status_code == 503,
+            )
+            check(
+                "identifying without an engine is a 503",
+                client.post("/api/voice/identify", json={"audio": "AAAA"}).status_code == 503,
+            )
+        finally:
+            voice_id.available = orig_available
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -1988,6 +2114,7 @@ def main() -> int:
     test_plan()
     test_tts()
     test_stt()
+    test_voice()
     test_structure_guard()
 
     if before is not None:

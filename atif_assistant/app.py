@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, location, plan, router, stt, tts, uploads
+from . import db, engine, learn, location, plan, router, stt, tts, uploads, voice_id
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .llm import (
     invalidate_probe_cache,
@@ -35,6 +35,8 @@ class Ask(BaseModel):
     lang: str | None = None
     reply_language: str | None = None
     detail: str | None = None
+    speaker: str | None = None
+    speaker_score: float | None = None
 
 
 class TtsIn(BaseModel):
@@ -45,6 +47,16 @@ class TtsIn(BaseModel):
 class SttIn(BaseModel):
     audio: str
     lang: str | None = None
+    identify: bool = True
+
+
+class VoiceEnrollIn(BaseModel):
+    name: str
+    audio: str
+
+
+class VoiceAudioIn(BaseModel):
+    audio: str
 
 
 class DecisionIn(BaseModel):
@@ -85,6 +97,7 @@ async def health(probe: bool = False) -> dict:
             "server": tts.server_available(),
             "offline_out": tts.offline_available(),
             "offline_in": stt.status(),
+            "speaker_id": voice_id.status(),
         },
         "tailscale_host": TAILSCALE_HOST,
     }
@@ -145,10 +158,28 @@ def make_transcript(payload: SttIn) -> JSONResponse:
             {"error": result.get("reason") or "speech recognition unavailable"},
             status_code=503,
         )
+    speaker = None
+    if payload.identify:
+        speaker = _identify_speaker(raw)
     return JSONResponse(
-        {"text": result["text"], "meta": result.get("meta") or {}},
+        {"text": result["text"], "meta": result.get("meta") or {}, "speaker": speaker},
         headers={"Cache-Control": "no-store"},
     )
+
+
+def _identify_speaker(raw: bytes) -> dict | None:
+    """Attribute a clip to a saved person, if the engine and prints exist.
+
+    Best-effort and advisory: returns None whenever anything is missing rather
+    than failing the transcription that already succeeded.
+    """
+    if not voice_id.available():
+        return None
+    prints = db.voiceprints()
+    if not prints:
+        return None
+    embedding = voice_id.embed_wav(raw)
+    return voice_id.identify(embedding, prints)
 
 
 @app.get("/api/speech")
@@ -166,6 +197,86 @@ def download_speech_model(payload: dict | None = None) -> JSONResponse:
     result = stt.download_model(name)
     if not result.get("ok"):
         return JSONResponse(result, status_code=503)
+    return JSONResponse(result)
+
+
+@app.get("/api/voiceprints")
+def get_voiceprints() -> dict:
+    """Saved people plus the speaker-identification engine status."""
+    return {
+        "engine": voice_id.status(),
+        "voiceprints": db.list_voiceprints(),
+        "count": len(db.list_voiceprints()),
+    }
+
+
+@app.post("/api/voiceprints")
+def enroll_voiceprint(payload: VoiceEnrollIn) -> JSONResponse:
+    """Enrol a person's voice from a short clip so their speech is recognised."""
+    name = (payload.name or "").strip()
+    if not name:
+        return JSONResponse({"error": "a name is required"}, status_code=400)
+    if not voice_id.available():
+        return JSONResponse(
+            {
+                "error": "speaker identification is not installed",
+                "hint": "Download the voice model in Settings, or install sherpa-onnx.",
+            },
+            status_code=503,
+        )
+    try:
+        raw = base64.b64decode(payload.audio, validate=False)
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "audio was not valid base64"}, status_code=400)
+    embedding = voice_id.embed_wav(raw)
+    if not embedding:
+        return JSONResponse(
+            {"error": "could not read a voice in that clip; record 2-3 seconds of speech"},
+            status_code=400,
+        )
+    vid = db.add_voiceprint(payload.name.strip(), embedding)
+    saved = next((p for p in db.list_voiceprints() if p["id"] == vid), None)
+    return JSONResponse({"ok": True, "voiceprint": saved})
+
+
+@app.delete("/api/voiceprints/{voiceprint_id}")
+def delete_voiceprint(voiceprint_id: int) -> JSONResponse:
+    ok = db.remove_voiceprint(voiceprint_id)
+    if not ok:
+        return JSONResponse({"error": "no such voiceprint"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/voice/identify")
+def identify_voice(payload: VoiceAudioIn) -> JSONResponse:
+    """Say who a clip belongs to, without transcribing it."""
+    if not voice_id.available():
+        return JSONResponse(
+            {"error": "speaker identification unavailable"}, status_code=503
+        )
+    try:
+        raw = base64.b64decode(payload.audio, validate=False)
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "audio was not valid base64"}, status_code=400)
+    embedding = voice_id.embed_wav(raw)
+    if embedding is None:
+        return JSONResponse({"error": "could not read a voice in that clip"}, status_code=400)
+    return JSONResponse(
+        {
+            "match": voice_id.identify(embedding, db.voiceprints()),
+            "threshold": voice_id.threshold(),
+        }
+    )
+
+
+@app.post("/api/voice/model")
+def download_voice_model(payload: dict | None = None) -> JSONResponse:
+    """Download a speaker-embedding model for offline voice identification."""
+    name = (payload or {}).get("name") or voice_id.DEFAULT_MODEL
+    result = voice_id.download_model(name)
+    if not result.get("ok"):
+        status = 400 if "unknown model" in (result.get("reason") or "") else 503
+        return JSONResponse(result, status_code=status)
     return JSONResponse(result)
 
 
@@ -204,6 +315,10 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     resolved_lang = engine.resolve_language(forced, payload.question)
     ctx["language"] = resolved_lang
     ctx["detail"] = payload.detail
+    # A voice-identified speaker is advisory context only; it never becomes a
+    # stored fact and is labelled as a guess in the guardrails.
+    if payload.speaker:
+        ctx["speaker"] = {"name": payload.speaker, "score": payload.speaker_score}
     result = await engine.respond(
         payload.question, mode=route.mode, ctx=ctx
     )

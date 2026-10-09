@@ -244,6 +244,19 @@ CREATE TABLE IF NOT EXISTS routines (
     updated_at   TEXT NOT NULL
 );
 
+-- Saved voiceprints. A person's name and an averaged speaker embedding so a
+-- spoken question can be attributed to them. Advisory only: an identification
+-- is a labelled guess with a confidence and never edits memory on its own.
+CREATE TABLE IF NOT EXISTS voiceprints (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    embedding  BLOB NOT NULL,
+    dim        INTEGER NOT NULL,
+    samples    INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
 -- the message it came from instead of only carrying a confidence number.
 CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
@@ -1084,6 +1097,98 @@ def delete_setting(key: str) -> None:
     conn = connect()
     conn.execute("DELETE FROM settings WHERE key=?", (key,))
     conn.commit()
+
+
+# ------------------------------------------------------------- voiceprints
+
+
+def _pack_embedding(vec: list[float]) -> bytes:
+    import struct
+
+    return struct.pack(f"<{len(vec)}f", *[float(x) for x in vec])
+
+
+def _unpack_embedding(blob: bytes) -> list[float]:
+    import struct
+
+    n = len(blob) // 4
+    return list(struct.unpack(f"<{n}f", blob))
+
+
+def add_voiceprint(name: str, embedding: Iterable[float]) -> int:
+    """Add or reinforce a person's voiceprint.
+
+    A repeated enrolment for the same name averages into the stored embedding,
+    weighted by the number of samples, so one noisy clip cannot dominate. If the
+    embedding size changed (a different model), the old vector is replaced.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("a name is required")
+    vec = [float(x) for x in embedding]
+    if not vec:
+        raise ValueError("empty embedding")
+    conn = connect()
+    row = conn.execute(
+        "SELECT id, embedding, samples FROM voiceprints WHERE name=?", (name,)
+    ).fetchone()
+    stamp = now()
+    if row:
+        prev = _unpack_embedding(row["embedding"])
+        n = int(row["samples"] or 1)
+        if len(prev) != len(vec):
+            prev, n = vec, 0
+        merged = [(a * n + b) / (n + 1) for a, b in zip(prev, vec)]
+        conn.execute(
+            "UPDATE voiceprints SET embedding=?, dim=?, samples=?, updated_at=? WHERE id=?",
+            (_pack_embedding(merged), len(merged), n + 1, stamp, row["id"]),
+        )
+        conn.commit()
+        return int(row["id"])
+    cur = conn.execute(
+        """INSERT INTO voiceprints(name, embedding, dim, samples, created_at, updated_at)
+           VALUES (?,?,?,?,?,?)""",
+        (name, _pack_embedding(vec), len(vec), 1, stamp, stamp),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def voiceprints() -> list[dict[str, Any]]:
+    """Every saved voiceprint, with the embedding decoded for matching."""
+    conn = connect()
+    rows = conn.execute(
+        "SELECT id, name, embedding, dim, samples, created_at, updated_at "
+        "FROM voiceprints ORDER BY name"
+    ).fetchall()
+    result = []
+    for r in rows:
+        result.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "embedding": _unpack_embedding(r["embedding"]),
+                "dim": r["dim"],
+                "samples": int(r["samples"] or 0),
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+        )
+    return result
+
+
+def list_voiceprints() -> list[dict[str, Any]]:
+    """Voiceprint metadata without the raw embedding, for the API."""
+    return [
+        {k: v for k, v in p.items() if k != "embedding"} for p in voiceprints()
+    ]
+
+
+def remove_voiceprint(voiceprint_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM voiceprints WHERE id=?", (voiceprint_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def add_note(title: str | None, body: str, tags: str | None = None, mood: str | None = None) -> int:

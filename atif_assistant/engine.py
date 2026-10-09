@@ -217,6 +217,7 @@ def build_context(question: str) -> dict[str, Any]:
         "language": None,
         "detected_language": detect_language(question),
         "detail": None,
+        "speaker": None,
     }
 
 
@@ -343,6 +344,16 @@ def _guardrails(ctx: dict[str, Any]) -> str:
         lines.append("LENGTH: be brief. A few sentences at most.")
     elif detail == "deep":
         lines.append("LENGTH: be thorough and explain the reasoning.")
+    speaker = ctx.get("speaker") or {}
+    if speaker.get("name"):
+        score = speaker.get("score")
+        conf = f" (voice match {score:.0%})" if isinstance(score, (int, float)) else ""
+        lines.append(
+            f"IDENTIFIED SPEAKER: the saved voice print suggests {speaker['name']}"
+            f"{conf}. This is an advisory guess by voice, not a fact: you may "
+            "address them by name, but never state the identification as certain "
+            "and never let it change stored memory on its own."
+        )
     return "\n".join(lines)
 
 

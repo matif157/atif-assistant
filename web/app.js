@@ -146,6 +146,8 @@ async function ask(question, opts = {}) {
   // REPLIES is off, so tapping the mic gives a real voice assistant.
   const spokeQuestion = voiceInputPending;
   voiceInputPending = false;
+  const speaker = opts.speaker || pendingSpeaker || null;
+  pendingSpeaker = null;
   try {
     const res = await fetch("/api/ask", {
       method: "POST",
@@ -156,6 +158,8 @@ async function ask(question, opts = {}) {
         lang: settings.lang,
         reply_language: settings.replyLanguage,
         detail: settings.detail,
+        speaker: speaker ? speaker.name : null,
+        speaker_score: speaker ? speaker.score : null,
       }),
     });
     if (!res.ok) throw new Error(`server returned ${res.status}`);
@@ -795,6 +799,7 @@ function hasVoiceFor(lang) {
 let currentAudio = null;
 let speechToken = 0;
 let voiceInputPending = false;
+let pendingSpeaker = null;
 
 // Stop any speech in progress, whichever engine is producing it.
 function stopSpeech() {
@@ -1102,7 +1107,26 @@ async function transcribeLocal(blob) {
     throw new Error(err.error || `HTTP ${res.status}`);
   }
   const data = await res.json();
-  return (data.text || "").trim();
+  return { text: (data.text || "").trim(), speaker: data.speaker || null };
+}
+
+// Show who the assistant thinks is speaking, as a short-lived, clearly-advisory
+// badge. The voice match is a guess, so it is never presented as a fact.
+let voiceWhoTimer = null;
+function showSpeaker(speaker) {
+  const el = document.getElementById("voice-who");
+  if (!el) return;
+  clearTimeout(voiceWhoTimer);
+  if (speaker && speaker.name) {
+    const pct = Math.round((speaker.score || 0) * 100);
+    const unsure = speaker.known === false ? " (unsure)" : "";
+    el.textContent = `🎙️ ${speaker.name}${unsure} · voice ${pct}%`;
+    el.hidden = false;
+    voiceWhoTimer = setTimeout(() => { el.hidden = true; }, 6000);
+  } else {
+    el.hidden = true;
+    el.textContent = "";
+  }
 }
 
 // Record 16 kHz mono audio into a WAV the server can transcribe. A simple
@@ -1224,8 +1248,9 @@ async function stopLocalMic() {
   const blob = await rec.stop();
   if (!blob || blob.size < 100) return;
   let text = "";
+  let speaker = null;
   try {
-    text = await transcribeLocal(blob);
+    ({ text, speaker } = await transcribeLocal(blob));
   } catch (err) {
     if (browserSttAvailable()) {
       fallBackToBrowserMic();
@@ -1238,6 +1263,8 @@ async function stopLocalMic() {
     input.value = text;
     input.focus();
     voiceInputPending = true;
+    pendingSpeaker = speaker;
+    showSpeaker(speaker);
   }
 }
 
@@ -1502,8 +1529,9 @@ async function callListenLocal() {
       return;
     }
     let text = "";
+    let speaker = null;
     try {
-      text = await transcribeLocal(blob);
+      ({ text, speaker } = await transcribeLocal(blob));
     } catch (err) {
       if (!callActive) return;
       callTranscriptEl.textContent = "Offline speech failed: " + err.message;
@@ -1513,7 +1541,7 @@ async function callListenLocal() {
       return;
     }
     if (!callActive) return;
-    if (text) callSubmit(text);
+    if (text) callSubmit(text, speaker);
     else callResume();
   };
 
@@ -1527,14 +1555,14 @@ async function callListenLocal() {
   };
 }
 
-async function callSubmit(text) {
+async function callSubmit(text, speaker) {
   if (!callActive) return;
   stopCallRecognition();
   callTranscriptEl.textContent = text;
   callHeardEl.textContent = "";
   callSetPhase("thinking");
 
-  const data = await ask(text, { suppressSpeak: true });
+  const data = await ask(text, { suppressSpeak: true, speaker });
   if (!callActive) return;
   if (!data || !data.text) {
     callResume();
@@ -1744,9 +1772,9 @@ async function handsFreeListenLocal() {
       return;
     }
     try {
-      const text = await transcribeLocal(blob);
+      const { text, speaker } = await transcribeLocal(blob);
       if (!handsFreeActive) return;
-      if (text) handsFreeSubmit(text);
+      if (text) handsFreeSubmit(text, speaker);
       else handsFreeResume();
     } catch {
       handsFreeResume();
@@ -1759,8 +1787,9 @@ async function handsFreeListenLocal() {
   };
 }
 
-async function handsFreeSubmit(text) {
+async function handsFreeSubmit(text, speaker) {
   if (!handsFreeActive) return;
+  showSpeaker(speaker);
   if (handsFreeRecognizer) {
     try {
       handsFreeRecognizer.onend = null;
@@ -1771,7 +1800,7 @@ async function handsFreeSubmit(text) {
   setHandsFreePhase("thinking");
   // spokenQuestion-style: answer out loud even if SPEAK REPLIES is off.
   voiceInputPending = true;
-  const data = await ask(text, { suppressSpeak: true });
+  const data = await ask(text, { suppressSpeak: true, speaker });
   if (!handsFreeActive) return;
   if (!data || !data.text) {
     handsFreeResume();
@@ -2067,6 +2096,7 @@ document.getElementById("btn-settings").addEventListener("click", () => {
   syncSettingsForm();
   loadProviders();
   loadSpeechStatus();
+  loadVoiceprints();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
 });
@@ -2187,6 +2217,176 @@ if (dlModelBtn) {
       dlModelBtn.textContent = original;
     }
   });
+}
+
+
+/* -------------------------------------------------------- voice profiles */
+// Saved people: a short voice sample is stored as an embedding on the server so
+// a spoken question can be attributed to them. Identification is always shown
+// as a labelled guess, never as a fact.
+
+const voiceListEl = document.getElementById("voiceprints-list");
+const voiceStatus = document.getElementById("voice-status");
+const voiceName = document.getElementById("voice-name");
+const voiceEnrollBtn = document.getElementById("voice-enroll");
+const voiceModelBtn = document.getElementById("download-voice-model");
+let voiceEnrollActive = false;
+let voiceEnrollRec = null;
+
+async function loadVoiceprints() {
+  if (!voiceListEl && !voiceModelBtn) return;
+  try {
+    const data = await (await fetch("/api/voiceprints")).json();
+    renderVoiceprints(data);
+  } catch {
+    /* leave whatever is on screen */
+  }
+}
+
+function renderVoiceprints(data) {
+  const engine = data.engine || {};
+  const prints = data.voiceprints || [];
+  if (voiceListEl) {
+    voiceListEl.innerHTML = "";
+    if (!prints.length) {
+      const d = document.createElement("div");
+      d.className = "hint";
+      d.textContent = "No saved voices yet.";
+      voiceListEl.appendChild(d);
+    }
+    for (const p of prints) {
+      const card = document.createElement("div");
+      card.className = "pcard";
+      card.dataset.id = p.id;
+      const name = document.createElement("strong");
+      name.textContent = p.name;
+      const meta = document.createElement("span");
+      meta.className = "hint";
+      meta.textContent = `${p.samples} sample${p.samples === 1 ? "" : "s"} · ${p.dim}d`;
+      const del = document.createElement("button");
+      del.className = "ghost small";
+      del.textContent = "DELETE";
+      del.addEventListener("click", () => deleteVoiceprint(p.id, p.name));
+      card.append(name, meta, del);
+      voiceListEl.appendChild(card);
+    }
+  }
+  if (voiceModelBtn) voiceModelBtn.hidden = Boolean(engine.available);
+  if (voiceStatus && !engine.available) {
+    voiceStatus.textContent = engine.model_present
+      ? "Speaker engine not ready (needs the sherpa-onnx package)."
+      : "Voice identification needs a model. Download it below.";
+  }
+}
+
+async function deleteVoiceprint(id, name) {
+  if (!window.confirm(`Delete the saved voice for ${name}?`)) return;
+  try {
+    await fetch(`/api/voiceprints/${id}`, { method: "DELETE" });
+  } catch {
+    /* ignore */
+  }
+  loadVoiceprints();
+}
+
+if (voiceModelBtn) {
+  voiceModelBtn.addEventListener("click", async () => {
+    voiceModelBtn.disabled = true;
+    const original = voiceModelBtn.textContent;
+    voiceModelBtn.textContent = "DOWNLOADING...";
+    if (voiceStatus) voiceStatus.textContent = "Fetching the voice model (~28 MB).";
+    try {
+      const res = await fetch("/api/voice/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (voiceStatus) voiceStatus.textContent = "Voice model installed.";
+      } else if (voiceStatus) {
+        voiceStatus.textContent =
+          "Download failed: " + (data.reason || data.error || "unknown error");
+      }
+    } catch (e) {
+      if (voiceStatus) voiceStatus.textContent = "Download failed: " + e.message;
+    } finally {
+      voiceModelBtn.disabled = false;
+      voiceModelBtn.textContent = original;
+    }
+    loadVoiceprints();
+  });
+}
+
+if (voiceEnrollBtn) {
+  voiceEnrollBtn.addEventListener("click", () => {
+    if (voiceEnrollActive) {
+      stopVoiceEnroll();
+      return;
+    }
+    const name = (voiceName?.value || "").trim();
+    if (!name) {
+      if (voiceStatus) voiceStatus.textContent = "Type a name first.";
+      voiceName?.focus();
+      return;
+    }
+    startVoiceEnroll();
+  });
+}
+
+async function startVoiceEnroll() {
+  voiceEnrollActive = true;
+  if (voiceEnrollBtn) voiceEnrollBtn.textContent = "STOP";
+  if (voiceStatus) {
+    voiceStatus.textContent = "Recording… speak for a few seconds, then it stops by itself.";
+  }
+  let rec;
+  try {
+    rec = createLocalRecorder();
+    await rec.start();
+  } catch (e) {
+    voiceEnrollActive = false;
+    if (voiceEnrollBtn) voiceEnrollBtn.textContent = "RECORD & SAVE VOICE";
+    if (voiceStatus) voiceStatus.textContent = "Microphone unavailable: " + e.message;
+    return;
+  }
+  voiceEnrollRec = rec;
+  rec.onTick = () => {
+    const now = performance.now();
+    const dur = (now - rec.started) / 1000;
+    if (dur > 8 || (rec.speaking && now - rec.lastVoice > 1200)) stopVoiceEnroll();
+  };
+}
+
+async function stopVoiceEnroll() {
+  const rec = voiceEnrollRec;
+  if (!rec) return;
+  voiceEnrollRec = null;
+  voiceEnrollActive = false;
+  if (voiceEnrollBtn) voiceEnrollBtn.textContent = "RECORD & SAVE VOICE";
+  const blob = await rec.stop();
+  if (!blob || blob.size < 100) {
+    if (voiceStatus) voiceStatus.textContent = "Nothing was recorded.";
+    return;
+  }
+  if (voiceStatus) voiceStatus.textContent = "Saving voice…";
+  try {
+    const audio = await blobToBase64(blob);
+    const res = await fetch("/api/voiceprints", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: (voiceName?.value || "").trim(), audio }),
+    });
+    const data = await res.json();
+    if (data.ok && data.voiceprint) {
+      if (voiceStatus) voiceStatus.textContent = `Saved a voice sample for ${data.voiceprint.name}.`;
+      loadVoiceprints();
+    } else if (voiceStatus) {
+      voiceStatus.textContent = data.error || "Could not save that voice.";
+    }
+  } catch (e) {
+    if (voiceStatus) voiceStatus.textContent = "Could not save that voice: " + e.message;
+  }
 }
 
 

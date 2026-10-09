@@ -218,6 +218,11 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `POST /api/stt` | transcribe a recorded clip locally (whisper.cpp), for offline speech |
 | `GET /api/speech` | what the offline speech stack has (model in use, engines ready) |
 | `POST /api/speech/model` | download a better offline model (default `small`, best for Urdu) |
+| `GET /api/voiceprints` | saved voice profiles and the speaker-ID engine status |
+| `POST /api/voiceprints` | enrol a person from a short voice clip (name + audio) |
+| `DELETE /api/voiceprints/{id}` | forget a saved voice |
+| `POST /api/voice/identify` | say who a clip belongs to, without transcribing it |
+| `POST /api/voice/model` | download the speaker-embedding model for voice ID |
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
@@ -551,6 +556,26 @@ The server locates `whisper-cli` and `espeak-ng` even under launchd's minimal
 LaunchAgent sets a PATH for good measure. Model and binary paths are
 overridable with `ATIF_ASSISTANT_WHISPER_MODEL`, `ATIF_ASSISTANT_MODEL_DIR`,
 `ATIF_ASSISTANT_WHISPER_BIN` and `ATIF_ASSISTANT_ESPEAK_BIN`.
+
+### Who is speaking (voice profiles)
+
+The assistant can tell who is talking. **Settings → VOICE PROFILES** saves a few
+seconds of someone's voice as a speaker embedding using
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (a CAM++ model); if the
+model is missing the section offers a one-tap **DOWNLOAD VOICE MODEL**
+(~28 MB, via `POST /api/voice/model`). Re-recording the same name averages into
+the stored print, so one noisy clip cannot dominate, and each voice is scoped to
+a person you named.
+
+When a question comes in by voice, `/api/stt` embeds the same clip and returns a
+`speaker` (name + cosine confidence) that the UI shows as a short-lived badge
+(`🎙️ Atif · voice 92%`). The name is passed to the engine as **advisory context
+only**: it is labelled a guess in the guardrails, never stated as certain, and
+never written into memory on its own. Identification is best-effort - if the
+engine or model is missing, transcription still succeeds and simply reports no
+speaker. Relevant environment overrides: `ATIF_ASSISTANT_VOICE_MODEL`,
+`ATIF_ASSISTANT_VOICE_THRESHOLD`. `numpy` and `sherpa-onnx` are installed with
+the app; the engine stays silent if they are absent.
 
 The call stays **on-brand**: it is not a chatty companion. Social
 pleasantries ("how are you", "what's your name", greetings) are routed to a single
