@@ -2074,6 +2074,64 @@ def test_voice() -> None:
     db.reset_db_path()
 
 
+def test_ollama() -> None:
+    """Local model host: fail-soft start, autostart toggle, and endpoints.
+
+    The engine probes are stubbed so the test never touches the network or a
+    real ollama install; what it guards is that a missing or stopped host is
+    reported clearly, never crashes a request, and that autostart is a setting.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, ollama
+    from atif_assistant.app import app
+
+    print("\nlocal model host")
+
+    status = ollama.status()
+    check(
+        "ollama status reports the expected shape",
+        {"installed", "running", "url", "models", "model", "model_present"}
+        <= set(status),
+    )
+    check("ollama has a desired model slug", bool(ollama.desired_model()))
+
+    orig_binary, orig_running, orig_models = ollama.binary, ollama.running, ollama.models
+    try:
+        # A host that is not installed and not running must fail soft.
+        ollama.binary = lambda: None
+        ollama.running = lambda: False
+        ollama.models = lambda: []
+        res = ollama.start()
+        check(
+            "start without ollama fails soft with a reason",
+            res.get("ok") is False and bool(res.get("reason")),
+        )
+        check("autostart is a no-op when ollama is absent", ollama.ensure_autostart() is None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db.use_test_db(Path(tmp) / "ollama.db")
+            db.init_db()
+            db.set_setting("ollama_autostart", "0")
+            client = TestClient(app)
+
+            st = client.get("/api/ollama").json()
+            check("ollama endpoint reports autostart", "autostart" in st)
+            check("start endpoint is 503 when ollama is missing",
+                  client.post("/api/ollama/start").status_code == 503)
+            check("pull endpoint is 503 when ollama is missing",
+                  client.post("/api/ollama/pull", json={}).status_code == 503)
+
+            client.post("/api/ollama/autostart", json={"enabled": True})
+            check("autostart can be turned on", ollama.autostart_enabled() is True)
+            client.post("/api/ollama/autostart", json={"enabled": False})
+            check("autostart can be turned off", ollama.autostart_enabled() is False)
+    finally:
+        ollama.binary, ollama.running, ollama.models = orig_binary, orig_running, orig_models
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -2115,6 +2173,7 @@ def main() -> int:
     test_tts()
     test_stt()
     test_voice()
+    test_ollama()
     test_structure_guard()
 
     if before is not None:

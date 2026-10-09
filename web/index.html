@@ -222,6 +222,20 @@
     </div>
     <div id="voice-status" class="hint"></div>
 
+    <label>LOCAL OFFLINE MODEL (OLLAMA)</label>
+    <p class="hint">Run the assistant's own language model on this Mac so chat keeps working with no internet. The app starts it for you when it can.</p>
+    <label>START WITH THE APP
+      <select id="set-ollama-autostart">
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+    <div id="ollama-status" class="hint"></div>
+    <div class="form-actions">
+      <button class="ghost" id="ollama-start">START LOCAL MODEL</button>
+      <button class="ghost" id="ollama-pull">DOWNLOAD MODEL</button>
+    </div>
+
     <label>BACKUP</label>
     <div class="form-actions">
       <button class="ghost" id="export-backup">EXPORT DATA</button>

@@ -2097,6 +2097,7 @@ document.getElementById("btn-settings").addEventListener("click", () => {
   loadProviders();
   loadSpeechStatus();
   loadVoiceprints();
+  loadOllama();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
 });
@@ -2390,6 +2391,122 @@ async function stopVoiceEnroll() {
 }
 
 
+
+/* ------------------------------------------------------ local model host */
+// Ollama runs the offline chat model on this Mac. The app starts it when it can
+// and can pull the model on request, so offline chat needs no terminal.
+
+const ollamaStatusEl = document.getElementById("ollama-status");
+const ollamaStartBtn = document.getElementById("ollama-start");
+const ollamaPullBtn = document.getElementById("ollama-pull");
+const setOllamaAutostart = document.getElementById("set-ollama-autostart");
+let ollamaPollTimer = null;
+
+function renderOllama(s) {
+  if (!ollamaStatusEl) return;
+  if (!s.installed) {
+    ollamaStatusEl.textContent =
+      "Ollama is not installed. Install it (brew install ollama) to chat fully offline.";
+    if (ollamaStartBtn) ollamaStartBtn.disabled = true;
+    if (ollamaPullBtn) ollamaPullBtn.disabled = true;
+    return;
+  }
+  if (!s.running) {
+    ollamaStatusEl.textContent = "Installed but not running.";
+  } else if (!s.model_present) {
+    ollamaStatusEl.textContent = `Running at ${s.url} - model ${s.model} is not downloaded yet.`;
+  } else {
+    ollamaStatusEl.textContent = `Running at ${s.url} - model ${s.model} ready.`;
+  }
+  if (ollamaStartBtn) ollamaStartBtn.disabled = s.running;
+  if (ollamaPullBtn) ollamaPullBtn.disabled = !s.running || s.model_present;
+  if (setOllamaAutostart) setOllamaAutostart.value = s.autostart ? "on" : "off";
+}
+
+async function loadOllama() {
+  if (!ollamaStatusEl) return;
+  try {
+    renderOllama(await (await fetch("/api/ollama")).json());
+  } catch {
+    /* leave whatever is on screen */
+  }
+}
+
+function pollOllamaUntilReady() {
+  if (ollamaPollTimer) clearInterval(ollamaPollTimer);
+  let tries = 0;
+  ollamaPollTimer = setInterval(async () => {
+    tries += 1;
+    let s = null;
+    try {
+      s = await (await fetch("/api/ollama")).json();
+    } catch {
+      return;
+    }
+    renderOllama(s);
+    if (s.model_present || tries > 200) {
+      clearInterval(ollamaPollTimer);
+      ollamaPollTimer = null;
+    }
+  }, 3000);
+}
+
+if (ollamaStartBtn) {
+  ollamaStartBtn.addEventListener("click", async () => {
+    ollamaStartBtn.disabled = true;
+    if (ollamaStatusEl) ollamaStatusEl.textContent = "Starting the local model...";
+    try {
+      const data = await (
+        await fetch("/api/ollama/start", { method: "POST" })
+      ).json();
+      if (!data.ok && ollamaStatusEl) {
+        ollamaStatusEl.textContent = "Could not start: " + (data.reason || "unknown error");
+      }
+    } catch (e) {
+      if (ollamaStatusEl) ollamaStatusEl.textContent = "Could not start: " + e.message;
+    }
+    loadOllama();
+  });
+}
+
+if (ollamaPullBtn) {
+  ollamaPullBtn.addEventListener("click", async () => {
+    ollamaPullBtn.disabled = true;
+    if (ollamaStatusEl) {
+      ollamaStatusEl.textContent = "Downloading the model... this can take a few minutes.";
+    }
+    try {
+      const data = await (
+        await fetch("/api/ollama/pull", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        })
+      ).json();
+      if (!data.ok && ollamaStatusEl) {
+        ollamaStatusEl.textContent = "Download failed: " + (data.reason || "unknown error");
+      } else {
+        pollOllamaUntilReady();
+      }
+    } catch (e) {
+      if (ollamaStatusEl) ollamaStatusEl.textContent = "Download failed: " + e.message;
+    }
+  });
+}
+
+if (setOllamaAutostart) {
+  setOllamaAutostart.addEventListener("change", async () => {
+    try {
+      await fetch("/api/ollama/autostart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: setOllamaAutostart.value === "on" }),
+      });
+    } catch {
+      /* non-critical */
+    }
+  });
+}
 
 const providersEl = document.getElementById("providers-list");
 const providersStatus = document.getElementById("providers-status");

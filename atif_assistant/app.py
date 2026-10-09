@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, location, plan, router, stt, tts, uploads, voice_id
+from . import db, engine, learn, location, ollama, plan, router, stt, tts, uploads, voice_id
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .llm import (
     invalidate_probe_cache,
@@ -81,6 +81,10 @@ class PlanIn(BaseModel):
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    # Bring the local offline model host up in the background if it is installed
+    # and not already running, so offline chat works without a terminal.
+    ollama.ensure_autostart()
+    return None
 
 
 @app.get("/api/health")
@@ -99,6 +103,7 @@ async def health(probe: bool = False) -> dict:
             "offline_in": stt.status(),
             "speaker_id": voice_id.status(),
         },
+        "ollama": ollama.status(),
         "tailscale_host": TAILSCALE_HOST,
     }
 
@@ -573,6 +578,47 @@ async def test_one_provider(name: str, payload: ProviderIn) -> JSONResponse:
         url=payload.url,
     )
     return JSONResponse(result)
+
+
+class OllamaPullIn(BaseModel):
+    model: str | None = None
+
+
+@app.get("/api/ollama")
+def ollama_status() -> dict:
+    """State of the local offline model host (installed? running? model?)."""
+    return {**ollama.status(), "autostart": ollama.autostart_enabled()}
+
+
+@app.post("/api/ollama/autostart")
+def ollama_autostart(payload: dict) -> dict:
+    """Turn 'start with the app' on or off."""
+    enabled = payload.get("enabled")
+    db.set_setting("ollama_autostart", "1" if enabled else "0")
+    return {"ok": True, "autostart": ollama.autostart_enabled()}
+
+
+@app.post("/api/ollama/start")
+def ollama_start() -> JSONResponse:
+    """Start the local host if it is installed but not yet running."""
+    result = ollama.start()
+    invalidate_probe_cache()
+    return JSONResponse(result, status_code=200 if result.get("ok") else 503)
+
+
+@app.post("/api/ollama/pull")
+def ollama_pull(
+    background: BackgroundTasks, payload: OllamaPullIn | None = None
+) -> JSONResponse:
+    """Pull a model in the background; poll GET /api/ollama until it appears."""
+    want = (payload.model if payload else None) or ollama.desired_model()
+    if not ollama.running():
+        started = ollama.start()
+        if not started.get("ok"):
+            return JSONResponse(started, status_code=503)
+    background.add_task(ollama.pull, want)
+    invalidate_probe_cache()
+    return JSONResponse({"ok": True, "started": True, "model": want})
 
 
 class LocationIn(BaseModel):
