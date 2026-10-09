@@ -9,6 +9,11 @@ const dot = document.getElementById("dot");
 
 let session = localStorage.getItem("atif-assistant.session") || null;
 
+// Apply the cached theme before first paint to avoid a flash of dark on light.
+if (localStorage.getItem("atif-assistant.theme") === "light") {
+  document.documentElement.setAttribute("data-theme", "light");
+}
+
 const ROUTE_LABEL = {
   ask: "ANSWERED",
   challenge: "CHALLENGED",
@@ -504,11 +509,22 @@ const settings = {
   stt: "en-US",
   detail: "normal",
   accent: "",
+  theme: "dark",
 };
 
 function applyAccent(color) {
   if (color) document.documentElement.style.setProperty("--acc", color);
   else document.documentElement.style.removeProperty("--acc");
+}
+
+function applyTheme(theme) {
+  if (theme === "light") document.documentElement.setAttribute("data-theme", "light");
+  else document.documentElement.removeAttribute("data-theme");
+  try {
+    localStorage.setItem("atif-assistant.theme", theme);
+  } catch {
+    /* non-critical */
+  }
 }
 
 const STRINGS = {
@@ -541,6 +557,7 @@ async function loadSettings() {
   }
   applyLang(settings.lang);
   applyAccent(settings.accent);
+  applyTheme(settings.theme);
 }
 
 function applyLang(code) {
@@ -561,6 +578,7 @@ async function saveSettings() {
     stt: settings.stt,
     detail: settings.detail,
     accent: settings.accent,
+    theme: settings.theme,
   };
   try {
     await fetch("/api/settings", {
@@ -721,6 +739,64 @@ async function uploadFile() {
 
 document.getElementById("do-upload").addEventListener("click", uploadFile);
 
+function humanSize(n) {
+  if (n == null) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let v = Number(n);
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
+async function loadLibrary() {
+  const box = document.getElementById("upload-library");
+  if (!box) return;
+  box.innerHTML = "loading...";
+  try {
+    const { media = [] } = await (await fetch("/api/media?limit=50")).json();
+    box.innerHTML = "";
+    if (!media.length) {
+      box.textContent = "No files uploaded yet.";
+      return;
+    }
+    for (const m of media) {
+      let meta = {};
+      try {
+        meta = m.meta ? JSON.parse(m.meta) : {};
+      } catch {
+        meta = {};
+      }
+      const row = document.createElement("div");
+      row.className = "mrow";
+      const k = document.createElement("div");
+      k.className = "k";
+      k.textContent = `${(m.kind || "file").toUpperCase()} · ${humanSize(meta.size)}`;
+      const t = document.createElement("div");
+      t.className = "t";
+      t.textContent = meta.filename || m.path || "(file)";
+      const d = document.createElement("div");
+      d.className = "m";
+      d.textContent = [m.tags ? `related to: ${m.tags}` : "", m.created_at || ""]
+        .filter(Boolean)
+        .join(" · ");
+      row.append(k, t, d);
+      box.appendChild(row);
+    }
+  } catch {
+    box.textContent = "Could not load files.";
+  }
+}
+
+document.getElementById("toggle-library").addEventListener("click", () => {
+  const box = document.getElementById("upload-library");
+  if (!box) return;
+  box.hidden = !box.hidden;
+  if (!box.hidden) loadLibrary();
+});
+
 /* ------------------------------------------------------------ settings ui */
 
 const setSheet = document.getElementById("settings-sheet");
@@ -738,6 +814,8 @@ function syncSettingsForm() {
   if (setDetail) setDetail.value = settings.detail;
   const setAccentEl = document.getElementById("set-accent");
   if (setAccentEl) setAccentEl.value = settings.accent;
+  const setThemeEl = document.getElementById("set-theme");
+  if (setThemeEl) setThemeEl.value = settings.theme;
   if (setVoice) {
     loadVoices();
     setVoice.value = settings.voice || "";
@@ -770,6 +848,13 @@ if (setVoice) setVoice.addEventListener("change", () => (settings.voice = setVoi
     setAccentEl.addEventListener("change", () => {
       settings.accent = setAccentEl.value;
       applyAccent(settings.accent);
+    });
+  }
+  const setThemeEl = document.getElementById("set-theme");
+  if (setThemeEl) {
+    setThemeEl.addEventListener("change", () => {
+      settings.theme = setThemeEl.value;
+      applyTheme(settings.theme);
     });
   }
 }

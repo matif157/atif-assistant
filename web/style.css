@@ -15,6 +15,23 @@
   --pred: #c4b5fd;
 }
 
+html[data-theme="light"] {
+  --bg: #f7f9fc;
+  --panel: #ffffff;
+  --panel2: #eef2f8;
+  --line: #d7deea;
+  --txt: #131722;
+  --dim: #5b6577;
+  --acc: #0d9488;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --fact: #0d9488;
+  --infer: #2563eb;
+  --assume: #b45309;
+  --unknown: #dc2626;
+  --pred: #7c3aed;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -279,6 +296,15 @@ textarea:focus { outline: none; border-color: var(--acc); }
 #settings-status:not(:empty),
 #upload-status:not(:empty) { color: var(--acc); }
 #mic.active { color: var(--acc); border-color: var(--acc); }
+
+#upload-library[hidden] { display: none; }
+#upload-library {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
 
 .typing { display: inline-block; }
 .typing span { animation: blink 1.4s infinite; }

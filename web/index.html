@@ -95,8 +95,10 @@
     </label>
     <div class="form-actions">
       <button class="ghost" id="do-upload">UPLOAD TO MEMORY</button>
+      <button class="ghost" id="toggle-library">RECENT FILES</button>
     </div>
     <div id="upload-status" class="hint"></div>
+    <div id="upload-library" hidden></div>
     <p class="hint">Text files are read into memory and become searchable. Images,
     audio, video and documents are stored and referenced only. Same file twice
     is stored once.</p>
@@ -135,6 +137,12 @@
         <option value="normal">Normal</option>
         <option value="short">Short</option>
         <option value="deep">Deep</option>
+      </select>
+    </label>
+    <label>THEME
+      <select id="set-theme">
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
       </select>
     </label>
     <label>ACCENT
