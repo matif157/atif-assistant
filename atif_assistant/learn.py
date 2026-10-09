@@ -97,7 +97,7 @@ async def extract(
                     "role": "user",
                     "content": (
                         f"USER QUESTION: {question[:600]}\n\n"
-                        f"RAees ANSWER: {answer[:900]}"
+                        f"ASSISTANT ANSWER: {answer[:900]}"
                     ),
                 },
             ],

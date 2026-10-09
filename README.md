@@ -487,11 +487,13 @@ Defaults are chosen to actually work on a free account:
 ## Backup
 
 **Settings → EXPORT DATA** downloads a JSON snapshot of the curated memory
-(facts, episodes, notes, decisions, works, media metadata, places, routines,
-settings). **IMPORT DATA** restores one. Import is add-only and de-duplicated:
-it can add missing memory but can never delete or overwrite what is already
-there, so a malformed backup cannot damage the live database. Raw chat
-transcripts and raw source lines are intentionally not included.
+(facts, episodes, patterns, rules, decisions, learned candidates, notes, works,
+media metadata, places, location points, routines, settings). **IMPORT DATA**
+restores one. Import is add-only and de-duplicated: it can add missing memory
+but can never delete or overwrite what is already there (an existing setting is
+left untouched, so a restored backup cannot flip a live preference), meaning a
+malformed backup cannot damage the live database. Raw chat transcripts and raw
+source lines are intentionally not included.
 
 ---
 
@@ -569,7 +571,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 210 checks |
+| `tests/test_core.py` | 225 checks |
 
 ---
 
@@ -579,7 +581,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-210 checks across twenty groups:
+225 checks across twenty groups:
 
 | Group | Covers |
 |---|---|

@@ -8,7 +8,6 @@ Three modes:
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -167,7 +166,7 @@ def build_context(question: str) -> dict[str, Any]:
     # not crowd every answer. These are observed visits and candidate patterns;
     # a reason is never attached here.
     loc_words = (
-        "where", "location", "routine", "routine", "place", "places",
+        "where", "location", "routine", "place", "places",
         "visit", "visits", "went", "gym", "office",
     )
     if any(w in question.lower() for w in loc_words):
@@ -265,8 +264,27 @@ _LABEL_RE = re.compile(
     r"\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]", re.IGNORECASE
 )
 
+# Models occasionally emit the label in a non-ASCII bracket pair: fullwidth
+# 【FACT】, ［FACT］, or CJK corner brackets 「FACT」. A strict ASCII match then
+# reports "no labels", the brake fires on an answer that was actually labelled,
+# and the UI cannot colour the claim. Normalise the bracket characters only when
+# they wrap a known label, so ordinary prose brackets are left untouched.
+_LABEL_VARIANTS = re.compile(
+    r"[\[【［〔〖「『]\s*(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\s*"
+    r"[\]】］〕〗」』]",
+    re.IGNORECASE,
+)
+
+
+def normalize_labels(text: str) -> str:
+    """Rewrite alternate bracket characters around Reality Engine labels to []."""
+    if not text:
+        return text
+    return _LABEL_VARIANTS.sub(lambda m: f"[{m.group(1).upper()}]", text)
+
 
 def parse_labels(text: str) -> list[dict[str, str]]:
+    text = normalize_labels(text)
     out = []
     for line in text.splitlines():
         m = _LABEL_RE.search(line)
@@ -316,6 +334,7 @@ _REQUIRED_CHALLENGE_SECTIONS = (
 
 def structure_ok(text: str, challenge_mode: bool = False) -> bool:
     """True when the response keeps the Reality Engine's required structure."""
+    text = normalize_labels(text)
     if not _LABEL_RE.search(text):
         return False
     if challenge_mode:
@@ -325,10 +344,13 @@ def structure_ok(text: str, challenge_mode: bool = False) -> bool:
     return True
 
 
-# Chatbot small talk / fake-persona slips.
+# Chatbot small talk / fake-persona slips. The standalone mood forms require a
+# sentence boundary (punctuation or end) so legitimate phrases like "I'm well
+# aware" or "I'm good at this" do not trip the brake.
 _SMALL_TALK = re.compile(
-    r"(what about you|how about you|and you\?|nice to meet you|"
-    r"\bi'?m (good|fine|well|great)\b|\bi am (good|fine|well|great)\b|"
+    r"(what about you|how about you|and you\?|how are you\?|nice to meet you|"
+    r"\bi'?m (doing )?(good|fine|well|great)\b(?=\s*[.!?,]|\s*$)|"
+    r"\bi am (doing )?(good|fine|well|great)\b(?=\s*[.!?,]|\s*$)|"
     r"as your (assistant|friend)|i'?d love to|how'?s your day|"
     r"i hope you'?re (doing )?(well|good|okay|ok))",
     re.IGNORECASE,
@@ -337,6 +359,7 @@ _SMALL_TALK = re.compile(
 
 def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
     """Post-hoc brake. Returns warnings if the model broke a hard rule."""
+    text = normalize_labels(text)
     warnings = []
     if _FABRICATION.search(text):
         warnings.append(
@@ -413,7 +436,7 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
             critique_notes.append("Answer reformatted to restore Reality Engine labels.")
 
     return {
-        "text": text,
+        "text": normalize_labels(text),
         "provider": provider,
         "labels": parse_labels(text),
         "warnings": audit_response(text),
@@ -625,7 +648,7 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
             )
 
     return {
-        "text": text,
+        "text": normalize_labels(text),
         "provider": provider,
         "labels": parse_labels(text),
         "warnings": audit_response(text, challenge_mode=True),
@@ -677,7 +700,7 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
             critique_notes.append("Answer reformatted to restore Reality Engine labels.")
 
     return {
-        "text": text,
+        "text": normalize_labels(text),
         "provider": provider,
         "labels": parse_labels(text),
         "warnings": audit_response(text),

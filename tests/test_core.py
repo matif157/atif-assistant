@@ -6,6 +6,7 @@ Run:  .venv/bin/python -m tests.test_core
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -56,6 +57,26 @@ def test_brake() -> None:
         "a flat status line is not small talk",
         not any("small talk" in w for w in audit_response(
             "[FACT] I am an AI language model; I have no mood.")),
+    )
+    check(
+        "an incidental 'I'm well aware' is not small talk",
+        not any("small talk" in w for w in audit_response(
+            "[FACT] I'm well aware of the timeline.")),
+    )
+
+    from atif_assistant.engine import normalize_labels
+
+    check(
+        "fullwidth labels are normalised before parsing",
+        parse_labels(normalize_labels("她走了【INFERENCE】"))[0]["label"] == "INFERENCE",
+    )
+    check(
+        "alternate brackets no longer trip the label brake",
+        audit_response("Diagnosis is unclear【UNKNOWN】") == [],
+    )
+    check(
+        "corner-bracket labels are normalised too",
+        [x["label"] for x in parse_labels(normalize_labels("「FACT」 it rained"))] == ["FACT"],
     )
 
     labels = parse_labels("[FACT] a\n[UNKNOWN] b\n[INFERENCE] c")
@@ -193,6 +214,14 @@ def test_router() -> None:
     check(
         "persona question is social",
         route("what's your name").mode == "ask",
+    )
+    check(
+        "persona question is not mistaken for knowledge",
+        question_class("what is your name") == "social",
+    )
+    check(
+        "'what are you' is persona, not a knowledge lookup",
+        question_class("what are you") == "social",
     )
 
     print("\nquestion classes")
@@ -918,6 +947,11 @@ def test_backup() -> None:
             "/api/decisions",
             json={"topic": "job", "decision": "stay", "prediction": "calmer", "confidence": 0.6},
         )
+        db.add_pattern("Late-night rumination", trigger="after 11pm", triggers=["3am", "scroll"])
+        db.add_rule("Sleep before midnight on weekdays", code="SLEEP", approved=True)
+        client.post("/api/media", json={"path": "/tmp/clip.mp4", "kind": "video"})
+        db.set_setting("theme", "dark")
+        db.add_location_point(51.5, -0.12, occurred_at="2026-01-02T08:00:00", source="test")
 
         exp = client.get("/api/export").json()
         check("export has metadata", exp.get("app") == "atif-assistant" and "tables" in exp)
@@ -934,9 +968,26 @@ def test_backup() -> None:
         check("import adds the fact", added["facts"] == 1)
         check("import adds the note", added["notes"] == 1)
         check("import adds the decision", added["decisions"] == 1)
+        check("import restores a pattern", added["patterns"] == 1)
+        check("import restores a rule", added["rules"] == 1)
+        check("import restores media", added["media"] == 1)
+        check("import restores a setting", added["settings"] == 1)
+        check("import restores the GPS trace", added["places"] == 1 and added["location_points"] == 1)
+        check(
+            "restored pattern keeps its keyword list",
+            json.loads(db.all_patterns()[0]["triggers"]) == ["3am", "scroll"],
+        )
+        check(
+            "restored rule keeps its approval flag",
+            any(r["text"].startswith("Sleep before") for r in db.approved_rules()),
+        )
 
+        # An import must never overwrite a live preference.
+        db.set_setting("theme", "light")
         again = client.post("/api/import", json=exp).json()["added"]
         check("re-import is a no-op", again["facts"] == 0 and again["notes"] == 0)
+        check("re-import does not re-add settings", again["settings"] == 0)
+        check("re-import leaves a changed setting alone", db.get_setting("theme") == "light")
 
         check(
             "a foreign file is rejected",

@@ -225,7 +225,27 @@ def route(text: str, repeat_count: int = 0) -> Route:
             intent=intent,
         )
 
-    # --- Rule 5: repetition is itself the signal. Once a class of question
+    # --- Rule 5: social pleasantries and persona questions. Checked before the
+    # repetition rule and before generic knowledge, so a greeting that recurs, or
+    # a persona question like "what is your name" / "what are you", is still
+    # answered as a person-to-person line rather than escalated into an analysis
+    # or mistaken for an encyclopaedia lookup.
+    stripped = low.strip(" .!?")
+    if any(p in low for p in _SOCIAL) or stripped in _GREETINGS:
+        return Route(
+            mode=ASK,
+            reason="Social or persona question; answered directly, without "
+            "small talk or a reciprocal question.",
+            confidence=0.7,
+            escalations=[
+                "One direct line. No 'I'm good, what about you?' and no "
+                "pretend feelings.",
+                *escalations,
+            ],
+            intent=intent,
+        )
+
+    # --- Rule 6: repetition is itself the signal. Once a class of question
     # has been asked enough times, the mode stops mattering and the loop
     # becomes the subject.
     if repeat_count >= 3:
@@ -238,7 +258,7 @@ def route(text: str, repeat_count: int = 0) -> Route:
             intent=intent,
         )
 
-    # --- Rule 6: distress signal overrides everything.
+    # --- Rule 7: distress signal overrides everything.
     if _is_distressed(text):
         escalations.append(
             "High-arousal phrasing. Be brief, calm and concrete. Do not "
@@ -252,30 +272,13 @@ def route(text: str, repeat_count: int = 0) -> Route:
             intent=intent,
         )
 
-    # --- Rule 7: genuine knowledge question.
+    # --- Rule 8: genuine knowledge question.
     if any(p in low for p in _KNOWLEDGE):
         return Route(
             mode=ASK,
             reason="Knowledge question with a checkable answer.",
             confidence=0.8,
             escalations=escalations,
-            intent=intent,
-        )
-
-    # --- Rule 8: social pleasantries and persona questions. Not an analysis;
-    # one direct labelled line, no chatbot small talk.
-    stripped = low.strip(" .!?")
-    if any(p in low for p in _SOCIAL) or stripped in _GREETINGS:
-        return Route(
-            mode=ASK,
-            reason="Social or persona question; answered directly, without "
-            "small talk or a reciprocal question.",
-            confidence=0.7,
-            escalations=[
-                "One direct line. No 'I'm good, what about you?' and no "
-                "pretend feelings.",
-                *escalations,
-            ],
             intent=intent,
         )
 
@@ -299,8 +302,8 @@ def question_class(text: str) -> str:
         return "self_worth"
     if any(p in low for p in _DECISION):
         return "decision"
-    if any(p in low for p in _KNOWLEDGE):
-        return "knowledge"
     if any(p in low for p in _SOCIAL) or low.strip(" .!?") in _GREETINGS:
         return "social"
+    if any(p in low for p in _KNOWLEDGE):
+        return "knowledge"
     return "other"

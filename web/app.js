@@ -1532,10 +1532,14 @@ document.getElementById("import-backup").addEventListener("change", async (e) =>
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || "import failed");
     const a = body.added || {};
+    const total = Object.values(a).reduce((n, v) => n + (Number(v) || 0), 0);
+    const parts = ["facts", "notes", "decisions", "patterns", "rules", "media", "places", "routines"]
+      .filter((k) => a[k])
+      .map((k) => `${a[k]} ${k}`);
     if (backupStatus) {
-      backupStatus.textContent = `Imported: ${a.facts || 0} facts, ${a.notes || 0} notes, ${
-        a.decisions || 0
-      } decisions.`;
+      backupStatus.textContent = total
+        ? `Imported ${total} ${total === 1 ? "item" : "items"} (${parts.join(", ")}).`
+        : "Backup already present; nothing new added.";
     }
   } catch (err) {
     if (backupStatus) backupStatus.textContent = `Import failed: ${err.message}`;

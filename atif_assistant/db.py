@@ -1335,7 +1335,7 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
     cannot destroy the live database.
     """
     tables = payload.get("tables") or {}
-    added = {k: 0 for k in ("facts", "episodes", "notes", "decisions", "works", "settings")}
+    added = {k: 0 for k in EXPORT_TABLES}
     conn = connect()
 
     seen_facts = {r["text"] for r in conn.execute("SELECT text FROM facts")}
@@ -1371,14 +1371,44 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
         seen_eps.add(key)
         added["episodes"] += 1
 
-    seen_notes = {r["body"] for r in conn.execute("SELECT body FROM notes")}
-    for n in tables.get("notes", []):
-        body = (n.get("body") or "").strip()
-        if not body or body in seen_notes:
+    seen_patterns = {r["name"] for r in conn.execute("SELECT name FROM patterns")}
+    for p in tables.get("patterns", []):
+        name = (p.get("name") or "").strip()
+        if not name or name in seen_patterns:
             continue
-        add_note(n.get("title"), body, n.get("tags"), n.get("mood"))
-        seen_notes.add(body)
-        added["notes"] += 1
+        triggers = p.get("triggers")
+        if isinstance(triggers, str):
+            try:
+                triggers = json.loads(triggers)
+            except (ValueError, TypeError):
+                triggers = [t.strip() for t in triggers.split(",") if t.strip()]
+        add_pattern(
+            name=name,
+            trigger=p.get("trigger"),
+            observed=p.get("observed"),
+            frequency=p.get("frequency"),
+            function_=p.get("function_"),
+            effect=p.get("effect"),
+            intervention=p.get("intervention"),
+            triggers=triggers,
+            source=p.get("source"),
+        )
+        seen_patterns.add(name)
+        added["patterns"] += 1
+
+    seen_rules = {r["text"] for r in conn.execute("SELECT text FROM rules")}
+    for r in tables.get("rules", []):
+        text = (r.get("text") or "").strip()
+        if not text or text in seen_rules:
+            continue
+        add_rule(
+            text,
+            code=r.get("code"),
+            source=r.get("source"),
+            approved=bool(r.get("approved")),
+        )
+        seen_rules.add(text)
+        added["rules"] += 1
 
     seen_dec = {
         (r["topic"], r["decision"])
@@ -1403,6 +1433,40 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
         seen_dec.add(key)
         added["decisions"] += 1
 
+    seen_learned = {r["text"] for r in conn.execute("SELECT text FROM learned")}
+    for l in tables.get("learned", []):
+        text = (l.get("text") or "").strip()
+        if not text or text in seen_learned:
+            continue
+        cur = conn.execute(
+            """INSERT INTO learned(text, subject, kind, source, confidence,
+                                   status, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                text,
+                l.get("subject"),
+                l.get("kind") or "durable",
+                l.get("source") or "import",
+                l.get("confidence", 0.5),
+                l.get("status") or "candidate",
+                l.get("created_at") or now(),
+            ),
+        )
+        conn.commit()
+        _fts_index("learned", int(cur.lastrowid), text[:80], text)
+        conn.commit()
+        seen_learned.add(text)
+        added["learned"] += 1
+
+    seen_notes = {r["body"] for r in conn.execute("SELECT body FROM notes")}
+    for n in tables.get("notes", []):
+        body = (n.get("body") or "").strip()
+        if not body or body in seen_notes:
+            continue
+        add_note(n.get("title"), body, n.get("tags"), n.get("mood"))
+        seen_notes.add(body)
+        added["notes"] += 1
+
     seen_works = {r["title"] for r in conn.execute("SELECT title FROM works")}
     for w in tables.get("works", []):
         title = (w.get("title") or "").strip()
@@ -1424,11 +1488,130 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
         seen_works.add(title)
         added["works"] += 1
 
+    seen_media = {r["path"] for r in conn.execute("SELECT path FROM media")}
+    for m in tables.get("media", []):
+        path = (m.get("path") or "").strip()
+        if not path or path in seen_media:
+            continue
+        conn.execute(
+            "INSERT INTO media(path, kind, tags, meta, created_at) VALUES (?,?,?,?,?)",
+            (
+                path,
+                m.get("kind"),
+                m.get("tags"),
+                m.get("meta"),
+                m.get("created_at") or now(),
+            ),
+        )
+        conn.commit()
+        seen_media.add(path)
+        added["media"] += 1
+
+    # Places: reuse an existing place within radius when one is present, else
+    # insert the exported place (carrying its own visit counts) so a restoration
+    # never double-counts or duplicates a spot. Keeps an old-id -> new-id map for
+    # the points and routines that reference it.
+    place_map: dict[Any, int] = {}
+    for p in tables.get("places", []):
+        lat, lon = p.get("lat"), p.get("lon")
+        if lat is None or lon is None:
+            continue
+        existing = _nearest_place(conn, lat, lon)
+        if existing is not None:
+            if p.get("id") is not None:
+                place_map[p["id"]] = int(existing["id"])
+            continue
+        cur = conn.execute(
+            """INSERT INTO places(name, lat, lon, radius_m, kind, visits,
+                                  first_seen, last_seen, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                p.get("name"),
+                lat,
+                lon,
+                p.get("radius_m", 150),
+                p.get("kind"),
+                p.get("visits", 0),
+                p.get("first_seen"),
+                p.get("last_seen"),
+                p.get("created_at") or now(),
+            ),
+        )
+        conn.commit()
+        new_id = int(cur.lastrowid)
+        if p.get("id") is not None:
+            place_map[p["id"]] = new_id
+        added["places"] += 1
+
+    seen_points = {
+        r["digest"]
+        for r in conn.execute("SELECT digest FROM location_points WHERE digest IS NOT NULL")
+    }
+    for pt in tables.get("location_points", []):
+        lat, lon = pt.get("lat"), pt.get("lon")
+        if lat is None or lon is None:
+            continue
+        digest = pt.get("digest") or location_digest(
+            pt.get("occurred_at"), lat, lon, pt.get("source")
+        )
+        if digest in seen_points:
+            continue
+        place_id = place_map.get(pt.get("place_id"))
+        conn.execute(
+            """INSERT INTO location_points(occurred_at, lat, lon, accuracy,
+                                           source, place_id, digest, created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                pt.get("occurred_at"),
+                lat,
+                lon,
+                pt.get("accuracy"),
+                pt.get("source"),
+                place_id,
+                digest,
+                pt.get("created_at") or now(),
+            ),
+        )
+        conn.commit()
+        seen_points.add(digest)
+        added["location_points"] += 1
+
+    seen_routines = {r["name"] for r in conn.execute("SELECT name FROM routines")}
+    for rt in tables.get("routines", []):
+        name = (rt.get("name") or "").strip()
+        if not name or name in seen_routines:
+            continue
+        place_id = place_map.get(rt.get("place_id"))
+        conn.execute(
+            """INSERT INTO routines(name, place_id, weekday, hour_bucket,
+                                    observations, confidence, status,
+                                    created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                name,
+                place_id,
+                rt.get("weekday"),
+                rt.get("hour_bucket"),
+                rt.get("observations", 0),
+                rt.get("confidence", 0.0),
+                rt.get("status") or "candidate",
+                rt.get("created_at") or now(),
+                rt.get("updated_at") or now(),
+            ),
+        )
+        conn.commit()
+        seen_routines.add(name)
+        added["routines"] += 1
+
+    # Settings are restored only when the key is absent: an import must never
+    # overwrite a live preference (or a cleared provider key set to "").
     for s in tables.get("settings", []):
         key, value = s.get("key"), s.get("value")
         if key is None or value is None:
             continue
         if str(key).startswith("provider."):
+            continue
+        if get_setting(str(key)) is not None:
             continue
         set_setting(str(key), str(value))
         added["settings"] += 1
