@@ -216,14 +216,17 @@ async def _probe_one(name: str) -> dict[str, Any]:
         }
     handler = HANDLERS.get(name)
     try:
-        text = await handler(
+        await handler(
             MODEL_DEFAULTS.get(name, ""),
             [{"role": "user", "content": "ping"}],
             temperature=0.0,
             max_tokens=1,
             timeout=6,
         )
-        return {"ready": bool(text is not None), "configured": True, "error": None}
+        # A 2xx reply proves the key and endpoint work. Do not require non-empty
+        # text: a reasoning model handed max_tokens=1 spends the whole budget on
+        # reasoning and returns empty content, which is readiness, not failure.
+        return {"ready": True, "configured": True, "error": None}
     except httpx.HTTPStatusError as exc:
         return {
             "ready": False,
