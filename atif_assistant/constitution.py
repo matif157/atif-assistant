@@ -7,6 +7,8 @@ audited independently.
 
 from __future__ import annotations
 
+import re
+
 CONSTITUTION = """ATIF CONSTITUTION
 
 01 Truth before comfort.
@@ -133,14 +135,28 @@ def constitution_block() -> str:
     return f"{CONSTITUTION}\nHARD BRAKE (never overridden):\n{rules}\n"
 
 
-def detect_professional_risk(text: str) -> list[str]:
+def _matches(text: str, terms: tuple[str, ...] | list[str]) -> list[str]:
+    """Return the terms present in ``text`` as whole words.
+
+    Substring matching made short domains fire inside unrelated words - "law"
+    matched "flaw", "lawn" and "claw"; "drug" matched "drugstore". Matching on
+    word boundaries (with an optional plural) keeps the intent without the
+    false positives.
+    """
     low = text.lower()
-    return [d for d in PROFESSIONAL_DOMAINS if d in low]
+    return [
+        t
+        for t in terms
+        if re.search(rf"(?<![a-z0-9]){re.escape(t)}s?(?![a-z0-9])", low)
+    ]
+
+
+def detect_professional_risk(text: str) -> list[str]:
+    return _matches(text, PROFESSIONAL_DOMAINS)
 
 
 def detect_rumination(text: str) -> bool:
-    low = text.lower()
-    return any(m in low for m in RUMINATION_MARKERS)
+    return bool(_matches(text, RUMINATION_MARKERS))
 
 
 def hidden_objective(text: str) -> str:

@@ -84,9 +84,21 @@ def test_brake() -> None:
 
     check("detects rumination", C.detect_rumination("does she love me more than him"))
     check("no false rumination on real question", not C.detect_rumination("should I learn German"))
+    check(
+        "'compare memory usage' is not rumination",
+        not C.detect_rumination("compare memory usage of these indexes"),
+    )
     check("detects medical risk", "doctor" in C.detect_professional_risk("see a doctor"))
     check("detects legal risk", "divorce" in C.detect_professional_risk("how does divorce work"))
     check("detects financial risk", "invest" in C.detect_professional_risk("where should I invest"))
+    check(
+        "'flaw'/'lawn'/'claw' are not legal terms",
+        C.detect_professional_risk("the flaw in my lawn, and how to draw a claw") == [],
+    )
+    check(
+        "'drugstore' is not a medical term",
+        C.detect_professional_risk("what time does the drugstore close") == [],
+    )
     check("classifies avoidance intent", C.hidden_objective("does she love me more").startswith("AVOIDANCE"))
     check("classifies decision intent", C.hidden_objective("should I message her").startswith("DECISION"))
     check("classifies information intent", C.hidden_objective("what is FTS5").startswith("INFORMATION"))

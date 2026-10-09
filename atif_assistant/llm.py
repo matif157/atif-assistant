@@ -115,18 +115,19 @@ async def _gemini(model: str, messages: list[dict], **kw: Any) -> str:
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={key}"
     )
+    body: dict[str, Any] = {
+        "contents": turns,
+        "generationConfig": {
+            "temperature": kw.get("temperature", 0.4),
+            "maxOutputTokens": kw.get("max_tokens", 1800),
+        },
+    }
+    # A readiness ping has no system turn; sending an empty systemInstruction
+    # part makes Gemini reject an otherwise-valid key.
+    if system.strip():
+        body["systemInstruction"] = {"parts": [{"text": system}]}
     async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
-        r = await client.post(
-            url,
-            json={
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": turns,
-                "generationConfig": {
-                    "temperature": kw.get("temperature", 0.4),
-                    "maxOutputTokens": kw.get("max_tokens", 1800),
-                },
-            },
-        )
+        r = await client.post(url, json=body)
         r.raise_for_status()
         return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
