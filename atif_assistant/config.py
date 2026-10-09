@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("ATIF_ASSISTANT_DATA_DIR", ROOT / "data"))
 WEB_DIR = ROOT / "web"
+# Uploaded files land here. Local only, gitignored with the rest of data/.
+UPLOADS_DIR = Path(os.environ.get("ATIF_ASSISTANT_UPLOADS_DIR", DATA_DIR / "uploads"))
 
 # The SQLite database. Local only, never committed.
 DB_PATH = DATA_DIR / "atif-assistant.db"

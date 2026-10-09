@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, location, router
+from . import db, engine, learn, location, router, uploads
 from .config import TAILSCALE_HOST, WEB_DIR
 from .llm import probe_providers
 
@@ -25,6 +25,8 @@ app = FastAPI(title="Atif Assistant", version="0.1.0")
 class Ask(BaseModel):
     question: str
     session: str | None = None
+    lang: str | None = None
+    detail: str | None = None
 
 
 class DecisionIn(BaseModel):
@@ -100,6 +102,8 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
 
     ctx = engine.build_context(payload.question)
     ctx["escalations"] = route.escalations
+    ctx["language"] = payload.lang
+    ctx["detail"] = payload.detail
     result = await engine.respond(
         payload.question, mode=route.mode, ctx=ctx
     )
@@ -344,6 +348,46 @@ def add_note(payload: dict):
 @app.get("/api/notes")
 def list_notes(limit: int = 20):
     return {"notes": db.list_notes(limit)}
+
+
+class UploadIn(BaseModel):
+    filename: str
+    related_to: str | None = None
+    kind: str | None = None
+    text: str | None = None
+    content_b64: str | None = None
+
+
+@app.post("/api/upload")
+def upload_file(payload: UploadIn) -> JSONResponse:
+    """Ingest an uploaded file and fold its text into memory.
+
+    JSON only (text or base64) so no multipart dependency is required. A text
+    file becomes searchable evidence plus an episode labelled with ``related_to``.
+    """
+    try:
+        report = uploads.ingest_upload(
+            filename=payload.filename,
+            related_to=payload.related_to,
+            kind=payload.kind,
+            text=payload.text,
+            content_b64=payload.content_b64,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(report)
+
+
+@app.get("/api/media/{media_id}/content")
+def media_content(media_id: int) -> JSONResponse:
+    conn = db.connect()
+    row = conn.execute("SELECT path FROM media WHERE id=?", (media_id,)).fetchone()
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = Path(row["path"])
+    if not path.exists():
+        return JSONResponse({"error": "file missing"}, status_code=404)
+    return JSONResponse({"path": str(path), "size": path.stat().st_size})
 
 
 @app.get("/api/works")

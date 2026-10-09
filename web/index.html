@@ -18,9 +18,10 @@
     <span class="sub" id="statusline">personal intelligence</span>
   </div>
   <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
-  <button class="ghost" id="btn-insights" title="What you keep asking">INSIGHTS</button>
-  <button class="ghost" id="btn-decisions" title="Decisions you owe a review">LEDGER</button>
-</header>
+  <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
+  <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
+  <button class="ghost" id="btn-upload" title="Upload a file">UPLOAD</button>
+  <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
 
 <main id="chat"></main>
 
@@ -30,6 +31,7 @@
     <span class="route-why" id="route-why"></span>
   </div>
   <div class="composer">
+    <button id="mic" class="ghost small" aria-label="Speak your question" title="Speak">&#127908;</button>
     <textarea id="input" rows="1" placeholder="Ask. Atif Assistant decides how to answer."></textarea>
     <button id="send" aria-label="Send">&#10148;</button>
   </div>
@@ -79,6 +81,70 @@
     </div>
   </form>
   <div id="decisions-body"></div>
+</div>
+
+<div class="sheet" id="upload-sheet" hidden>
+  <div class="sheet-head">
+    <strong>UPLOAD</strong>
+    <button class="ghost" id="close-upload">CLOSE</button>
+  </div>
+  <div class="upload-body">
+    <label>FILE<input type="file" id="upload-file"></label>
+    <label>THIS FILE IS RELATED TO
+      <input id="upload-related" placeholder="e.g. my business plan, my CV, gym diet">
+    </label>
+    <div class="form-actions">
+      <button class="ghost" id="do-upload">UPLOAD TO MEMORY</button>
+    </div>
+    <div id="upload-status" class="hint"></div>
+    <p class="hint">Text files are read into memory and become searchable. Images,
+    audio, video and documents are stored and referenced only. Same file twice
+    is stored once.</p>
+  </div>
+</div>
+
+<div class="sheet" id="settings-sheet" hidden>
+  <div class="sheet-head">
+    <strong>SETTINGS</strong>
+    <button class="ghost" id="close-settings">CLOSE</button>
+  </div>
+  <div class="settings-body">
+    <label>LANGUAGE / زبان
+      <select id="set-lang">
+        <option value="en">English</option>
+        <option value="ur">اردو (Urdu)</option>
+      </select>
+    </label>
+    <label>SPEAK REPLIES (text to speech)
+      <select id="set-speak">
+        <option value="off">Off</option>
+        <option value="on">On</option>
+      </select>
+    </label>
+    <label>VOICE
+      <select id="set-voice"></select>
+    </label>
+    <label>MICROPHONE LANGUAGE
+      <select id="set-stt">
+        <option value="en-US">English (US)</option>
+        <option value="ur-PK">اردو (Pakistan)</option>
+      </select>
+    </label>
+    <label>ANSWER DETAIL
+      <select id="set-detail">
+        <option value="normal">Normal</option>
+        <option value="short">Short</option>
+        <option value="deep">Deep</option>
+      </select>
+    </label>
+    <div class="form-actions">
+      <button class="ghost" id="save-settings">SAVE</button>
+      <button class="ghost" id="test-voice">TEST VOICE</button>
+    </div>
+    <div id="settings-status" class="hint"></div>
+    <p class="hint">Settings are stored on your machine and applied on every device
+    that opens this address. Nothing here is sent to a third party.</p>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>

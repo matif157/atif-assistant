@@ -5,6 +5,7 @@ Run:  .venv/bin/python -m tests.test_core
 
 from __future__ import annotations
 
+import base64
 import sys
 import tempfile
 from pathlib import Path
@@ -711,6 +712,63 @@ def test_location() -> None:
     db.reset_db_path()
 
 
+def test_uploads() -> None:
+    """Uploads are content-addressed, fold text into memory, and stay idempotent."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, uploads
+    from atif_assistant.app import app
+
+    print("\nuploads")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db.use_test_db(base / "up.db")
+        db.init_db()
+        uploads.UPLOADS_DIR = base / "uploads"
+        client = TestClient(app)
+
+        r = client.post(
+            "/api/upload",
+            json={"filename": "plan.txt", "related_to": "business plan", "text": "Secret growth plan"},
+        )
+        body = r.json()
+        check("text upload succeeds", body.get("ok") is True)
+        check("kind detected as text", body.get("kind") == "text")
+        check("text became evidence", body.get("evidence_id") is not None)
+        check("text became an episode", body.get("episode_id") is not None)
+
+        conn = db.connect()
+        check("media row written", conn.execute("SELECT COUNT(*) c FROM media").fetchone()["c"] == 1)
+        check(
+            "uploaded text is searchable as evidence",
+            any("Secret" in h["body"] for h in db.search_evidence("growth", limit=3)),
+        )
+
+        r2 = client.post(
+            "/api/upload",
+            json={"filename": "plan.txt", "related_to": "business plan", "text": "Secret growth plan"},
+        )
+        b2 = r2.json()
+        check("same file is recognised as duplicate", b2.get("duplicate_file") is True)
+        check("duplicate adds no second episode", b2.get("episode_id") is None)
+        check("duplicate adds no second evidence row", b2.get("evidence_id") is None)
+
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n\x00binary").decode()
+        r3 = client.post("/api/upload", json={"filename": "pic.png", "content_b64": png})
+        b3 = r3.json()
+        check("binary upload succeeds", b3.get("ok") is True)
+        check("binary kind detected", b3.get("kind") == "image")
+        check("binary is not parsed into memory", b3.get("evidence_id") is None)
+
+        check("missing content is rejected", client.post("/api/upload", json={"filename": "x"}).status_code == 400)
+        check(
+            "bad base64 is rejected",
+            client.post("/api/upload", json={"filename": "x", "content_b64": "!!!not base64!!!"}).status_code == 400,
+        )
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -739,6 +797,7 @@ def main() -> int:
     test_remote_web()
     test_extended_api()
     test_location()
+    test_uploads()
 
     if before is not None:
         from atif_assistant import db

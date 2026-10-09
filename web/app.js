@@ -3,6 +3,7 @@
 const chat = document.getElementById("chat");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
+const mic = document.getElementById("mic");
 const statusline = document.getElementById("statusline");
 const dot = document.getElementById("dot");
 
@@ -132,12 +133,20 @@ async function ask(question) {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, session }),
+      body: JSON.stringify({
+        question,
+        session,
+        lang: settings.lang,
+        detail: settings.detail,
+      }),
     });
     if (!res.ok) throw new Error(`server returned ${res.status}`);
     const data = await res.json();
     removeTyping();
     addBot(data);
+    if (settings.speak === "on" && data.text) {
+      speak(data.text);
+    }
     if (data.session) {
       session = data.session;
       localStorage.setItem("atif-assistant.session", session);
@@ -486,8 +495,296 @@ async function refreshLearnedIfAny() {
 }
 document.getElementById("close-learned").addEventListener("click", () => (lSheet.hidden = true));
 
+/* ------------------------------------------------------------- settings */
+
+const settings = {
+  lang: "en",
+  speak: "off",
+  voice: "",
+  stt: "en-US",
+  detail: "normal",
+};
+
+const STRINGS = {
+  en: {
+    placeholder: "Ask. Atif Assistant decides how to answer.",
+    related: "What is this file related to? (e.g. resume, project, note)",
+    uploading: "Uploading...",
+    uploaded: "Saved to memory.",
+    uploadFailed: "Upload failed.",
+    saved: "Settings saved.",
+  },
+  ur: {
+    placeholder: "پوچھیں۔ عاطف اسسٹنٹ خود جواب دے گا۔",
+    related: "یہ فائل کس بارے میں ہے؟ (مثلاً ریزیومے، پروجیکٹ، نوٹ)",
+    uploading: "اپ لوڈ ہو رہا ہے...",
+    uploaded: "یادداشت میں محفوظ ہو گیا۔",
+    uploadFailed: "اپ لوڈ ناکام۔",
+    saved: "سیٹنگز محفوظ ہو گئیں۔",
+  },
+};
+
+async function loadSettings() {
+  try {
+    const saved = await (await fetch("/api/settings")).json();
+    for (const k of Object.keys(settings)) {
+      if (saved[k] != null && saved[k] !== "") settings[k] = saved[k];
+    }
+  } catch {
+    /* defaults are fine */
+  }
+  applyLang(settings.lang);
+}
+
+function applyLang(code) {
+  const ur = code === "ur";
+  document.documentElement.lang = ur ? "ur" : "en";
+  document.documentElement.dir = ur ? "rtl" : "ltr";
+  const s = STRINGS[ur ? "ur" : "en"];
+  input.placeholder = s.placeholder;
+  const rel = document.getElementById("upload-related");
+  if (rel) rel.placeholder = s.related;
+}
+
+async function saveSettings() {
+  const payload = {
+    lang: settings.lang,
+    speak: settings.speak,
+    voice: settings.voice,
+    stt: settings.stt,
+    detail: settings.detail,
+  };
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    /* non-critical */
+  }
+}
+
+/* ---------------------------------------------------------------- speech */
+
+let voices = [];
+
+function loadVoices() {
+  if (!("speechSynthesis" in window)) return;
+  voices = window.speechSynthesis.getVoices();
+  const sel = document.getElementById("set-voice");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const pref = settings.lang === "ur" ? "ur" : "en";
+  const sorted = [...voices].sort((a) => (a.lang || "").startsWith(pref) ? -1 : 1);
+  const opt0 = document.createElement("option");
+  opt0.value = "";
+  opt0.textContent = "Automatic";
+  sel.appendChild(opt0);
+  for (const v of sorted) {
+    const o = document.createElement("option");
+    o.value = v.name;
+    o.textContent = `${v.name} (${v.lang})`;
+    sel.appendChild(o);
+  }
+  if (settings.voice && voices.some((v) => v.name === settings.voice)) {
+    sel.value = settings.voice;
+  }
+}
+
+function speak(text) {
+  if (settings.speak !== "on" || !("speechSynthesis" in window) || !text) return;
+  const clean = String(text).replace(/\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi, "");
+  if (!clean.trim()) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(clean);
+    const pref = settings.lang === "ur" ? "ur" : "en";
+    const chosen = settings.voice && voices.find((v) => v.name === settings.voice);
+    const match = chosen || voices.find((v) => (v.lang || "").startsWith(settings.stt))
+      || voices.find((v) => (v.lang || "").startsWith(pref));
+    if (match) u.voice = match;
+    u.lang = settings.stt;
+    window.speechSynthesis.speak(u);
+  } catch {
+    /* speech is best-effort */
+  }
+}
+
+/* ------------------------------------------------------------ speech input */
+
+let recognizer = null;
+let listening = false;
+
+function setupRecognizer() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  const r = new SR();
+  r.continuous = false;
+  r.interimResults = false;
+  r.maxAlternatives = 1;
+  r.onresult = (e) => {
+    const text = e.results[0][0].transcript;
+    input.value = text;
+    input.focus();
+  };
+  r.onend = () => {
+    listening = false;
+    document.getElementById("btn-mic")?.classList.remove("active");
+  };
+  r.onerror = r.onend;
+  return r;
+}
+
+function toggleMic() {
+  if (!recognizer) recognizer = setupRecognizer();
+  if (!recognizer) {
+    alert("Speech recognition is not supported in this browser.");
+    return;
+  }
+  const btn = document.getElementById("btn-mic");
+  if (listening) {
+    recognizer.stop();
+    return;
+  }
+  recognizer.lang = settings.stt;
+  try {
+    recognizer.start();
+    listening = true;
+    btn?.classList.add("active");
+  } catch {
+    listening = false;
+  }
+}
+
+/* --------------------------------------------------------------- uploads */
+
+const uSheet = document.getElementById("upload-sheet");
+
+document.getElementById("btn-upload").addEventListener("click", () => {
+  uSheet.hidden = false;
+});
+document.getElementById("close-upload").addEventListener("click", () => {
+  uSheet.hidden = true;
+});
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const s = String(reader.result);
+      resolve(s.slice(s.indexOf(",") + 1));
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadFile() {
+  const fileEl = document.getElementById("upload-file");
+  const relatedEl = document.getElementById("upload-related");
+  const statusEl = document.getElementById("upload-status");
+  const file = fileEl?.files?.[0];
+  const s = STRINGS[settings.lang === "ur" ? "ur" : "en"];
+  if (!file) {
+    fileEl?.focus();
+    return;
+  }
+  statusEl.textContent = s.uploading;
+  try {
+    const content_b64 = await fileToBase64(file);
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: file.name,
+        content_b64,
+        related_to: relatedEl?.value.trim() || null,
+      }),
+    });
+    if (!res.ok) throw new Error();
+    statusEl.textContent = s.uploaded;
+    fileEl.value = "";
+    if (relatedEl) relatedEl.value = "";
+  } catch {
+    statusEl.textContent = s.uploadFailed;
+  }
+}
+
+document.getElementById("do-upload").addEventListener("click", uploadFile);
+
+/* ------------------------------------------------------------ settings ui */
+
+const setSheet = document.getElementById("settings-sheet");
+const setLang = document.getElementById("set-lang");
+const setSpeak = document.getElementById("set-speak");
+const setVoice = document.getElementById("set-voice");
+const setStt = document.getElementById("set-stt");
+const setDetail = document.getElementById("set-detail");
+const settingsStatus = document.getElementById("settings-status");
+
+function syncSettingsForm() {
+  if (setLang) setLang.value = settings.lang;
+  if (setSpeak) setSpeak.value = settings.speak;
+  if (setStt) setStt.value = settings.stt;
+  if (setDetail) setDetail.value = settings.detail;
+  if (setVoice) {
+    loadVoices();
+    setVoice.value = settings.voice || "";
+  }
+}
+
+document.getElementById("btn-settings").addEventListener("click", () => {
+  syncSettingsForm();
+  uSheet.hidden = true;
+  document.getElementById("settings-sheet").hidden = false;
+});
+document.getElementById("close-settings").addEventListener("click", () => {
+  document.getElementById("settings-sheet").hidden = true;
+});
+
+if (setLang) {
+  setLang.addEventListener("change", () => {
+    settings.lang = setLang.value;
+    applyLang(settings.lang);
+    loadVoices();
+  });
+}
+if (setSpeak) setSpeak.addEventListener("change", () => (settings.speak = setSpeak.value));
+if (setStt) setStt.addEventListener("change", () => (settings.stt = setStt.value));
+if (setDetail) setDetail.addEventListener("change", () => (settings.detail = setDetail.value));
+if (setVoice) setVoice.addEventListener("change", () => (settings.voice = setVoice.value));
+
+document.getElementById("save-settings").addEventListener("click", async () => {
+  await saveSettings();
+  const status = document.getElementById("settings-status");
+  const s = STRINGS[settings.lang === "ur" ? "ur" : "en"];
+  if (status) status.textContent = s.saved;
+});
+
+document.getElementById("test-voice").addEventListener("click", () => {
+  const was = settings.speak;
+  settings.speak = "on";
+  speak(
+    settings.lang === "ur"
+      ? "السلام علیکم، میں عاطف اسسٹنٹ ہوں۔"
+      : "This is the Atif Assistant voice."
+  );
+  settings.speak = was;
+});
+
+mic.addEventListener("click", toggleMic);
+
+if ("speechSynthesis" in window) {
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+}
+
+/* ---------------------------------------------------------------- wiring */
+
 /* boot */
 (async function init() {
+  await loadSettings();
+  loadVoices();
   try {
     const r = await fetch("/api/health");
     const h = await r.json();

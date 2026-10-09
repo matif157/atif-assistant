@@ -190,6 +190,8 @@ def build_context(question: str) -> dict[str, Any]:
         "hidden_objective": objective,
         "contradictions": relevant_contradictions,
         "escalations": [],
+        "language": None,
+        "detail": None,
     }
 
 
@@ -214,6 +216,18 @@ def _guardrails(ctx: dict[str, Any]) -> str:
             + ". State clearly that this needs a qualified professional, "
             "and give the practical next step."
         )
+    # Output language and length are user settings. The reality labels stay in
+    # English brackets so the Reality Engine can still parse and colour them.
+    if (ctx.get("language") or "").lower().startswith("ur"):
+        lines.append(
+            "LANGUAGE: answer in Urdu (اردو). Keep the bracketed labels "
+            "[FACT] [INFERENCE] [ASSUMPTION] [UNKNOWN] [PREDICTION] in English."
+        )
+    detail = ctx.get("detail")
+    if detail == "short":
+        lines.append("LENGTH: be brief. A few sentences at most.")
+    elif detail == "deep":
+        lines.append("LENGTH: be thorough and explain the reasoning.")
     return "\n".join(lines)
 
 

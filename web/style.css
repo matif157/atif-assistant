@@ -244,6 +244,42 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .resolve-row { display: flex; gap: 6px; margin-top: 8px; }
 .resolve-row input { flex: 1; min-width: 0; }
 
+/* upload + settings sheets */
+.upload-body,
+.settings-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+.upload-body label,
+.settings-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: .1em;
+  color: var(--dim);
+}
+.upload-body input,
+.settings-body input,
+.settings-body select {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--txt);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.settings-body select { appearance: none; }
+.upload-body p.hint { margin: 0; line-height: 1.5; }
+#settings-status:not(:empty),
+#upload-status:not(:empty) { color: var(--acc); }
+#mic.active { color: var(--acc); border-color: var(--acc); }
+
 .typing { display: inline-block; }
 .typing span { animation: blink 1.4s infinite; }
 .typing span:nth-child(2) { animation-delay: .2s; }
