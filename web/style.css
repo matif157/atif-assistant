@@ -362,6 +362,56 @@ textarea:focus { outline: none; border-color: var(--acc); }
   overflow-y: auto;
 }
 
+/* voice call */
+.call-sheet { align-items: center; justify-content: center; }
+.call-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+  padding: 24px;
+  max-width: 560px;
+}
+.call-orb {
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 48px;
+  background: var(--panel);
+  border: 2px solid var(--acc);
+  color: var(--txt);
+  position: relative;
+}
+.call-orb::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  border: 2px solid var(--acc);
+  opacity: .5;
+  animation: callring 1.8s ease-out infinite;
+}
+@keyframes callring {
+  0% { transform: scale(1); opacity: .5; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+#call-sheet.thinking .call-orb { border-color: var(--warn); }
+#call-sheet.thinking .call-orb::after { border-color: var(--warn); }
+#call-sheet.speaking .call-orb { border-color: var(--pred); }
+#call-sheet.speaking .call-orb::after { display: none; }
+.call-state { letter-spacing: .22em; font-size: 12px; color: var(--acc); }
+#call-sheet.thinking .call-state { color: var(--warn); }
+#call-sheet.speaking .call-state { color: var(--pred); }
+.call-transcript { font-size: 16px; min-height: 1.4em; }
+.call-heard { font-size: 12px; color: var(--dim); min-height: 1.2em; }
+
+@media (prefers-reduced-motion: reduce) {
+  .call-orb::after { animation: none; }
+}
+
 .typing { display: inline-block; }
 .typing span { animation: blink 1.4s infinite; }
 .typing span:nth-child(2) { animation-delay: .2s; }

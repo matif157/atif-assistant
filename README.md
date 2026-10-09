@@ -430,6 +430,24 @@ the honest note on why there is no signed APK yet. Build a portable bundle with
 
 ---
 
+## Voice call (hands-free)
+
+The **CALL** button (top bar) starts a hands-free voice conversation:
+
+1. it listens through the microphone,
+2. sends what it heard as a normal question (same routing, labels and brake),
+3. reads the answer aloud, then
+4. listens again - until you tap **END CALL**.
+
+The on-screen orb shows the live state (LISTENING / THINKING / SPEAKING). Tap the
+orb while it is speaking to **interrupt** and take the turn back. Replies spoken
+during a call use the microphone language and voice from Settings; the Android
+bridge (`AndroidVoice`) is used when running inside the app, otherwise the
+browser Web Speech API. Speech recognition needs HTTPS (or localhost) and mic
+permission; browsers without it show a clear message instead of failing silently.
+
+---
+
 ## Models & API keys
 
 Atif Assistant tries providers in order (`groq → gemini → openrouter → ollama`)

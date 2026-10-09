@@ -21,6 +21,7 @@
   <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
   <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
   <button class="ghost" id="btn-upload" title="Upload a file">UPLOAD</button>
+  <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
   <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
 
 <main id="chat"></main>
@@ -181,6 +182,18 @@
     <p class="hint">Settings are stored on your machine and applied on every device
     that opens this address. Nothing here is sent to a third party. Import only
     ever adds memory; it never deletes or overwrites what is already there.</p>
+  </div>
+</div>
+
+<div class="sheet call-sheet" id="call-sheet" hidden>
+  <div class="call-inner">
+    <button class="call-orb" id="call-orb" aria-label="Interrupt">&#127908;</button>
+    <div class="call-state" id="call-state">LISTENING</div>
+    <div class="call-transcript" id="call-transcript"></div>
+    <div class="call-heard" id="call-heard"></div>
+    <p class="hint">Talk naturally. Atif Assistant answers out loud, then listens
+    again. Tap the orb to interrupt while it is speaking.</p>
+    <button class="ghost" id="end-call">END CALL</button>
   </div>
 </div>
 

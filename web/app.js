@@ -130,7 +130,7 @@ function removeTyping() {
 
 /* ------------------------------------------------------------- requests */
 
-async function ask(question) {
+async function ask(question, opts = {}) {
   addUser(question);
   addTyping();
   sendBtn.disabled = true;
@@ -149,7 +149,7 @@ async function ask(question) {
     const data = await res.json();
     removeTyping();
     addBot(data);
-    if (settings.speak === "on" && data.text) {
+    if (!opts.suppressSpeak && settings.speak === "on" && data.text) {
       speak(data.text);
     }
     if (data.session) {
@@ -163,12 +163,14 @@ async function ask(question) {
     } else {
       setTimeout(refreshLearnedIfAny, 2500);
     }
+    return data;
   } catch (e) {
     removeTyping();
     const detail = e instanceof SyntaxError
       ? "Malformed response from server."
       : String(e.message || e);
     addBot({ text: `Request failed: ${detail}`, warnings: [] });
+    return null;
   } finally {
     sendBtn.disabled = false;
   }
@@ -719,23 +721,42 @@ function loadVoices() {
   }
 }
 
-function speak(text) {
-  if (settings.speak !== "on" || !text) return;
+function speak(text, opts = {}) {
+  if (!opts.force && settings.speak !== "on") return;
+  if (!text) return;
   const clean = String(text).replace(/\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi, "");
-  if (!clean.trim()) return;
+  if (!clean.trim()) {
+    if (opts.onEnd) opts.onEnd();
+    return;
+  }
+
+  // onEnd must fire exactly once, whichever engine finishes first.
+  let ended = false;
+  const done = () => {
+    if (ended) return;
+    ended = true;
+    if (opts.onEnd) opts.onEnd();
+  };
 
   // Inside the Android app, prefer the native text-to-speech engine. WebView
-  // does not implement the Web Speech API.
+  // does not implement the Web Speech API. There is no completion callback in
+  // the bridge, so estimate from the word count.
   if (window.AndroidVoice && typeof window.AndroidVoice.speak === "function") {
     try {
       window.AndroidVoice.speak(clean, settings.stt);
+      const words = clean.split(/\s+/).filter(Boolean).length;
+      const estimate = Math.min(Math.max(words * 380, 1200), 30000);
+      setTimeout(done, estimate);
       return;
     } catch {
       /* fall through to the web engine */
     }
   }
 
-  if (!("speechSynthesis" in window)) return;
+  if (!("speechSynthesis" in window)) {
+    done();
+    return;
+  }
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(clean);
@@ -745,9 +766,12 @@ function speak(text) {
       || voices.find((v) => (v.lang || "").startsWith(pref));
     if (match) u.voice = match;
     u.lang = settings.stt;
+    u.onend = done;
+    u.onerror = done;
     window.speechSynthesis.speak(u);
   } catch {
     /* speech is best-effort */
+    done();
   }
 }
 
@@ -823,6 +847,191 @@ function toggleMic() {
     listening = false;
   }
 }
+
+/* ------------------------------------------------------------- voice call */
+
+const callSheet = document.getElementById("call-sheet");
+const callStateEl = document.getElementById("call-state");
+const callTranscriptEl = document.getElementById("call-transcript");
+const callHeardEl = document.getElementById("call-heard");
+const callOrb = document.getElementById("call-orb");
+
+const CALL_LABEL = { listening: "LISTENING", thinking: "THINKING", speaking: "SPEAKING" };
+let callActive = false;
+let callPhase = "idle"; // listening | thinking | speaking
+let callRecognizer = null;
+let callGotResult = false;
+let callRetry = null;
+let callResumeTimer = null;
+
+function callSupported() {
+  return Boolean(
+    (window.SpeechRecognition || window.webkitSpeechRecognition) ||
+      (window.AndroidVoice && typeof window.AndroidVoice.listen === "function")
+  );
+}
+
+function callSetPhase(phase) {
+  callPhase = phase;
+  callSheet.classList.remove("listening", "thinking", "speaking");
+  callSheet.classList.add(phase);
+  callStateEl.textContent = CALL_LABEL[phase] || "";
+}
+
+// Re-open the mic once, debounced, so a cancelled utterance's onend and an
+// explicit barge-in don't start two recognizers at the same time.
+function callResume() {
+  if (!callActive) return;
+  clearTimeout(callResumeTimer);
+  callResumeTimer = setTimeout(() => {
+    if (callActive && callPhase !== "listening") callListen();
+  }, 250);
+}
+
+function stopCallRecognition() {
+  clearTimeout(callRetry);
+  if (callRecognizer) {
+    try {
+      callRecognizer.onend = null;
+      callRecognizer.onerror = null;
+      callRecognizer.abort();
+    } catch {
+      /* already stopped */
+    }
+    callRecognizer = null;
+  }
+}
+
+function startCall() {
+  if (callActive) return;
+  if (!callSupported()) {
+    alert("Voice calls need speech recognition, which this browser does not support.");
+    return;
+  }
+  // The one-shot mic and the call must never run together.
+  if (listening && recognizer) {
+    try { recognizer.stop(); } catch { /* ignore */ }
+  }
+  try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  callActive = true;
+  callTranscriptEl.textContent = "";
+  callHeardEl.textContent = "";
+  callSheet.hidden = false;
+  callListen();
+}
+
+function endCall() {
+  callActive = false;
+  callPhase = "idle";
+  clearTimeout(callResumeTimer);
+  stopCallRecognition();
+  try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  if (window.AndroidVoice && typeof window.AndroidVoice.stop === "function") {
+    try { window.AndroidVoice.stop(); } catch { /* ignore */ }
+  }
+  callSheet.hidden = true;
+}
+
+function callListen() {
+  if (!callActive) return;
+  clearTimeout(callRetry);
+  callGotResult = false;
+  callSetPhase("listening");
+  callTranscriptEl.textContent = "";
+  callHeardEl.textContent = "";
+
+  // Inside the Android app use the native recognizer via the JS bridge. It is
+  // single-shot, so we re-arm it after every turn.
+  if (window.AndroidVoice && typeof window.AndroidVoice.listen === "function") {
+    window.onAndroidSpeechResult = (text) => {
+      if (!callActive) return;
+      const said = (text || "").trim();
+      if (said) callSubmit(said);
+      else callListen();
+    };
+    try {
+      window.AndroidVoice.listen(settings.stt);
+    } catch {
+      callRetry = setTimeout(callListen, 400);
+    }
+    return;
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let r;
+  try {
+    r = new SR();
+  } catch {
+    endCall();
+    return;
+  }
+  callRecognizer = r;
+  r.lang = settings.stt;
+  r.continuous = false;
+  r.interimResults = true;
+  r.maxAlternatives = 1;
+
+  r.onresult = (e) => {
+    let interim = "";
+    let finalText = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      if (res.isFinal) finalText += res[0].transcript;
+      else interim += res[0].transcript;
+    }
+    callHeardEl.textContent = (finalText + interim).trim();
+    if (finalText.trim()) {
+      callGotResult = true;
+      stopCallRecognition();
+      callSubmit(finalText.trim());
+    }
+  };
+  r.onerror = (e) => {
+    if (!callActive) return;
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      callTranscriptEl.textContent = "Microphone permission is required for a call.";
+      endCall();
+    }
+    // "no-speech" and "aborted" just mean silence; onend re-arms the mic.
+  };
+  r.onend = () => {
+    if (!callActive || callGotResult) return;
+    if (callPhase === "listening") callRetry = setTimeout(callListen, 350);
+  };
+
+  try {
+    r.start();
+  } catch {
+    callRetry = setTimeout(callListen, 400);
+  }
+}
+
+async function callSubmit(text) {
+  if (!callActive) return;
+  stopCallRecognition();
+  callTranscriptEl.textContent = text;
+  callHeardEl.textContent = "";
+  callSetPhase("thinking");
+
+  const data = await ask(text, { suppressSpeak: true });
+  if (!callActive) return;
+  if (!data || !data.text) {
+    callResume();
+    return;
+  }
+  callSetPhase("speaking");
+  speak(data.text, { force: true, onEnd: callResume });
+}
+
+document.getElementById("btn-call").addEventListener("click", startCall);
+document.getElementById("end-call").addEventListener("click", endCall);
+// Tap the orb to barge in while the answer is being spoken.
+callOrb.addEventListener("click", () => {
+  if (callActive && callPhase === "speaking") {
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+    callResume();
+  }
+});
 
 /* --------------------------------------------------------------- uploads */
 
