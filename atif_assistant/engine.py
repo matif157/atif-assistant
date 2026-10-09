@@ -82,6 +82,9 @@ RECOMMENDATION: one clear sentence.
 
 Be direct. Do not soften the case against. Do not end with "but you decide"
 if you have a view. Have a view.
+
+Label the key claim in each section with [FACT], [INFERENCE], [ASSUMPTION],
+[UNKNOWN] or [PREDICTION]. Never drop a section header.
 """
 
 DECIDE_INSTRUCTIONS = """
@@ -102,6 +105,9 @@ RECOMMENDATION: one option, one reason.
 CONFIDENCE: a percentage with one sentence of justification.
 
 REVIEW: when this decision should be re-examined.
+
+Label the key claim in each section with [FACT], [INFERENCE], [ASSUMPTION],
+[UNKNOWN] or [PREDICTION].
 """
 
 BASE_SYSTEM = SYSTEM_BASE
@@ -279,6 +285,24 @@ _SOFTENING = re.compile(
 )
 
 
+_REQUIRED_CHALLENGE_SECTIONS = (
+    "CASE FOR",
+    "CASE AGAINST",
+    "RECOMMENDATION",
+)
+
+
+def structure_ok(text: str, challenge_mode: bool = False) -> bool:
+    """True when the response keeps the Reality Engine's required structure."""
+    if not _LABEL_RE.search(text):
+        return False
+    if challenge_mode:
+        upper = text.upper()
+        if any(section not in upper for section in _REQUIRED_CHALLENGE_SECTIONS):
+            return False
+    return True
+
+
 def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
     """Post-hoc brake. Returns warnings if the model broke a hard rule."""
     warnings = []
@@ -337,11 +361,17 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         text, provider = _offline_answer(question, ctx), "offline"
 
     # Adversarial second pass: find what the draft got wrong, then fix it.
+    draft = text
     critique, revised, critique_notes = await _self_critique(
         question, text, ctx, provider
     )
-    if revised:
+    if revised and (structure_ok(revised) or not structure_ok(draft)):
         text = revised
+    if provider != "offline" and not structure_ok(text):
+        repaired = await _repair_structure(text, provider)
+        if structure_ok(repaired):
+            text = repaired
+            critique_notes.append("Answer reformatted to restore Reality Engine labels.")
 
     return {
         "text": text,
@@ -418,6 +448,19 @@ async def _self_critique(
     system = BASE_SYSTEM + CRITIQUE_INSTRUCTIONS
     if audit_challenge:
         system += "\n7. CHALLENGE INTEGRITY - did it actually push back?\n"
+    # A revision must not strip the mandated output structure, or the brake
+    # fires on an answer that was otherwise correct.
+    system += (
+        "\nFORMAT RULES FOR THE REVISION: label every substantive claim with "
+        "[FACT], [INFERENCE], [ASSUMPTION], [UNKNOWN] or [PREDICTION]."
+    )
+    if audit_challenge:
+        system += (
+            " Keep these section headers exactly: "
+            + ", ".join(_REQUIRED_CHALLENGE_SECTIONS)
+            + "."
+        )
+    system += " Never remove labels or required section headers.\n"
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user_content},
@@ -462,6 +505,40 @@ async def _self_critique(
     return {"verdict": verdict, "defects": defects}, revision, notes
 
 
+async def _repair_structure(
+    text: str, provider: str, challenge_mode: bool = False
+) -> str:
+    """Last resort: re-emit an answer with labels and section headers intact.
+
+    Content must not change - only the formatting the brake requires. Fails
+    soft: on any error the original text is returned untouched.
+    """
+    if provider == "offline" or not text.strip():
+        return text
+    rules = (
+        "Reformat the ANSWER below. Do not add, remove or soften any claim, do "
+        "not answer anything new - only restore the required formatting. Label "
+        "every substantive claim with [FACT], [INFERENCE], [ASSUMPTION], "
+        "[UNKNOWN] or [PREDICTION]."
+    )
+    if challenge_mode:
+        rules += (
+            " Keep these section headers exactly, in order: "
+            + ", ".join(_REQUIRED_CHALLENGE_SECTIONS)
+            + "."
+        )
+    rules += " Output only the reformatted answer, with no commentary."
+    messages = [
+        {"role": "system", "content": BASE_SYSTEM + "\n" + rules},
+        {"role": "user", "content": f"ANSWER:\n{text}"},
+    ]
+    try:
+        raw, _ = await complete(messages, temperature=0.1, max_tokens=2200)
+    except ProviderError:
+        return text
+    return raw.strip() if raw.strip() else text
+
+
 async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     guard = _guardrails(ctx)
     user_content = "\n\n".join(
@@ -485,11 +562,21 @@ async def _challenge(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
 
     # The challenge is the mode most likely to drift into validating, because
     # the user's position is emotionally loaded. Audit it hardest.
+    draft = text
     critique, revised, critique_notes = await _self_critique(
         question, text, ctx, provider, audit_challenge=True
     )
-    if revised:
+    if revised and (
+        structure_ok(revised, True) or not structure_ok(draft, True)
+    ):
         text = revised
+    if provider != "offline" and not structure_ok(text, True):
+        repaired = await _repair_structure(text, provider, challenge_mode=True)
+        if structure_ok(repaired, True):
+            text = repaired
+            critique_notes.append(
+                "Challenge reformatted to restore labels and sections."
+            )
 
     return {
         "text": text,
@@ -529,11 +616,17 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
     except ProviderError:
         text, provider = _offline_answer(question, ctx), "offline"
 
+    draft = text
     critique, revised, critique_notes = await _self_critique(
         question, text, ctx, provider
     )
-    if revised:
+    if revised and (structure_ok(revised) or not structure_ok(draft)):
         text = revised
+    if provider != "offline" and not structure_ok(text):
+        repaired = await _repair_structure(text, provider)
+        if structure_ok(repaired):
+            text = repaired
+            critique_notes.append("Answer reformatted to restore Reality Engine labels.")
 
     return {
         "text": text,

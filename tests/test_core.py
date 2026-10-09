@@ -538,6 +538,96 @@ def test_critique_parsing() -> None:
     )
 
 
+def test_structure_guard() -> None:
+    import asyncio
+
+    from atif_assistant import engine
+    from atif_assistant.engine import structure_ok
+
+    print("\nstructure guard")
+    check("plain prose is unstructured", not structure_ok("Love cannot be ranked."))
+    check("[FACT]-labelled answer is structured", structure_ok("[FACT] She said so."))
+    check(
+        "challenge needs its sections",
+        not structure_ok("[FACT] x\nCASE FOR: a", challenge_mode=True),
+    )
+    check(
+        "full challenge is structured",
+        structure_ok(
+            "[FACT] a\nCASE FOR: b\nCASE AGAINST: c\nRECOMMENDATION: d",
+            challenge_mode=True,
+        ),
+    )
+
+    original = engine.complete
+    try:
+        # The draft is unlabelled and the revision loses the sections; the
+        # repair pass must restore both.
+        async def repair_scenario():
+            async def fake(messages, **kw):
+                system = messages[0]["content"]
+                if "Reformat the ANSWER" in system:
+                    return (
+                        "[FACT] She wrote a lot.\n"
+                        "[UNKNOWN] Whether she loves you more.\n\n"
+                        "CASE FOR: things look good.\n"
+                        "CASE AGAINST: you cannot measure it.\n"
+                        "RECOMMENDATION: stop comparing.",
+                        "fake",
+                    )
+                if "DRAFT ANSWER TO AUDIT" in messages[1]["content"]:
+                    return (
+                        "VERDICT: NEEDS_REVISION\nDEFECTS: 1. lost structure\n"
+                        "REVISION: EMPTY",
+                        "fake",
+                    )
+                return ("**Challenge:** unmeasurable. **Recommendation:** stop.", "fake")
+
+            engine.complete = fake
+            return await engine._challenge("She loves me more?", engine.build_context("q"))
+
+        result = asyncio.run(repair_scenario())
+        check(
+            "repaired challenge has labels",
+            bool(engine._LABEL_RE.search(result["text"])),
+        )
+        check(
+            "repaired challenge keeps CASE AGAINST",
+            "CASE AGAINST" in result["text"].upper(),
+        )
+        check("no structural warnings after repair", result["warnings"] == [])
+
+        # A revision that drops the structure must be rejected in favour of the
+        # structurally-correct draft.
+        async def keep_draft_scenario():
+            async def fake(messages, **kw):
+                if "DRAFT ANSWER TO AUDIT" in messages[1]["content"]:
+                    return (
+                        "VERDICT: NEEDS_REVISION\nDEFECTS: 1. tone\n"
+                        "REVISION: Here is a long plain paragraph that removes "
+                        "every label and every required section header, so the "
+                        "answer is now just flowing prose with no structure at all.",
+                        "fake",
+                    )
+                return (
+                    "[FACT] good draft\nCASE FOR: a\nCASE AGAINST: b\n"
+                    "RECOMMENDATION: c",
+                    "fake",
+                )
+
+            engine.complete = fake
+            return await engine._challenge("q", engine.build_context("q"))
+
+        kept = asyncio.run(keep_draft_scenario())
+        check(
+            "keeps the better draft over a structure-losing revision",
+            bool(engine._LABEL_RE.search(kept["text"]))
+            and "CASE AGAINST" in kept["text"].upper(),
+        )
+    finally:
+        engine.complete = original
+
+
 def test_isolation() -> None:
     """The real database must be untouched by a test run."""
     from atif_assistant import db
@@ -962,6 +1052,7 @@ def main() -> int:
     test_uploads()
     test_backup()
     test_providers()
+    test_structure_guard()
 
     if before is not None:
         from atif_assistant import db
