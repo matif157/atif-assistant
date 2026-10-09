@@ -646,6 +646,7 @@ const STRINGS = {
     uploaded: "Read and saved to memory.",
     uploadedStored: "Saved. This file type can't be read as text.",
     uploadedNoOcr: "Saved. OCR isn't installed, so images/scans can't be read yet.",
+    uploadedNoVision: "Saved. Images and scans need a vision provider - add a Gemini key in Settings.",
     uploadFailed: "Upload failed. The file may be too large (max 25 MB).",
     saved: "Settings saved.",
   },
@@ -656,6 +657,7 @@ const STRINGS = {
     uploaded: "پڑھ کر یادداشت میں محفوظ ہو گیا۔",
     uploadedStored: "محفوظ ہو گیا، مگر اس قسم کی فائل پڑھی نہیں جا سکتی۔",
     uploadedNoOcr: "محفوظ ہو گیا۔ تصویریں پڑھنے کے لیے OCR انسٹال نہیں ہے۔",
+    uploadedNoVision: "محفوظ ہو گیا۔ تصویر یا اسکین پڑھنے کے لیے سیٹنگز میں Gemini کلید شامل کریں۔",
     uploadFailed: "اپ لوڈ ناکام۔ فائل بہت بڑی ہو سکتی ہے (زیادہ سے زیادہ 25 MB)۔",
     saved: "سیٹنگز محفوظ ہو گئیں۔",
   },
@@ -1167,6 +1169,8 @@ async function uploadFile() {
     if (data.read) {
       const extra = data.whatsapp_summary ? ` ${data.whatsapp_summary}` : "";
       statusEl.textContent = `${s.uploaded} (${data.read_chars.toLocaleString()} chars)${extra}`;
+    } else if ((data.read_reason || "").toLowerCase().includes("vision")) {
+      statusEl.textContent = s.uploadedNoVision;
     } else if ((data.read_reason || "").toLowerCase().includes("ocr")) {
       statusEl.textContent = s.uploadedNoOcr;
     } else {

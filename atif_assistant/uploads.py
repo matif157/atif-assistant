@@ -20,7 +20,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from . import db, extract
+from . import db, extract, transcribe, vision
 from .config import UPLOADS_DIR
 
 TEXT_EXTS = {
@@ -55,6 +55,33 @@ def _safe_name(filename: str) -> str:
     name = Path(filename or "upload").name
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "upload"
     return name[:120]
+
+
+def read_upload(filename: str, raw: bytes, kind: str | None = None) -> dict[str, Any]:
+    """Read an uploaded file, falling back to hosted models when needed.
+
+    Local extraction runs first. If it can find no text and the file is audio,
+    an image, or a scanned PDF, a configured hosted model is tried (Groq Whisper
+    for audio, Gemini vision for pixels). Every path returns ``text``/``source``/
+    ``reason``/``meta`` and never invents content.
+    """
+    result = extract.extract(filename, raw)
+    if result.get("text"):
+        return result
+
+    resolved = (kind or detect_kind(filename)).lower()
+    ext = Path(filename or "").suffix.lower()
+    fallback: dict[str, Any] | None = None
+    if resolved == "audio":
+        fallback = transcribe.transcribe(raw, filename)
+    elif resolved == "image" or (resolved == "document" and ext == ".pdf"):
+        fallback = vision.describe(raw, filename)
+
+    if fallback and fallback.get("text"):
+        return fallback
+    if fallback and fallback.get("reason"):
+        result["reason"] = fallback["reason"]
+    return result
 
 
 def ingest_upload(
@@ -128,13 +155,14 @@ def ingest_upload(
         "read_reason": None,
     }
 
-    # Read the file's text locally. Text/JSON/CSV, PDF, Office and WhatsApp
-    # exports become searchable memory; anything unreadable is stored only, and
-    # the response says which and why rather than implying it was understood.
+    # Read the file's text locally, falling back to hosted models for audio,
+    # images and scans. Readable content becomes searchable memory; anything
+    # unreadable is stored only, and the response says which and why rather
+    # than implying it was understood.
     if text is not None:
         result: dict[str, Any] = {"text": text, "source": "text", "reason": None, "meta": {}}
     else:
-        result = extract.extract(filename, raw)
+        result = read_upload(filename, raw, kind)
 
     body = result.get("text")
     report["text_source"] = result.get("source")

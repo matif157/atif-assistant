@@ -7,6 +7,7 @@ never silently useless.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -22,6 +23,34 @@ from .config import (
 
 class ProviderError(RuntimeError):
     pass
+
+
+async def _post_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    json: Any = None,
+    attempts: int = 3,
+    backoff: float = 1.5,
+) -> httpx.Response:
+    """POST, retrying transient overload (429/503) a few times.
+
+    Free tiers briefly answer "high demand" or "rate limited"; a short retry
+    turns those into an answer instead of a hard failure. Everything else is
+    raised immediately so real errors (bad key, bad model) stay visible.
+    """
+    last: httpx.Response | None = None
+    for i in range(attempts):
+        last = await client.post(url, headers=headers, json=json)
+        if last.status_code in (429, 503) and i < attempts - 1:
+            await asyncio.sleep(backoff * (i + 1))
+            continue
+        last.raise_for_status()
+        return last
+    assert last is not None
+    last.raise_for_status()
+    return last
 
 
 # --------------------------------------------------------- runtime config
@@ -82,7 +111,8 @@ async def _groq(model: str, messages: list[dict], **kw: Any) -> str:
     if not key:
         raise ProviderError("no GROQ_API_KEY")
     async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
-        r = await client.post(
+        r = await _post_retry(
+            client,
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
             json={
@@ -92,7 +122,6 @@ async def _groq(model: str, messages: list[dict], **kw: Any) -> str:
                 "max_tokens": kw.get("max_tokens", 1800),
             },
         )
-        r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
 
 
@@ -113,7 +142,7 @@ async def _gemini(model: str, messages: list[dict], **kw: Any) -> str:
     ]
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={key}"
+        f"{model}:generateContent"
     )
     body: dict[str, Any] = {
         "contents": turns,
@@ -127,9 +156,15 @@ async def _gemini(model: str, messages: list[dict], **kw: Any) -> str:
     if system.strip():
         body["systemInstruction"] = {"parts": [{"text": system}]}
     async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
-        r = await client.post(url, json=body)
-        r.raise_for_status()
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        r = await _post_retry(client, url, headers={"x-goog-api-key": key}, json=body)
+        data = r.json()
+        # A thinking model handed a tiny token budget returns a candidate with
+        # no text parts. Treat that as an empty answer, not a crash.
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts") or []
+        return "".join(p.get("text", "") for p in parts)
 
 
 async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
@@ -137,7 +172,8 @@ async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
     if not key:
         raise ProviderError("no OPENROUTER_API_KEY")
     async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
-        r = await client.post(
+        r = await _post_retry(
+            client,
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {key}",
@@ -150,7 +186,6 @@ async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
                 "max_tokens": kw.get("max_tokens", 1800),
             },
         )
-        r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
 
 
@@ -286,8 +321,8 @@ async def _probe_one(name: str) -> dict[str, Any]:
             provider_model(name),
             [{"role": "user", "content": "ping"}],
             temperature=0.0,
-            max_tokens=1,
-            timeout=6,
+            max_tokens=16,
+            timeout=12,
         )
         # A 2xx reply proves the key and endpoint work. Do not require non-empty
         # text: a reasoning model handed max_tokens=1 spends the whole budget on

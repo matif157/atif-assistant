@@ -1427,13 +1427,100 @@ def test_upload_reads() -> None:
         check("docx upload became memory", r.get("evidence_id") is not None and r.get("episode_id") is not None)
 
         png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 60).decode()
-        r2 = client.post("/api/upload", json={"filename": "photo.png", "content_b64": png}).json()
+        # Stub vision so the test never reaches the network; the point here is
+        # the upload path, and a configured key must not decide the outcome.
+        orig_vision = uploads.vision.describe
+        uploads.vision.describe = lambda raw, fn: {
+            "text": None, "source": None, "reason": "no vision provider in tests", "meta": {}
+        }
+        try:
+            r2 = client.post("/api/upload", json={"filename": "photo.png", "content_b64": png}).json()
+        finally:
+            uploads.vision.describe = orig_vision
         check("unreadable upload says so", r2.get("read") is False and bool(r2.get("read_reason")))
         check("unreadable upload is still stored", r2.get("ok") is True)
 
         # The uploaded file's text must be usable as context for a question.
         ev = db.search_evidence("marathon Tuesday", limit=3)
         check("uploaded text is searchable evidence", any("marathon plan" in (e.get("body") or "") for e in ev))
+
+    db.reset_db_path()
+
+
+def test_read_fallbacks() -> None:
+    """Images and audio go through hosted models when configured, and report an
+    honest reason - never invented content - when they are not."""
+    import base64
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, transcribe, uploads, vision
+    from atif_assistant.app import app
+
+    print("\nread fallbacks")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db.use_test_db(base / "fall.db")
+        db.init_db()
+        uploads.UPLOADS_DIR = base / "uploads"
+        client = TestClient(app)
+
+        calls = {"vision": 0, "audio": 0}
+        orig_v, orig_t = vision.describe, transcribe.transcribe
+
+        def fake_vision(raw, filename):
+            calls["vision"] += 1
+            return {
+                "text": "GROCERY: milk, eggs\nDESCRIPTION: a whiteboard",
+                "source": "vision",
+                "reason": None,
+                "meta": {"model": "stub"},
+            }
+
+        def fake_audio(raw, filename):
+            calls["audio"] += 1
+            return {
+                "text": "remind me to call the doctor on Friday",
+                "source": "transcript",
+                "reason": None,
+                "meta": {"model": "stub"},
+            }
+
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 60).decode()
+        mp3 = base64.b64encode(b"ID3\x03\x00" + b"\x00" * 40).decode()
+        vision.describe, transcribe.transcribe = fake_vision, fake_audio
+        try:
+            r = client.post("/api/upload", json={"filename": "board.png", "content_b64": png}).json()
+            check("an image is sent to the vision model", calls["vision"] == 1)
+            check("vision text is read", r.get("read") is True and r.get("text_source") == "vision")
+            check("vision text became evidence", r.get("evidence_id") is not None)
+
+            r2 = client.post("/api/upload", json={"filename": "note.mp3", "content_b64": mp3}).json()
+            check("audio is sent to transcription", calls["audio"] == 1)
+            check("audio transcript is read", r2.get("read") is True and r2.get("text_source") == "transcript")
+            check(
+                "audio transcript is searchable",
+                any("doctor" in (e.get("body") or "") for e in db.search_evidence("doctor", limit=3)),
+            )
+        finally:
+            vision.describe, transcribe.transcribe = orig_v, orig_t
+
+        # No provider: honest reason, nothing invented.
+        vision.describe = lambda raw, fn: {"text": None, "source": None, "reason": "images need a vision provider", "meta": {}}
+        transcribe.transcribe = lambda raw, fn: {"text": None, "source": None, "reason": "audio needs a Groq key", "meta": {}}
+        try:
+            r3 = client.post("/api/upload", json={"filename": "x.png", "content_b64": png}).json()
+            check(
+                "unread image names the missing provider",
+                r3.get("read") is False and "vision" in (r3.get("read_reason") or "").lower(),
+            )
+            r4 = client.post("/api/upload", json={"filename": "y.mp3", "content_b64": mp3}).json()
+            check(
+                "unread audio names the missing key",
+                r4.get("read") is False and "groq" in (r4.get("read_reason") or "").lower(),
+            )
+        finally:
+            vision.describe, transcribe.transcribe = orig_v, orig_t
 
     db.reset_db_path()
 
@@ -1560,6 +1647,7 @@ def main() -> int:
     test_misc_endpoints()
     test_extract()
     test_upload_reads()
+    test_read_fallbacks()
     test_plan()
     test_structure_guard()
 

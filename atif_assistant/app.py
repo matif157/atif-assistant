@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, extract, learn, location, plan, router, uploads
+from . import db, engine, learn, location, plan, router, uploads
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .llm import (
     invalidate_probe_cache,
@@ -537,7 +537,7 @@ async def make_plan(payload: PlanIn) -> JSONResponse:
         stored = Path(row["path"])
         if not stored.exists():
             return JSONResponse({"error": "the file is missing on disk"}, status_code=404)
-        result = extract.extract(stored.name, stored.read_bytes())
+        result = uploads.read_upload(stored.name, stored.read_bytes())
         text = result.get("text")
         related = related or row["tags"]
         if not text:

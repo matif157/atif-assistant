@@ -429,13 +429,16 @@ plus a dated episode:
 | `.pdf` | text layer via `pypdf` |
 | `.docx`, `.pptx`, `.xlsx` | zipped XML via the standard library |
 | WhatsApp `.txt` exports | parsed into a clean transcript with a participant summary |
-| images, scanned PDFs | OCR **only if** Tesseract + `pytesseract` + Pillow are installed |
+| images, scanned PDFs | transcribed and described by **Gemini vision** when a Gemini key is set |
+| voice notes (`.mp3`, `.m4a`, `.wav`, ...) | transcribed by **Groq Whisper** when a Groq key is set |
+| images, scans, audio with no key | stored and referenced only |
 
-Anything else - or an image with no OCR stack - is stored and referenced only.
-The response reports `read`, `read_chars`, `text_source`, and `read_reason`, and
-the UI says whether the file was read or merely stored. Nothing is guessed from
-bytes. Matching evidence lines are also offered to the model on `/api/ask`, so
-the assistant can answer from a file you uploaded. Use the **UPLOAD** button.
+Anything else - or an image, scan or voice note with no matching key - is stored
+and referenced only. The response reports `read`, `read_chars`, `text_source`,
+and `read_reason`, and the UI says whether the file was read or merely stored.
+Nothing is guessed from bytes. Matching evidence lines are also offered to the
+model on `/api/ask`, so the assistant can answer from a file you uploaded. Use
+the **UPLOAD** button.
 
 ## Strict plans and rules
 
@@ -512,10 +515,31 @@ Defaults are chosen to actually work on a free account:
 
 | Provider | Default model | Note |
 |---|---|---|
-| Groq | `openai/gpt-oss-120b` | free tier, fastest |
-| Gemini | `gemini-2.0-flash` | needs a valid key |
-| OpenRouter | `nvidia/nemotron-3-super-120b-a12b:free` | paid models need credits; free tier rate-limits |
-| Ollama | `llama3.2` | local, set the URL too |
+| Groq | `openai/gpt-oss-120b` | free tier, fastest; also powers Whisper transcription |
+| Gemini | `gemini-3.8-flash` | multimodal: chat fallback *and* image/scan reading |
+| OpenRouter | `nvidia/nemotron-3-super-120b-a12b:free` | key works, but free models rate-limit (`429`) until the account has credits |
+| Ollama | `llama3.2:1b` | local and offline, ~1.3 GB, ~1 GB RAM; set the URL too |
+
+Gemini keys are sent as the `x-goog-api-key` header (query-string keys are
+rejected by newer keys). Transient `429`/`503` "high demand" replies are retried
+a few times before a provider is skipped, so a busy free tier degrades to the
+next provider instead of failing outright.
+
+### A small local model
+
+For offline use, a lite local model is plenty: it only has to follow the
+labelled format, not write essays.
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull llama3.2:1b
+```
+
+`llama3.2:1b` (~1.3 GB, runs in about 1 GB of RAM) is the sweet spot on an 8 GB
+Mac. `qwen2.5:0.5b` (~400 MB) is the smallest usable option if space or memory is
+tight. Ollama runs last in the failover order, so remote providers are used when
+reachable and the app keeps working when the network is gone.
 
 ---
 
@@ -604,11 +628,13 @@ you almost certainly won't.
 | `atif_assistant/location.py` | place naming / geocoding |
 | `atif_assistant/uploads.py` | file ingest → memory |
 | `atif_assistant/extract.py` | text/PDF/Office/WhatsApp extraction |
+| `atif_assistant/vision.py` | images and scans via a vision model (Gemini) |
+| `atif_assistant/transcribe.py` | voice notes via Groq Whisper |
 | `atif_assistant/plan.py` | document → strict checkable plan |
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 301 checks |
+| `tests/test_core.py` | 309 checks |
 
 ---
 
@@ -618,7 +644,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-301 checks across twenty-five groups:
+309 checks across twenty-six groups:
 
 | Group | Covers |
 |---|---|
@@ -641,6 +667,7 @@ you almost certainly won't.
 | uploads | sha256 dedupe, text→evidence+episode, media-library listing |
 | extract | text/markup/PDF/docx/xlsx decoded; WhatsApp parsed; unreadable files report a reason |
 | upload reading | readable uploads report read + chars and reach evidence search; images report read=false |
+| read fallbacks | images go to the vision model, audio to transcription when configured; honest reason when not |
 | plan | document → grounded TITLE/RULE draft; strict rules enforced, candidates approvable, rules removable |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
 | providers | key/model precedence, masking, settings/export redaction, save/clear, TEST endpoint |

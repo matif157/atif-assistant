@@ -54,11 +54,11 @@ PROVIDER_ENV_KEYS = {
 
 MODEL_DEFAULTS = {
     "groq": os.environ.get("ATIF_ASSISTANT_GROQ_MODEL", "openai/gpt-oss-120b"),
-    "gemini": os.environ.get("ATIF_ASSISTANT_GEMINI_MODEL", "gemini-2.0-flash"),
+    "gemini": os.environ.get("ATIF_ASSISTANT_GEMINI_MODEL", "gemini-3.8-flash"),
     "openrouter": os.environ.get(
         "ATIF_ASSISTANT_OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
     ),
-    "ollama": os.environ.get("ATIF_ASSISTANT_OLLAMA_MODEL", "llama3.2"),
+    "ollama": os.environ.get("ATIF_ASSISTANT_OLLAMA_MODEL", "llama3.2:1b"),
 }
 
 PROVIDER_LABELS = {
