@@ -449,6 +449,11 @@ Speech API. Speech recognition needs HTTPS (or localhost) and mic permission;
 browsers without it, or without a matching voice, show a clear message instead of
 failing silently.
 
+The call stays **on-brand**: it is not a chatty companion. Social
+pleasantries ("how are you", "what's your name", greetings) are routed to a single
+direct labelled line - never "I'm good, what about you?" - and a brake fires if
+the model ever slips into small talk or a fake-persona reply.
+
 ---
 
 ## Models & API keys
@@ -564,7 +569,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 204 checks |
+| `tests/test_core.py` | 210 checks |
 
 ---
 
@@ -574,7 +579,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-204 checks across twenty groups:
+210 checks across twenty groups:
 
 | Group | Covers |
 |---|---|

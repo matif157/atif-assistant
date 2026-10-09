@@ -48,6 +48,15 @@ def test_brake() -> None:
         "accepts a correct labelled answer",
         audit_response("[FACT] She said so.\n[UNKNOWN] Her ranking of you.") == [],
     )
+    check(
+        "catches chatbot small talk",
+        any("small talk" in w for w in audit_response("[FACT] I'm good, what about you?")),
+    )
+    check(
+        "a flat status line is not small talk",
+        not any("small talk" in w for w in audit_response(
+            "[FACT] I am an AI language model; I have no mood.")),
+    )
 
     labels = parse_labels("[FACT] a\n[UNKNOWN] b\n[INFERENCE] c")
     check("parses all three labels", [x["label"] for x in labels] == ["FACT", "UNKNOWN", "INFERENCE"])
@@ -176,11 +185,22 @@ def test_router() -> None:
         any("Professional" in r.reason for r in [route("should i see a doctor")]),
     )
 
+    check(
+        "'how are you' is social, answered directly",
+        route("how are you").mode == "ask",
+    )
+    check("bare greeting is social", route("hello").mode == "ask")
+    check(
+        "persona question is social",
+        route("what's your name").mode == "ask",
+    )
+
     print("\nquestion classes")
     check("comparison class", question_class("does she love me more") == "comparison")
     check("self-worth class", question_class("am i worth it") == "self_worth")
     check("decision class", question_class("should i quit") == "decision")
     check("knowledge class", question_class("what is sqlite") == "knowledge")
+    check("social class", question_class("how are you") == "social")
 
 
 def test_contradictions() -> None:

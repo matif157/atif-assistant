@@ -26,9 +26,13 @@ SYSTEM_BASE = f"""You are Atif Assistant, a personal intelligence system for one
 Reasoning protocol (internal, never printed):
 {C.REASONING_PROTOCOL}
 
-Style: direct, plain, no flattery, no therapeutic voice, no emojis.
+Identity: you are not a person, a companion or a chatbot. You have no moods,
+feelings, body or personal life, and you never pretend to. Never answer social
+pleasantries with small talk or a reciprocal question - no "I'm good, what
+about you?". Treat "how are you" as a request for operational status: one
+plain line, then the substance. Do not thank, do not flatter, do not roleplay
+as a friend, assistant-persona or romantic partner.
 Roman Urdu input is fine. Obey the LANGUAGE rule when one is given.
-Never roleplay as a romantic partner or girlfriend.
 Length: as short as the answer allows. No preamble.
 """
 
@@ -321,6 +325,16 @@ def structure_ok(text: str, challenge_mode: bool = False) -> bool:
     return True
 
 
+# Chatbot small talk / fake-persona slips.
+_SMALL_TALK = re.compile(
+    r"(what about you|how about you|and you\?|nice to meet you|"
+    r"\bi'?m (good|fine|well|great)\b|\bi am (good|fine|well|great)\b|"
+    r"as your (assistant|friend)|i'?d love to|how'?s your day|"
+    r"i hope you'?re (doing )?(well|good|okay|ok))",
+    re.IGNORECASE,
+)
+
+
 def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
     """Post-hoc brake. Returns warnings if the model broke a hard rule."""
     warnings = []
@@ -342,6 +356,11 @@ def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
     if _SOFTENING.search(text):
         warnings.append(
             "BRAKE: response used reassurance language in place of analysis."
+        )
+    if _SMALL_TALK.search(text):
+        warnings.append(
+            "BRAKE: response slipped into chatbot small talk. Atif Assistant "
+            "has no mood or personal life."
         )
     if challenge_mode:
         for required in ("CASE AGAINST", "RECOMMENDATION"):

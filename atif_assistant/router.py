@@ -96,6 +96,40 @@ _KNOWLEDGE = (
     "kaise",
 )
 
+# Social pleasantries and persona questions. These are not requests for an
+# analysis; they get one direct labelled line, never chatbot small talk.
+_SOCIAL = (
+    "how are you",
+    "how are u",
+    "how you doing",
+    "how's it going",
+    "how are things",
+    "how do you feel",
+    "how do u feel",
+    "are you happy",
+    "are you sad",
+    "are you okay",
+    "are you ok",
+    "do you love me",
+    "what's your name",
+    "what is your name",
+    "who are you",
+    "what are you",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "good night",
+    "assalam",
+    "salam",
+    "kaise ho",
+    "kya haal",
+    "aap kaun",
+)
+
+# Bare greetings with nothing else to answer.
+_GREETINGS = ("hi", "hey", "hello", "yo", "hola")
+
+
 # Non-verbal cues: all-caps, repeated punctuation, no question words.
 def _is_distressed(text: str) -> bool:
     letters = [c for c in text if c.isalpha()]
@@ -228,6 +262,23 @@ def route(text: str, repeat_count: int = 0) -> Route:
             intent=intent,
         )
 
+    # --- Rule 8: social pleasantries and persona questions. Not an analysis;
+    # one direct labelled line, no chatbot small talk.
+    stripped = low.strip(" .!?")
+    if any(p in low for p in _SOCIAL) or stripped in _GREETINGS:
+        return Route(
+            mode=ASK,
+            reason="Social or persona question; answered directly, without "
+            "small talk or a reciprocal question.",
+            confidence=0.7,
+            escalations=[
+                "One direct line. No 'I'm good, what about you?' and no "
+                "pretend feelings.",
+                *escalations,
+            ],
+            intent=intent,
+        )
+
     # --- Default: challenge, because unclassified asks are rarely neutral.
     return Route(
         mode=CHALLENGE,
@@ -250,4 +301,6 @@ def question_class(text: str) -> str:
         return "decision"
     if any(p in low for p in _KNOWLEDGE):
         return "knowledge"
+    if any(p in low for p in _SOCIAL) or low.strip(" .!?") in _GREETINGS:
+        return "social"
     return "other"
