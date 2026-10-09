@@ -142,6 +142,10 @@ async function ask(question, opts = {}) {
   addUser(question);
   addTyping();
   sendBtn.disabled = true;
+  // A question that came in by voice is answered out loud even if SPEAK
+  // REPLIES is off, so tapping the mic gives a real voice assistant.
+  const spokeQuestion = voiceInputPending;
+  voiceInputPending = false;
   try {
     const res = await fetch("/api/ask", {
       method: "POST",
@@ -157,7 +161,7 @@ async function ask(question, opts = {}) {
     const data = await res.json();
     removeTyping();
     addBot(data);
-    if (!opts.suppressSpeak && settings.speak === "on" && data.text) {
+    if (!opts.suppressSpeak && data.text && (settings.speak === "on" || spokeQuestion)) {
       speak(data.text);
     }
     if (data.session) {
@@ -768,16 +772,82 @@ function hasVoiceFor(lang) {
   return voices.some((v) => (v.lang || "").replace("_", "-").startsWith(pref));
 }
 
-function speak(text, opts = {}) {
+let currentAudio = null;
+let speechToken = 0;
+let voiceInputPending = false;
+
+// Stop any speech in progress, whichever engine is producing it.
+function stopSpeech() {
+  speechToken += 1;
+  try {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  } catch {
+    /* ignore */
+  }
+  if (currentAudio) {
+    try {
+      currentAudio.pause();
+    } catch {
+      /* ignore */
+    }
+    if (currentAudio.__url) URL.revokeObjectURL(currentAudio.__url);
+    currentAudio = null;
+  }
+}
+
+// Play a server-synthesized clip. Resolves true once it has played to the end,
+// false if it could not play (no key, quota, autoplay blocked) so the caller
+// can fall back to a device voice.
+function playServerClip(text, onDone) {
+  const token = speechToken;
+  return fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, lang: speechLang() }),
+  })
+    .then((res) => (res.ok ? res.blob() : null))
+    .then(
+      (blob) =>
+        new Promise((resolve) => {
+          if (!blob || !blob.size || token !== speechToken) {
+            resolve(false);
+            return;
+          }
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audio.__url = url;
+          let settled = false;
+          const finish = (played) => {
+            if (settled) return;
+            settled = true;
+            URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
+            if (played) onDone();
+            resolve(played);
+          };
+          currentAudio = audio;
+          audio.onended = () => finish(true);
+          audio.onerror = () => finish(false);
+          audio.play().then(
+            () => {},
+            () => finish(false)
+          );
+        })
+    )
+    .catch(() => false);
+}
+
+async function speak(text, opts = {}) {
   if (!opts.force && settings.speak !== "on") return;
   if (!text) return;
-  const clean = String(text).replace(/\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi, "");
-  if (!clean.trim()) {
+  const clean = String(text).replace(/\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi, "").trim();
+  if (!clean) {
     if (opts.onEnd) opts.onEnd();
     return;
   }
 
   // onEnd must fire exactly once, whichever engine finishes first.
+  const myToken = speechToken;
   let ended = false;
   let safety = null;
   const done = () => {
@@ -787,23 +857,40 @@ function speak(text, opts = {}) {
     if (opts.onEnd) opts.onEnd();
   };
 
-  // Inside the Android app, prefer the native text-to-speech engine. WebView
-  // does not implement the Web Speech API. There is no completion callback in
-  // the bridge, so estimate from the word count.
   const lang = speechLang();
+  const words = clean.split(/\s+/).filter(Boolean).length;
+  // Server speech needs generation time; the device engine should answer far
+  // sooner. Either way, release a call stuck in SPEAKING if nothing arrives.
+  safety = setTimeout(() => {
+    stopSpeech();
+    done();
+  }, Math.min(Math.max(words * 700 + 9000, 12000), 150000));
+
+  // Inside the Android app native TTS is the only engine; there is no
+  // completion callback, so the safety timer releases the loop.
   if (window.AndroidVoice && typeof window.AndroidVoice.speak === "function") {
     try {
       window.AndroidVoice.speak(clean, lang);
-      const words = clean.split(/\s+/).filter(Boolean).length;
-      const estimate = Math.min(Math.max(words * 380, 1200), 30000);
-      setTimeout(done, estimate);
       return;
     } catch {
       /* fall through to the web engine */
     }
   }
 
-  if (!("speechSynthesis" in window)) {
+  const hasWeb = "speechSynthesis" in window;
+  const urdu = lang.startsWith("ur");
+  // A typical device has no Urdu voice, so speaking Urdu locally comes out as
+  // English gibberish. Use the server whenever the language has no local voice.
+  const needServer =
+    opts.server === true || !hasWeb || urdu || (voices.length > 0 && !hasVoiceFor(lang));
+  if (needServer) {
+    const played = await playServerClip(clean, done);
+    if (played) return;
+    // Cancelled (barge-in) or already released - do not start another engine.
+    if (myToken !== speechToken || ended) return;
+  }
+
+  if (!hasWeb) {
     done();
     return;
   }
@@ -815,13 +902,8 @@ function speak(text, opts = {}) {
     u.lang = lang;
     u.onend = done;
     u.onerror = done;
-    // Some engines fail to fire onend; a call would then hang in SPEAKING.
-    // Estimate from the word count and release the loop if nothing arrives.
-    const words = clean.split(/\s+/).filter(Boolean).length;
-    safety = setTimeout(done, Math.min(Math.max(words * 500 + 4000, 6000), 90000));
     window.speechSynthesis.speak(u);
   } catch {
-    /* speech is best-effort */
     done();
   }
 }
@@ -842,6 +924,9 @@ function setupRecognizer() {
     const text = e.results[0][0].transcript;
     input.value = text;
     input.focus();
+    // A spoken question should be answered out loud, even if SPEAK REPLIES is
+    // off, so the voice assistant actually talks back.
+    voiceInputPending = true;
   };
   r.onend = () => {
     listening = false;
@@ -972,7 +1057,7 @@ function startCall() {
   if (listening && recognizer) {
     try { recognizer.stop(); } catch { /* ignore */ }
   }
-  try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  stopSpeech();
   callActive = true;
   callTranscriptEl.textContent = "";
   callHeardEl.textContent = "";
@@ -985,7 +1070,7 @@ function endCall() {
   callPhase = "idle";
   clearTimeout(callResumeTimer);
   stopCallRecognition();
-  try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  stopSpeech();
   if (window.AndroidVoice && typeof window.AndroidVoice.stop === "function") {
     try { window.AndroidVoice.stop(); } catch { /* ignore */ }
   }
@@ -1096,12 +1181,6 @@ async function callSubmit(text) {
     return;
   }
   callSetPhase("speaking");
-  const lang = speechLang();
-  if ("speechSynthesis" in window && voices.length && !hasVoiceFor(lang)) {
-    callHeardEl.textContent = lang.startsWith("ur")
-      ? "No Urdu voice is installed on this device; install one for clearer speech."
-      : "No matching voice found; using the default.";
-  }
   speak(data.text, { force: true, onEnd: callResume });
 }
 
@@ -1111,7 +1190,7 @@ if (endCallBtn) endCallBtn.addEventListener("click", endCall);
 if (callOrb) {
   callOrb.addEventListener("click", () => {
     if (callActive && callPhase === "speaking") {
-      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* ignore */ }
+      stopSpeech();
       callResume();
     }
   });

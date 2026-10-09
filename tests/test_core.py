@@ -1612,6 +1612,72 @@ def test_plan() -> None:
     db.reset_db_path()
 
 
+def test_tts() -> None:
+    """Speech is synthesized server-side for languages with no local voice,
+    and fails soft with an honest reason when it cannot."""
+    import struct
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, tts
+    from atif_assistant.app import app
+
+    print("\ntts")
+
+    check(
+        "speech cleaning drops labels",
+        tts._clean("[FACT] Hello [PREDICTION] world") == "Hello world",
+    )
+    wav = tts._wav(b"\x00\x00" * 100, rate=24000)
+    check("wav has a RIFF header", wav[:4] == b"RIFF" and wav[8:12] == b"WAVE")
+    check("wav size field matches", struct.unpack("<I", wav[4:8])[0] == len(wav) - 8)
+    check("wav sample rate is written", struct.unpack("<I", wav[24:28])[0] == 24000)
+
+    orig_key = tts.llm.provider_key
+    tts.llm.provider_key = lambda name: ""
+    try:
+        r = tts.synthesize("hello")
+        check(
+            "speech without a key fails soft",
+            r["audio"] is None and "gemini" in (r["reason"] or "").lower(),
+        )
+    finally:
+        tts.llm.provider_key = orig_key
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "tts.db")
+        db.init_db()
+        client = TestClient(app)
+
+        orig_syn = tts.synthesize
+        tts.synthesize = lambda text, lang="en": {
+            "audio": tts._wav(b"\x00\x00" * 50),
+            "reason": None,
+            "model": "stub",
+        }
+        try:
+            r = client.post("/api/tts", json={"text": "السلام علیکم", "lang": "ur"})
+            check(
+                "tts endpoint returns audio",
+                r.status_code == 200 and r.headers.get("content-type", "").startswith("audio/wav"),
+            )
+            check("tts endpoint returns a wav body", r.content[:4] == b"RIFF")
+        finally:
+            tts.synthesize = orig_syn
+
+        tts.synthesize = lambda text, lang="en": {"audio": None, "reason": "no speech key"}
+        try:
+            r = client.post("/api/tts", json={"text": "hi"})
+            check(
+                "tts endpoint reports an honest failure",
+                r.status_code == 503 and "no speech key" in r.json().get("error", ""),
+            )
+        finally:
+            tts.synthesize = orig_syn
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -1649,6 +1715,7 @@ def main() -> int:
     test_upload_reads()
     test_read_fallbacks()
     test_plan()
+    test_tts()
     test_structure_guard()
 
     if before is not None:

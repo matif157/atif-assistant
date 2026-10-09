@@ -214,6 +214,7 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `GET /api/rules` | every stored rule, enforced first |
 | `POST /api/rules/{id}/approve` | enforce a candidate rule |
 | `DELETE /api/rules/{id}` | remove a rule |
+| `POST /api/tts` | synthesize a spoken reply (WAV) for languages with no device voice |
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
@@ -477,15 +478,22 @@ The **CALL** button (top bar) starts a hands-free voice conversation:
 The on-screen orb shows the live state (LISTENING / THINKING / SPEAKING). Tap the
 orb while it is speaking to **interrupt** and take the turn back. The spoken
 language follows the **LANGUAGE** setting (English or Urdu), not the microphone
-language, so an Urdu answer is read with an Urdu voice; the **MICROPHONE
-LANGUAGE** setting only affects what you are understood to be speaking.
-Switching **LANGUAGE** also moves the microphone and resets a mismatched voice to
-Automatic, so Urdu speech is listened for in Urdu and read in Urdu by default.
-The Android bridge (`AndroidVoice`) is used inside the app, otherwise the browser
-Web Speech API. Speech recognition needs HTTPS (or localhost) and mic permission;
-browsers without it, or without a matching voice, show a clear message instead of
-failing silently. A stuck text-to-speech engine cannot stall the call: a
-word-count fallback releases the loop if the speech event never arrives.
+language, so an Urdu answer is read in Urdu; the **MICROPHONE LANGUAGE** setting
+only affects what you are understood to be speaking. Switching **LANGUAGE** also
+moves the microphone and resets a mismatched voice to Automatic.
+
+Most systems ship **no Urdu voice**, so the browser would read Urdu text with an
+English voice and it comes out as gibberish. When the language has no matching
+device voice the reply is synthesized **on the server** instead (`/api/tts`,
+Gemini speech) and played back as audio; a device voice is used only when one
+matches. This also makes **TEST VOICE** work for Urdu. Speaking a question with
+the mic makes the assistant answer **out loud** even if SPEAK REPLIES is off, so
+the mic button is a real voice assistant. The Android bridge (`AndroidVoice`) is
+used inside the app, otherwise the browser Web Speech API. Speech recognition
+needs HTTPS (or localhost) and mic permission; browsers without it show a clear
+message instead of failing silently. A stuck text-to-speech engine cannot stall
+the call: a word-count fallback releases the loop if the speech event never
+arrives.
 
 The call stays **on-brand**: it is not a chatty companion. Social
 pleasantries ("how are you", "what's your name", greetings) are routed to a single
@@ -630,11 +638,12 @@ you almost certainly won't.
 | `atif_assistant/extract.py` | text/PDF/Office/WhatsApp extraction |
 | `atif_assistant/vision.py` | images and scans via a vision model (Gemini) |
 | `atif_assistant/transcribe.py` | voice notes via Groq Whisper |
+| `atif_assistant/tts.py` | server-side speech for languages with no device voice (Gemini) |
 | `atif_assistant/plan.py` | document → strict checkable plan |
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 309 checks |
+| `tests/test_core.py` | 317 checks |
 
 ---
 
@@ -644,7 +653,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-309 checks across twenty-six groups:
+317 checks across twenty-seven groups:
 
 | Group | Covers |
 |---|---|
@@ -669,6 +678,7 @@ you almost certainly won't.
 | upload reading | readable uploads report read + chars and reach evidence search; images report read=false |
 | read fallbacks | images go to the vision model, audio to transcription when configured; honest reason when not |
 | plan | document → grounded TITLE/RULE draft; strict rules enforced, candidates approvable, rules removable |
+| tts | server speech for voice-less languages, label stripping, valid WAV, honest 503 when it cannot |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
 | providers | key/model precedence, masking, settings/export redaction, save/clear, TEST endpoint |
 | ask endpoint | every question class routes to the honest mode; exchange persisted; repeat counting |

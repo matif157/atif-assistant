@@ -12,11 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, location, plan, router, uploads
+from . import db, engine, learn, location, plan, router, tts, uploads
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .llm import (
     invalidate_probe_cache,
@@ -33,6 +33,11 @@ class Ask(BaseModel):
     session: str | None = None
     lang: str | None = None
     detail: str | None = None
+
+
+class TtsIn(BaseModel):
+    text: str
+    lang: str | None = None
 
 
 class DecisionIn(BaseModel):
@@ -88,6 +93,26 @@ def memory(q: str = "", limit: int = 20) -> JSONResponse:
             ).fetchall()
         ]
     return JSONResponse({"results": rows})
+
+
+@app.post("/api/tts")
+def make_speech(payload: TtsIn) -> Response:
+    """Synthesize a spoken reply server-side.
+
+    Used for languages with no local browser voice (notably Urdu). Falls back
+    with a clear reason so the client can use its own voices instead.
+    """
+    result = tts.synthesize(payload.text, payload.lang or "en")
+    audio = result.get("audio")
+    if not audio:
+        return JSONResponse(
+            {"error": result.get("reason") or "speech unavailable"}, status_code=503
+        )
+    return Response(
+        content=audio,
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _extract_in_background(question: str, answer: str, provider: str) -> None:
