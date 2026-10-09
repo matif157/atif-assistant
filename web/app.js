@@ -643,16 +643,20 @@ const STRINGS = {
     placeholder: "Ask. Atif Assistant decides how to answer.",
     related: "What is this file related to? (e.g. resume, project, note)",
     uploading: "Uploading...",
-    uploaded: "Saved to memory.",
-    uploadFailed: "Upload failed.",
+    uploaded: "Read and saved to memory.",
+    uploadedStored: "Saved. This file type can't be read as text.",
+    uploadedNoOcr: "Saved. OCR isn't installed, so images/scans can't be read yet.",
+    uploadFailed: "Upload failed. The file may be too large (max 25 MB).",
     saved: "Settings saved.",
   },
   ur: {
     placeholder: "پوچھیں۔ عاطف اسسٹنٹ خود جواب دے گا۔",
     related: "یہ فائل کس بارے میں ہے؟ (مثلاً ریزیومے، پروجیکٹ، نوٹ)",
     uploading: "اپ لوڈ ہو رہا ہے...",
-    uploaded: "یادداشت میں محفوظ ہو گیا۔",
-    uploadFailed: "اپ لوڈ ناکام۔",
+    uploaded: "پڑھ کر یادداشت میں محفوظ ہو گیا۔",
+    uploadedStored: "محفوظ ہو گیا، مگر اس قسم کی فائل پڑھی نہیں جا سکتی۔",
+    uploadedNoOcr: "محفوظ ہو گیا۔ تصویریں پڑھنے کے لیے OCR انسٹال نہیں ہے۔",
+    uploadFailed: "اپ لوڈ ناکام۔ فائل بہت بڑی ہو سکتی ہے (زیادہ سے زیادہ 25 MB)۔",
     saved: "سیٹنگز محفوظ ہو گئیں۔",
   },
 };
@@ -1146,7 +1150,15 @@ async function uploadFile() {
       }),
     });
     if (!res.ok) throw new Error();
-    statusEl.textContent = s.uploaded;
+    const data = await res.json();
+    if (data.read) {
+      const extra = data.whatsapp_summary ? ` ${data.whatsapp_summary}` : "";
+      statusEl.textContent = `${s.uploaded} (${data.read_chars.toLocaleString()} chars)${extra}`;
+    } else if ((data.read_reason || "").toLowerCase().includes("ocr")) {
+      statusEl.textContent = s.uploadedNoOcr;
+    } else {
+      statusEl.textContent = s.uploadedStored;
+    }
     fileEl.value = "";
     if (relatedEl) relatedEl.value = "";
   } catch {

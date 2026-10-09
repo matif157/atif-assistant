@@ -132,6 +132,21 @@ def build_context(question: str) -> dict[str, Any]:
                 extra += f" [last verified {verified}]"
             body = m.get("text") or m.get("title") or ""
             parts.append(f"- ({kind}{extra}) {body}")
+    # Raw source lines (uploads, archives) are searchable too. Without this the
+    # full text of an uploaded file never reached the model - only its episode
+    # summary did - so the assistant could not actually answer from the file.
+    evidence = db.search_evidence(question, limit=4)
+    if evidence:
+        lines = [
+            "RAW SOURCE EVIDENCE (verbatim lines from uploaded files and archives;"
+            " cite only if it genuinely answers the question):"
+        ]
+        for e in evidence:
+            body = " ".join((e.get("body") or "").split())
+            if body:
+                lines.append(f"- {body[:260]}")
+        if len(lines) > 1:
+            parts.append("\n".join(lines))
     if patterns:
         pr = radar.render_patterns(patterns)
         if pr:

@@ -4,10 +4,11 @@ Uploads arrive as JSON (base64 or plain text) so no multipart dependency is
 needed and the whole thing stays pure-Python and offline-installable.
 
 A file lands in ``data/uploads/`` keyed by its content hash, so uploading the
-same file twice stores it once. A text file is additionally ingested as
-searchable evidence and a dated episode, labelled with whatever the user said
-it relates to. Binary files are stored and referenced only - nothing is guessed
-from their bytes.
+same file twice stores it once. Text, JSON, CSV, markup, PDF, Office documents,
+spreadsheets, presentations and WhatsApp exports are read locally (see
+``extract.py``) and folded into memory. Files that cannot be read - images
+without OCR, unknown binaries - are stored and referenced only; the response
+reports ``read: false`` and a reason instead of pretending they were understood.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from . import db
+from . import db, extract
 from .config import UPLOADS_DIR
 
 TEXT_EXTS = {
@@ -54,18 +55,6 @@ def _safe_name(filename: str) -> str:
     name = Path(filename or "upload").name
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "upload"
     return name[:120]
-
-
-def _decode_text(raw: bytes) -> str | None:
-    """Return decoded text if the bytes look like text, else None."""
-    if not raw or b"\x00" in raw[:4096]:
-        return None
-    for enc in ("utf-8", "utf-16", "latin-1"):
-        try:
-            return raw.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return None
 
 
 def ingest_upload(
@@ -133,16 +122,27 @@ def ingest_upload(
         "related_to": related_to,
         "evidence_id": None,
         "episode_id": None,
+        "read": False,
+        "read_chars": 0,
+        "text_source": None,
+        "read_reason": None,
     }
 
-    # Only text becomes memory here. Images, audio and PDFs are stored and
-    # referenced but never parsed - guessing content from bytes would be
-    # fabrication.
-    body = text
-    if body is None and kind == "text":
-        body = _decode_text(raw)
+    # Read the file's text locally. Text/JSON/CSV, PDF, Office and WhatsApp
+    # exports become searchable memory; anything unreadable is stored only, and
+    # the response says which and why rather than implying it was understood.
+    if text is not None:
+        result: dict[str, Any] = {"text": text, "source": "text", "reason": None, "meta": {}}
+    else:
+        result = extract.extract(filename, raw)
+
+    body = result.get("text")
+    report["text_source"] = result.get("source")
+    report["read_reason"] = result.get("reason")
     if body:
         body = body[:MAX_TEXT_CHARS]
+        report["read"] = True
+        report["read_chars"] = len(body)
         eid = db.add_evidence(
             source=f"{source}:{filename}",
             body=body,
@@ -153,12 +153,20 @@ def ingest_upload(
         # Evidence is idempotent; only record an episode for genuinely new
         # content, so re-uploading the same file does not stack episodes.
         if eid is not None:
+            meta = result.get("meta") or {}
+            if meta.get("whatsapp_summary"):
+                title = f"WhatsApp export {filename}"
+            else:
+                title = f"Uploaded {filename}"
+            if related_to:
+                title += f" ({related_to})"
             report["episode_id"] = db.add_episode(
-                title=f"Uploaded {filename}"
-                + (f" ({related_to})" if related_to else ""),
+                title=title,
                 summary=body[:2000],
                 occurred_at=db.now(),
                 source=f"{source}:{filename}",
             )
+            if meta.get("whatsapp_summary"):
+                report["whatsapp_summary"] = meta["whatsapp_summary"]
 
     return report

@@ -1296,6 +1296,148 @@ def test_misc_endpoints() -> None:
     db.reset_db_path()
 
 
+def _make_pdf(text: str = "Hello PDF plan") -> bytes:
+    """Build a minimal, valid single-page PDF so the reader can be tested."""
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+    ]
+    stream = ("BT /F1 24 Tf 72 700 Td (" + text + ") Tj ET").encode()
+    objs.append(
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+    )
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, o in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += str(i).encode() + b" 0 obj\n" + o + b"\nendobj\n"
+    xref_pos = len(out)
+    n = len(objs) + 1
+    out += b"xref\n0 " + str(n).encode() + b"\n0000000000 65535 f \n"
+    for off in offsets:
+        out += ("%010d 00000 n \n" % off).encode()
+    out += (
+        b"trailer\n<< /Size " + str(n).encode() + b" /Root 1 0 R >>\n"
+        b"startxref\n" + str(xref_pos).encode() + b"\n%%EOF\n"
+    )
+    return bytes(out)
+
+
+def test_extract() -> None:
+    """Files are actually read into text: text, markup, PDF, Office, WhatsApp."""
+    import io
+    import zipfile
+
+    from atif_assistant import extract
+
+    print("\nextract")
+
+    txt = extract.extract("notes.md", b"# Title\nthree things to do")
+    check("markdown reads as text", txt["source"] == "text" and "three things" in txt["text"])
+
+    js = extract.extract("d.json", b'{"a":1,"b":[2,3]}')
+    check("json is parsed and re-emitted", js["source"] == "json" and '"a": 1' in js["text"])
+
+    html = extract.extract("p.html", b"<html><body><h1>Hi</h1><p>a &amp; b</p></body></html>")
+    check("markup keeps text and unescapes entities", html["text"] == "Hi a & b")
+
+    pdf = extract.extract("plan.pdf", _make_pdf("Run 3x per week"))
+    check("pdf text is extracted", pdf["source"] == "pdf" and "Run 3x per week" in (pdf["text"] or ""))
+
+    bad_pdf = extract.extract("scan.pdf", b"%PDF-1.4 not really a pdf")
+    check("unreadable pdf reports a reason, not fake text", bad_pdf["text"] is None and bool(bad_pdf["reason"]))
+
+    docx_buf = io.BytesIO()
+    with zipfile.ZipFile(docx_buf, "w") as z:
+        z.writestr(
+            "word/document.xml",
+            '<?xml version="1.0"?><w:document xmlns:w="x"><w:body>'
+            "<w:p><w:r><w:t>Goal: save money</w:t></w:r></w:p>"
+            "<w:p><w:r><w:t>Run 3x per week</w:t></w:r></w:p>"
+            "</w:body></w:document>",
+        )
+    docx = extract.extract("plan.docx", docx_buf.getvalue())
+    check("docx paragraphs are read", docx["source"] == "docx" and "save money" in docx["text"] and "Run 3x" in docx["text"])
+
+    xlsx_buf = io.BytesIO()
+    with zipfile.ZipFile(xlsx_buf, "w") as z:
+        z.writestr("xl/sharedStrings.xml", '<sst xmlns="x"><si><t>Item</t></si><si><t>Cost 20</t></si></sst>')
+    xlsx = extract.extract("budget.xlsx", xlsx_buf.getvalue())
+    check("xlsx strings are read", xlsx["source"] == "xlsx" and "Cost 20" in xlsx["text"])
+
+    wa_text = "\n".join(
+        [
+            "[31/12/2025, 9:41:03 PM] Alex: Hey are we still on?",
+            "[31/12/2025, 9:42:00 PM] Sam: Yes 7pm",
+            "[31/12/2025, 9:43:10 PM] Alex: perfect",
+            "[31/12/2025, 9:44:00 PM] Sam: bring the notes",
+            "[31/12/2025, 9:45:00 PM] Alex: ok",
+            "[31/12/2025, 9:46:00 PM] Sam: see you",
+        ]
+    )
+    wa = extract.extract("chat.txt", wa_text.encode())
+    check("whatsapp export is detected", wa["source"] == "whatsapp")
+    check("whatsapp summary names participants", wa["meta"]["people"] == ["Alex", "Sam"])
+    check("whatsapp messages counted", wa["meta"]["messages"] == 6)
+
+    png = extract.extract("pic.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    check("image without OCR reports a reason", png["text"] is None and "OCR" in (png["reason"] or ""))
+
+    unknown = extract.extract("archive.zip", b"PK\x03\x04\x00\x00binary")
+    check("unknown binary reports a reason", unknown["text"] is None and bool(unknown["reason"]))
+
+
+def test_upload_reads() -> None:
+    """Uploads report honestly whether the file was read, and the text reaches
+    retrieval so the assistant can answer from the file."""
+    import io
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, uploads
+    from atif_assistant.app import app
+
+    print("\nupload reading")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db.use_test_db(base / "reads.db")
+        db.init_db()
+        uploads.UPLOADS_DIR = base / "uploads"
+        client = TestClient(app)
+
+        docx_buf = io.BytesIO()
+        with zipfile.ZipFile(docx_buf, "w") as z:
+            z.writestr(
+                "word/document.xml",
+                '<?xml version="1.0"?><w:document xmlns:w="x"><w:body>'
+                "<w:p><w:r><w:t>My marathon plan: run every Tuesday and Friday</w:t></w:r></w:p>"
+                "</w:body></w:document>",
+            )
+        docx_b64 = base64.b64encode(docx_buf.getvalue()).decode()
+        r = client.post(
+            "/api/upload",
+            json={"filename": "marathon.docx", "related_to": "training", "content_b64": docx_b64},
+        ).json()
+        check("docx upload is read", r.get("read") is True and r.get("text_source") == "docx")
+        check("docx upload reports character count", r.get("read_chars", 0) > 0)
+        check("docx upload became memory", r.get("evidence_id") is not None and r.get("episode_id") is not None)
+
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 60).decode()
+        r2 = client.post("/api/upload", json={"filename": "photo.png", "content_b64": png}).json()
+        check("unreadable upload says so", r2.get("read") is False and bool(r2.get("read_reason")))
+        check("unreadable upload is still stored", r2.get("ok") is True)
+
+        # The uploaded file's text must be usable as context for a question.
+        ev = db.search_evidence("marathon Tuesday", limit=3)
+        check("uploaded text is searchable evidence", any("marathon plan" in (e.get("body") or "") for e in ev))
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -1329,6 +1471,8 @@ def main() -> int:
     test_providers()
     test_ask_endpoint()
     test_misc_endpoints()
+    test_extract()
+    test_upload_reads()
     test_structure_guard()
 
     if before is not None:
