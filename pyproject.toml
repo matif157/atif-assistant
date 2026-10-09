@@ -1,7 +1,7 @@
 [project]
-name = "raees"
+name = "atif-assistant"
 version = "0.1.0"
-description = "Raees - personal intelligence system with persistent memory, Reality Engine, Challenge Mode and Pattern Radar"
+description = "Atif Assistant - personal intelligence system with persistent memory, Reality Engine, Challenge Mode and Pattern Radar"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -17,4 +17,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["raees"]
+packages = ["atif_assistant"]

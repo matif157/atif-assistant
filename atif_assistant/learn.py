@@ -1,6 +1,6 @@
 """Memory learning.
 
-After an answer, Raees reads its own exchange and pulls out what is durable.
+After an answer, Atif Assistant reads its own exchange and pulls out what is durable.
 
 Three gates, all of which must pass before anything is stored:
 

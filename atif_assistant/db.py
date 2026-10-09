@@ -1,4 +1,4 @@
-"""SQLite storage for Raees.
+"""SQLite storage for Atif Assistant.
 
 One file, no server. Four memory types per the design:
   facts     - stable truths with confidence + verification dates
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS questions (
     created_at TEXT NOT NULL
 );
 
--- Durable facts Raees learned from conversation, kept separate from seeds so
+-- Durable facts Atif Assistant learned from conversation, kept separate from seeds so
 -- a mistake is easy to delete without touching curated memory.
 CREATE TABLE IF NOT EXISTS learned (
     id         INTEGER PRIMARY KEY,
@@ -142,6 +142,67 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     title,
     body,
     tokenize = 'porter unicode61'
+);
+
+-- Extended tables. All additive: `CREATE TABLE IF NOT EXISTS` never touches an
+-- existing database, so these are ignored on the real one until first used.
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS profiles (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    data TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    kind TEXT,
+    tags TEXT,
+    meta TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY,
+    title TEXT,
+    body TEXT NOT NULL,
+    tags TEXT,
+    mood TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS works (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT DEFAULT 'active',
+    data TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS social_accounts (
+    id INTEGER PRIMARY KEY,
+    platform TEXT NOT NULL,
+    username TEXT,
+    connected INTEGER DEFAULT 0,
+    last_sync TEXT,
+    data TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS social_posts (
+    id INTEGER PRIMARY KEY,
+    platform TEXT NOT NULL,
+    external_id TEXT,
+    content TEXT,
+    posted_at TEXT,
+    data TEXT,
+    created_at TEXT NOT NULL
 );
 
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
@@ -765,6 +826,13 @@ COUNTED_TABLES = (
     "evidence",
     "questions",
     "learned",
+    "settings",
+    "profiles",
+    "media",
+    "notes",
+    "works",
+    "social_accounts",
+    "social_posts",
 )
 
 
@@ -920,3 +988,39 @@ def prune_fts_orphans() -> int:
 def is_seeded() -> bool:
     conn = connect()
     return conn.execute("SELECT COUNT(*) c FROM patterns").fetchone()["c"] > 0
+
+
+def set_setting(key: str, value: str) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT OR REPLACE INTO settings(key, value, updated_at) VALUES (?,?,?)",
+        (key, value, now()),
+    )
+    conn.commit()
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    conn = connect()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    if not row:
+        return default
+    return row["value"]
+
+
+def add_note(title: str | None, body: str, tags: str | None = None, mood: str | None = None) -> int:
+    conn = connect()
+    cur = conn.execute(
+        "INSERT INTO notes(title, body, tags, mood, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+        (title, body, tags, mood, now(), now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_notes(limit: int = 20) -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM notes ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]

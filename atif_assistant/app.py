@@ -1,4 +1,4 @@
-"""Raees web API.
+"""Atif Assistant web API.
 
 Serves the PWA and the JSON API. Local-only bind by default; Tailscale gives
 you remote access without exposing a port.
@@ -6,6 +6,7 @@ you remote access without exposing a port.
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from . import db, engine, learn, router
 from .config import TAILSCALE_HOST, WEB_DIR
 from .llm import available_providers, ollama_is_up
 
-app = FastAPI(title="Raees", version="0.1.0")
+app = FastAPI(title="Atif Assistant", version="0.1.0")
 
 
 class Ask(BaseModel):
@@ -247,5 +248,102 @@ def service_worker() -> FileResponse:
     return FileResponse(WEB_DIR / "sw.js", media_type="application/javascript")
 
 
+@app.get("/api/settings")
+def get_settings():
+    conn = db.connect()
+    rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    return {r["key"]: r["value"] for r in rows}
+
+
+@app.post("/api/settings")
+def set_settings(payload: dict):
+    for k, v in payload.items():
+        if v is None:
+            continue
+        db.set_setting(str(k), str(v))
+    return {"ok": True}
+
+
+@app.post("/api/notes")
+def add_note(payload: dict):
+    nid = db.add_note(
+        payload.get("title"),
+        payload.get("body", ""),
+        payload.get("tags"),
+        payload.get("mood"),
+    )
+    return {"id": nid}
+
+
+@app.get("/api/notes")
+def list_notes(limit: int = 20):
+    return {"notes": db.list_notes(limit)}
+
+
+@app.get("/api/works")
+def list_works(limit: int = 20):
+    conn = db.connect()
+    rows = conn.execute("SELECT * FROM works ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return {"works": [dict(r) for r in rows]}
+
+
+@app.post("/api/works")
+def add_work(payload: dict):
+    conn = db.connect()
+    cur = conn.execute(
+        "INSERT INTO works(title, description, status, data, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+        (payload.get("title"), payload.get("description"), payload.get("status", "active"), 
+         json.dumps(payload.get("data")) if payload.get("data") else None, db.now(), db.now()),
+    )
+    conn.commit()
+    return {"id": int(cur.lastrowid)}
+
+
+@app.get("/api/media")
+def list_media(limit: int = 20):
+    conn = db.connect()
+    rows = conn.execute("SELECT * FROM media ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return {"media": [dict(r) for r in rows]}
+
+
+@app.post("/api/media")
+def add_media(payload: dict):
+    conn = db.connect()
+    cur = conn.execute(
+        "INSERT INTO media(path, kind, tags, meta, created_at) VALUES (?,?,?,?,?)",
+        (payload.get("path"), payload.get("kind"), payload.get("tags"), 
+         json.dumps(payload.get("meta")) if payload.get("meta") else None, db.now()),
+    )
+    conn.commit()
+    return {"id": int(cur.lastrowid)}
+
+
+@app.get("/api/social/accounts")
+def list_social_accounts():
+    conn = db.connect()
+    rows = conn.execute("SELECT * FROM social_accounts ORDER BY id DESC").fetchall()
+    return {"accounts": [dict(r) for r in rows]}
+
+
+@app.post("/api/social/accounts")
+def add_social_account(payload: dict):
+    conn = db.connect()
+    cur = conn.execute(
+        "INSERT INTO social_accounts(platform, username, connected, data, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+        (payload.get("platform"), payload.get("username"), int(payload.get("connected", 0)), 
+         json.dumps(payload.get("data")) if payload.get("data") else None, db.now(), db.now()),
+    )
+    conn.commit()
+    return {"id": int(cur.lastrowid)}
+
+
+@app.get("/api/social/posts")
+def list_social_posts(limit: int = 20):
+    conn = db.connect()
+    rows = conn.execute("SELECT * FROM social_posts ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return {"posts": [dict(r) for r in rows]}
+
+
+# Mounted last so the API routes above are matched before the static handler.
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

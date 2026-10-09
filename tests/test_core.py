@@ -598,6 +598,55 @@ def test_remote_web() -> None:
     check("health reports counts", "counts" in health.json())
 
 
+def test_extended_api() -> None:
+    """Settings, notes, works, media and social endpoints persist correctly.
+
+    These are the surfaces added after the rename. Each one previously had no
+    coverage, so a broken route or a missing table would only show up when the
+    phone hit it.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\nextended api")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "ext.db")
+        db.init_db()
+        client = TestClient(app)
+
+        check("settings start empty", client.get("/api/settings").json() == {})
+        client.post("/api/settings", json={"theme": "dark", "skip": None})
+        got = client.get("/api/settings").json()
+        check("settings round-trip", got.get("theme") == "dark")
+        check("null settings are ignored", "skip" not in got)
+
+        nid = client.post(
+            "/api/notes", json={"title": "t", "body": "hello", "mood": "calm"}
+        ).json()["id"]
+        notes = client.get("/api/notes").json()["notes"]
+        check("note is stored", any(n["id"] == nid for n in notes))
+        check("note body survives", notes[0]["body"] == "hello")
+
+        wid = client.post("/api/works", json={"title": "proj"}).json()["id"]
+        works = client.get("/api/works").json()["works"]
+        check("work is stored", any(w["id"] == wid for w in works))
+
+        mid = client.post("/api/media", json={"path": "/x.png", "kind": "image"}).json()["id"]
+        media = client.get("/api/media").json()["media"]
+        check("media is stored", any(m["id"] == mid for m in media))
+
+        sid = client.post(
+            "/api/social/accounts", json={"platform": "x", "username": "u"}
+        ).json()["id"]
+        accts = client.get("/api/social/accounts").json()["accounts"]
+        check("social account is stored", any(a["id"] == sid for a in accts))
+        check("social posts start empty", client.get("/api/social/posts").json() == {"posts": []})
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -624,6 +673,7 @@ def main() -> int:
     test_critique_parsing()
     test_isolation()
     test_remote_web()
+    test_extended_api()
 
     if before is not None:
         from atif_assistant import db

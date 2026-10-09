@@ -1,4 +1,4 @@
-"""Seed Raees memory from the existing archive repo.
+"""Seed Atif Assistant memory from the existing archive repo.
 
 Reads CONTEXT.md, TIMELINE.md, PATTERN.md, AGENTS.md, ASK-LATER.md and
 converts them into structured memory rows. Idempotent: re-running replaces
@@ -176,7 +176,7 @@ def _sectioned_bullets(text: str, min_len: int = 25) -> list[tuple[str, str]]:
     """(section, bullet) pairs, with wrapped bullets folded back into one line.
 
     A bullet that continues on the next line arrives truncated, and storing half
-    a sentence as a "fact" makes Raees assert something nobody wrote. Indented
+    a sentence as a "fact" makes Atif Assistant assert something nobody wrote. Indented
     continuation lines are therefore joined back onto their bullet. Table rows
     are skipped: they hold links and separators, not claims.
     """
@@ -357,7 +357,7 @@ def seed(archive_dir: Path | None = None) -> dict[str, int]:
                 added["episodes"] += 1
 
     # --- open questions from CONTEXT-PROFESSIONAL.md as rules ---
-    # A question is not a fact, but it is still something Raees should hold onto
+    # A question is not a fact, but it is still something Atif Assistant should hold onto
     # and be able to surface. Rules are the only store that is not asserting
     # something true, so unverified professional claims land there instead.
     if prof:

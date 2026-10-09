@@ -108,7 +108,7 @@ button { font-family: inherit; cursor: pointer; }
 
 /* composer */
 footer { border-top: 1px solid var(--line); background: var(--bg); padding: 10px 16px 12px; }
-/* route strip: read-only, shows the decision Raees made and why */
+/* route strip: read-only, shows the decision Atif Assistant made and why */
 .route {
   display: flex;
   align-items: baseline;

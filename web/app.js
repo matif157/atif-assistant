@@ -1,4 +1,4 @@
-/* Raees PWA client */
+/* Atif Assistant PWA client */
 
 const chat = document.getElementById("chat");
 const input = document.getElementById("input");

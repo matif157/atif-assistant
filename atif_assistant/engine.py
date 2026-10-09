@@ -1,4 +1,4 @@
-"""Raees reasoning engine.
+"""Atif Assistant reasoning engine.
 
 Three modes:
   ask       - normal answer, but every claim labelled by the Reality Engine
@@ -19,7 +19,7 @@ from .llm import ProviderError, complete
 
 # ---------------------------------------------------------------- prompting
 
-SYSTEM_BASE = f"""You are Raees, a personal intelligence system for one user.
+SYSTEM_BASE = f"""You are Atif Assistant, a personal intelligence system for one user.
 
 {C.constitution_block()}
 
@@ -519,7 +519,7 @@ async def _decide(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
 def _offline_answer(question: str, ctx: dict[str, Any]) -> str:
     lines = ["[UNKNOWN] No model provider is configured, so this is not an analysis.", ""]
     lines.append(
-        "Raees cannot think right now. Set GROQ_API_KEY (free tier) in "
+        "Atif Assistant cannot think right now. Set GROQ_API_KEY (free tier) in "
         ".env and restart. Retrieval and the brake still work offline."
     )
     if ctx["rumination"]:

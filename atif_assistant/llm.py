@@ -1,7 +1,7 @@
 """Model gateway.
 
 Tries free-tier providers in order and falls back cleanly. If no provider is
-reachable, Raees still answers using a local heuristic engine so the app is
+reachable, Atif Assistant still answers using a local heuristic engine so the app is
 never silently useless.
 """
 
@@ -97,7 +97,7 @@ async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
 
 
 async def _ollama(model: str, messages: list[dict], **kw: Any) -> str:
-    base = os.environ.get("RAEES_OLLAMA_URL", "http://127.0.0.1:11434")
+    base = os.environ.get("ATIF_ASSISTANT_OLLAMA_URL", "http://127.0.0.1:11434")
     system = "\n\n".join(
         m["content"] for m in messages if m["role"] == "system"
     )
@@ -157,7 +157,7 @@ async def complete(
 
 async def ollama_is_up() -> bool:
     """Actually probe Ollama. Being configured is not being ready."""
-    base = os.environ.get("RAEES_OLLAMA_URL", "http://127.0.0.1:11434")
+    base = os.environ.get("ATIF_ASSISTANT_OLLAMA_URL", "http://127.0.0.1:11434")
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             r = await client.get(f"{base}/api/tags")

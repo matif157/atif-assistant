@@ -1,13 +1,13 @@
 """The Constitution and reasoning protocols.
 
-These are the invariants Raees will not break, regardless of what the model
+These are the invariants Atif Assistant will not break, regardless of what the model
 returns. Kept separate from the LLM prompt so they can be unit-tested and
 audited independently.
 """
 
 from __future__ import annotations
 
-CONSTITUTION = """ATIF CONSTITUTION (Raees)
+CONSTITUTION = """ATIF CONSTITUTION
 
 01 Truth before comfort.
 02 Evidence before assumption.

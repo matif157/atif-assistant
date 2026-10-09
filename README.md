@@ -297,7 +297,7 @@ build.
 
 On this machine Tailscale runs in **userspace mode**, which has no tun device.
 That has one consequence worth knowing: the tailnet IP cannot be bound by a
-local process, so `RAEES_BIND=tailnet` falls back to loopback and says so. Serve
+local process, so `ATIF_ASSISTANT_BIND=tailnet` falls back to loopback and says so. Serve
 proxies loopback and does not need a tun device, so it still works.
 
 **Serve must be enabled once in the admin console** (it is off by default):
@@ -360,7 +360,7 @@ launchctl kickstart -k gui/$(id -u)/io.atif.assistant.tailscaled # restart the t
 launchctl list | grep atif-assistant                           # check both
 ```
 
-`RAEES_ARCHIVE_DIR` in `.env` points back at the archive in `~/Documents`.
+`ATIF_ASSISTANT_ARCHIVE_DIR` in `.env` points back at the archive in `~/Documents`.
 That is fine because the archive is read only when you seed, not at runtime,
 and seeding runs in a shell rather than under launchd.
 
@@ -481,7 +481,7 @@ the brake and the radar still work.
 **Blank page** — hard reload. The service worker is network-first, so this
 should be rare.
 
-**Port busy** — `RAEES_PORT=8780 ./run.sh`
+**Port busy** — `ATIF_ASSISTANT_PORT=8780 ./run.sh`
 
 **Reinstall Python** — `uv python install 3.12 && uv venv --python 3.12`
 
