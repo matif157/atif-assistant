@@ -140,7 +140,7 @@ Every substantive claim gets a label.
 [PREDICTION]  likely, not certain
 ```
 
-A post-generation brake in `atif-assistant/engine.py` then audits the answer:
+A post-generation brake in `atif_assistant/engine.py` then audits the answer:
 
 - Any manufactured comparison or percentage is flagged and withdrawn.
 - An answer with no labels at all is flagged as unverified.
@@ -498,17 +498,20 @@ you almost certainly won't.
 
 | File | Role |
 |---|---|
-| `atif-assistant/config.py` | env-driven settings |
-| `atif-assistant/db.py` | schema, FTS5, contradictions, question ledger, test isolation |
-| `atif-assistant/constitution.py` | invariants, brake rules, intent classifier |
-| `atif-assistant/router.py` | mode selection and repetition escalation |
-| `atif-assistant/radar.py` | pattern matching |
-| `atif-assistant/llm.py` | provider failover, live Ollama probe, offline fallback |
-| `atif-assistant/engine.py` | Reality Engine, challenge, decide, self-audit, brake |
-| `atif-assistant/learn.py` | gated memory extraction |
-| `atif-assistant/app.py` | API + static serving |
+| `atif_assistant/config.py` | env-driven settings |
+| `atif_assistant/db.py` | schema, FTS5, contradictions, question ledger, backup, test isolation |
+| `atif_assistant/constitution.py` | invariants, brake rules, intent classifier |
+| `atif_assistant/router.py` | mode selection and repetition escalation |
+| `atif_assistant/radar.py` | pattern matching |
+| `atif_assistant/llm.py` | provider failover, live Ollama probe, offline fallback |
+| `atif_assistant/engine.py` | Reality Engine, challenge, decide, self-audit, brake |
+| `atif_assistant/learn.py` | gated memory extraction |
+| `atif_assistant/location.py` | place naming / geocoding |
+| `atif_assistant/uploads.py` | file ingest → memory |
+| `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
-| `tests/test_core.py` | 142 checks |
+| `scripts/ingest_evidence.py` | chat exports → raw evidence |
+| `tests/test_core.py` | 168 checks |
 
 ---
 
@@ -518,7 +521,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-142 checks across sixteen groups:
+168 checks across eighteen groups:
 
 | Group | Covers |
 |---|---|
@@ -533,7 +536,13 @@ you almost certainly won't.
 | fts integrity | orphan detection, prune, re-index without duplicates |
 | evidence | idempotent ingest, digest stability, duplicate refusal, orphan cleanup |
 | evidence parsing | banner removal, multi-line join, timestamp normalisation, U+202F |
+| critique parsing | self-audit verdict parsing, defect extraction |
 | isolation | the real database is unchanged, by row count and by content hash |
+| remote web | index served at root, service worker scope, manifest |
+| extended API | memory/evidence/decisions/notes/works/media/social endpoints |
+| location | ingest dedup, place clustering, naming, routine derivation |
+| uploads | sha256 dedupe, text→evidence+episode, media-library listing |
+| backup | export snapshot, add-only de-duplicated import, bad-file rejection |
 
 Every group runs against a scratch database. At the end of the run the test
 suite compares the real database against a snapshot taken before it started,
