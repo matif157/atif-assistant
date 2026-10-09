@@ -35,30 +35,38 @@ function labelize(text) {
   // NOTE: with a global regex, String.match() returns only full matches and
   // capture groups come back undefined. exec() is required to read m[1].
   const re = /\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi;
-  const lines = text.split("\n");
   const out = [];
   let labelled = false;
+  let wrote = false;
 
-  lines.forEach((line, i) => {
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    // Separate every non-empty line, labelled or not. Previously a plain line
+    // after a labelled one lost its break, gluing the two together.
+    if (wrote) out.push(document.createElement("br"));
+    wrote = true;
+
     re.lastIndex = 0;
     const m = re.exec(line);
     if (!m || !m[1]) {
       // Preserve unlabelled text so nothing is silently dropped.
-      if (line.trim()) out.push(document.createTextNode(line));
-      return;
+      out.push(document.createTextNode(line));
+      continue;
     }
     labelled = true;
-    if (i > 0) out.push(document.createElement("br"));
     const span = document.createElement("span");
     span.className = `lbl ${m[1].toUpperCase()}`;
     span.textContent = m[1].toUpperCase();
     out.push(span);
     out.push(document.createTextNode(line.replace(re, "").trim()));
-  });
+  }
 
   // If the model ignored the label format entirely, fall back to plain text
   // so the user still sees the answer.
-  if (!labelled) out.length = 0, out.push(document.createTextNode(text));
+  if (!labelled) {
+    out.length = 0;
+    out.push(document.createTextNode(text));
+  }
   return out;
 }
 
