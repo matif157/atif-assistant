@@ -475,11 +475,14 @@ The on-screen orb shows the live state (LISTENING / THINKING / SPEAKING). Tap th
 orb while it is speaking to **interrupt** and take the turn back. The spoken
 language follows the **LANGUAGE** setting (English or Urdu), not the microphone
 language, so an Urdu answer is read with an Urdu voice; the **MICROPHONE
-LANGUAGE** setting only affects what you are understood to be speaking. The
-Android bridge (`AndroidVoice`) is used inside the app, otherwise the browser Web
-Speech API. Speech recognition needs HTTPS (or localhost) and mic permission;
+LANGUAGE** setting only affects what you are understood to be speaking.
+Switching **LANGUAGE** also moves the microphone and resets a mismatched voice to
+Automatic, so Urdu speech is listened for in Urdu and read in Urdu by default.
+The Android bridge (`AndroidVoice`) is used inside the app, otherwise the browser
+Web Speech API. Speech recognition needs HTTPS (or localhost) and mic permission;
 browsers without it, or without a matching voice, show a clear message instead of
-failing silently.
+failing silently. A stuck text-to-speech engine cannot stall the call: a
+word-count fallback releases the loop if the speech event never arrives.
 
 The call stays **on-brand**: it is not a chatty companion. Social
 pleasantries ("how are you", "what's your name", greetings) are routed to a single

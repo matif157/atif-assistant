@@ -670,6 +670,9 @@ async function loadSettings() {
   } catch {
     /* defaults are fine */
   }
+  // Heal a stored mismatch: Urdu replies with the untouched default English
+  // microphone would prevent anyone from speaking Urdu at all.
+  if (settings.lang === "ur" && settings.stt === "en-US") settings.stt = "ur-PK";
   applyLang(settings.lang);
   applyAccent(settings.accent);
   applyTheme(settings.theme);
@@ -746,14 +749,16 @@ function speechLang() {
 }
 
 function pickVoice(lang) {
-  const pref = lang.slice(0, 2);
+  const pref = lang.slice(0, 2).toLowerCase();
+  const norm = (v) => (v.lang || "").replace("_", "-").toLowerCase();
   const chosen = settings.voice && voices.find((v) => v.name === settings.voice);
-  return (
-    chosen ||
-    voices.find((v) => (v.lang || "").replace("_", "-").startsWith(lang)) ||
-    voices.find((v) => (v.lang || "").replace("_", "-").startsWith(pref)) ||
-    null
-  );
+  const exact = voices.find((v) => norm(v).startsWith(lang.toLowerCase()));
+  const anyPref = voices.find((v) => norm(v).startsWith(pref));
+  // Honour an explicit voice only when it matches the language we need to
+  // speak. Otherwise an English voice chosen earlier would read Urdu text -
+  // the words come out but in the wrong language.
+  if (chosen && norm(chosen).startsWith(pref)) return chosen;
+  return exact || anyPref || chosen || null;
 }
 
 function hasVoiceFor(lang) {
@@ -772,9 +777,11 @@ function speak(text, opts = {}) {
 
   // onEnd must fire exactly once, whichever engine finishes first.
   let ended = false;
+  let safety = null;
   const done = () => {
     if (ended) return;
     ended = true;
+    clearTimeout(safety);
     if (opts.onEnd) opts.onEnd();
   };
 
@@ -806,6 +813,10 @@ function speak(text, opts = {}) {
     u.lang = lang;
     u.onend = done;
     u.onerror = done;
+    // Some engines fail to fire onend; a call would then hang in SPEAKING.
+    // Estimate from the word count and release the loop if nothing arrives.
+    const words = clean.split(/\s+/).filter(Boolean).length;
+    safety = setTimeout(done, Math.min(Math.max(words * 500 + 4000, 6000), 90000));
     window.speechSynthesis.speak(u);
   } catch {
     /* speech is best-effort */
@@ -1385,6 +1396,13 @@ if (setLang) {
   setLang.addEventListener("change", () => {
     settings.lang = setLang.value;
     applyLang(settings.lang);
+    // The microphone must follow the reply language, or Urdu speech gets
+    // transcribed as English gibberish. A voice chosen for the other language
+    // would also read the reply in the wrong accent, so reset it to Automatic.
+    const wantStt = settings.lang === "ur" ? "ur-PK" : "en-US";
+    settings.stt = wantStt;
+    if (setStt) setStt.value = wantStt;
+    settings.voice = "";
     loadVoices();
   });
 }
