@@ -619,9 +619,22 @@ function loadVoices() {
 }
 
 function speak(text) {
-  if (settings.speak !== "on" || !("speechSynthesis" in window) || !text) return;
+  if (settings.speak !== "on" || !text) return;
   const clean = String(text).replace(/\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi, "");
   if (!clean.trim()) return;
+
+  // Inside the Android app, prefer the native text-to-speech engine. WebView
+  // does not implement the Web Speech API.
+  if (window.AndroidVoice && typeof window.AndroidVoice.speak === "function") {
+    try {
+      window.AndroidVoice.speak(clean, settings.stt);
+      return;
+    } catch {
+      /* fall through to the web engine */
+    }
+  }
+
+  if (!("speechSynthesis" in window)) return;
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(clean);
@@ -663,12 +676,39 @@ function setupRecognizer() {
 }
 
 function toggleMic() {
+  const btn = mic;
+
+  // Inside the Android app, use the native recognizer via the JS bridge.
+  if (window.AndroidVoice && typeof window.AndroidVoice.listen === "function") {
+    if (listening) {
+      listening = false;
+      btn?.classList.remove("active");
+      return;
+    }
+    listening = true;
+    btn?.classList.add("active");
+    window.onAndroidSpeechResult = (text) => {
+      listening = false;
+      btn?.classList.remove("active");
+      if (text) {
+        input.value = text;
+        input.focus();
+      }
+    };
+    try {
+      window.AndroidVoice.listen(settings.stt);
+    } catch {
+      listening = false;
+      btn?.classList.remove("active");
+    }
+    return;
+  }
+
   if (!recognizer) recognizer = setupRecognizer();
   if (!recognizer) {
     alert("Speech recognition is not supported in this browser.");
     return;
   }
-  const btn = mic;
   if (listening) {
     recognizer.stop();
     return;

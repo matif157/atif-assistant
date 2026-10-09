@@ -48,12 +48,21 @@ Run `./run.sh` on a computer on the same network (or Tailscale) and open the
 address on the phone. The PWA installs to the home screen; reasoning uses
 whatever provider/Ollama the computer has.
 
-## Option C — build an APK later
+## Option C — build the offline APK (Chaquopy)
 
-The front end is a standard PWA, so wrapping it is straightforward when an
-Android toolchain and internet are available: a WebView/Capacitor shell that
-loads `http://127.0.0.1:8770` with the Python server embedded (Chaquopy or a
-Termux-based bundle). No app code changes are required for the UI.
+A ready-to-build Android project lives in [`mobile/android/`](../mobile/android/).
+It embeds Python 3.12 with Chaquopy, runs the server on `127.0.0.1:8770`, and
+hosts the web UI in a `WebView`, so the app works with no network. Build it:
+
+```sh
+cd mobile/android
+./build_apk.sh          # -> app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Voice in the app uses the native Android TTS/recognizer through a JS bridge,
+because WebView does not implement the Web Speech API. The one build risk is
+`pydantic-core` (a native extension); see `mobile/android/README.md`.
 
 ## Packaging a zip by hand
 

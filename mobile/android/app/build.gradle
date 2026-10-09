@@ -1,0 +1,61 @@
+plugins {
+    id "com.android.application"
+    id "com.chaquo.python"
+}
+
+android {
+    namespace "ai.atif.assistant"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "ai.atif.assistant"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+        // arm64 for phones; x86_64 for the emulator. Add "armeabi-v7a" for old devices.
+        ndk {
+            abiFilters "arm64-v8a", "x86_64"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            // build_apk.sh stages the Python package and the web/ assets here first.
+            python.srcDirs = ["src/main/python"]
+        }
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version "3.12"
+        pip {
+            // uvicorn WITHOUT [standard]: the optional C extensions (uvloop,
+            // httptools) are not needed and are the most likely build breakage.
+            install "fastapi"
+            install "uvicorn"
+            install "httpx"
+            install "pydantic"
+            install "python-dateutil"
+            install "jinja2"
+        }
+    }
+}
+
+dependencies {
+    // Nothing beyond the Android framework + Chaquopy is required. The activity
+    // uses the platform WebView and a JS bridge for voice.
+}
