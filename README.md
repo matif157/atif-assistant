@@ -209,6 +209,8 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `POST /api/places/{id}/name` | give a place a name and kind |
 | `GET /api/routines` | observed place/routine candidates |
 | `POST /api/routines/derive` | rebuild routines from stored visits |
+| `POST /api/upload` | ingest a file (base64/text JSON); text becomes memory |
+| `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET/POST /api/settings` | stored key/value settings |
 | `GET/POST /api/notes` | quick notes |
 | `GET/POST /api/works` | tracked projects |
@@ -398,6 +400,27 @@ Two hard limits, by design:
   that it is not recorded - only that you were.
 - **No live tracking.** Nothing polls the phone. You push fixes in; the app does
   not pull them, and there is no background location service.
+
+---
+
+## Uploading files
+
+`POST /api/upload` takes JSON (`{filename, content_b64, related_to, kind?}`),
+so no multipart dependency is needed. Files land in `data/uploads/` keyed by
+their sha256, so the same file is stored once. A text file is additionally
+ingested as searchable evidence and a dated episode labelled with `related_to`;
+images, audio, video and PDFs are stored and referenced but never parsed -
+guessing content from bytes would be fabrication. Use the **UPLOAD** button in
+the header.
+
+---
+
+## Offline and Android
+
+The app is a PWA. See [`docs/OFFLINE-ANDROID.md`](docs/OFFLINE-ANDROID.md) for
+installing it on a phone (Termux or Tailscale), using a local Ollama model, and
+the honest note on why there is no signed APK yet. Build a portable bundle with
+`./scripts/package_offline.sh` (excludes `data/`, `.venv/`, `.git/`).
 
 ---
 
