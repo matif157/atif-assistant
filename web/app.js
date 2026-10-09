@@ -1078,6 +1078,13 @@ function renderProvider(p) {
   test.className = "ghost small";
   test.textContent = "TEST";
   actions.append(save, test);
+  if (p.name !== "ollama") {
+    const clear = document.createElement("button");
+    clear.className = "ghost small";
+    clear.textContent = "CLEAR KEY";
+    actions.appendChild(clear);
+    clear.addEventListener("click", () => clearProviderKey(card));
+  }
   card.appendChild(actions);
 
   const note = document.createElement("div");
@@ -1106,11 +1113,14 @@ function providerPayload(card) {
   const get = (role) => card.querySelector(`[data-role="${role}"]`);
   const payload = {};
   const key = get("key");
+  // An empty key field means "leave the stored key alone"; use CLEAR to remove.
   if (key && key.value.trim()) payload.api_key = key.value.trim();
+  // Model/url are sent even when empty, so clearing the field reverts to the
+  // provider default instead of pinning an empty model.
   const model = get("model");
-  if (model && model.value.trim()) payload.model = model.value.trim();
+  if (model) payload.model = model.value;
   const url = get("url");
-  if (url && url.value.trim()) payload.url = url.value.trim();
+  if (url) payload.url = url.value;
   return payload;
 }
 
@@ -1139,6 +1149,23 @@ async function saveProvider(card) {
     await loadProviders();
   } catch (err) {
     if (note) note.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function clearProviderKey(card) {
+  const name = card.dataset.name;
+  const note = card.querySelector('[data-role="note"]');
+  if (note) note.textContent = "Clearing key…";
+  try {
+    const res = await fetch(`/api/providers/${name}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clear_key: true }),
+    });
+    if (!res.ok) throw new Error("clear failed");
+    await loadProviders();
+  } catch (err) {
+    if (note) note.textContent = `Clear failed: ${err.message}`;
   }
 }
 

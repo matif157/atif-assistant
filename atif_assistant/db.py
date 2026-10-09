@@ -1049,6 +1049,13 @@ def get_setting(key: str, default: str | None = None) -> str | None:
     return row["value"]
 
 
+def delete_setting(key: str) -> None:
+    """Remove a setting so it falls back to the environment/default again."""
+    conn = connect()
+    conn.execute("DELETE FROM settings WHERE key=?", (key,))
+    conn.commit()
+
+
 def add_note(title: str | None, body: str, tags: str | None = None, mood: str | None = None) -> int:
     conn = connect()
     cur = conn.execute(

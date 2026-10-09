@@ -321,22 +321,29 @@ def save_provider(name: str, payload: ProviderIn) -> JSONResponse:
     """
     if name not in PROVIDER_LABELS:
         return JSONResponse({"error": "unknown provider"}, status_code=404)
+    def put_or_clear(key: str, value: str | None) -> None:
+        """Store a plain value; an empty/absent value removes the override."""
+        if value is None:
+            return
+        if value.strip():
+            db.set_setting(key, value.strip())
+        else:
+            db.delete_setting(key)
+
     if name == "ollama":
-        if payload.url is not None:
-            db.set_setting("provider.ollama.url", payload.url.strip())
-        if payload.model is not None:
-            db.set_setting("provider.ollama.model", payload.model.strip())
-        if payload.api_key:
-            db.set_setting("provider.ollama.api_key", payload.api_key.strip())
-        elif payload.clear_key:
+        put_or_clear("provider.ollama.url", payload.url)
+        put_or_clear("provider.ollama.model", payload.model)
+        if payload.clear_key:
+            # A blank key is a deliberate override: it disables the provider.
             db.set_setting("provider.ollama.api_key", "")
+        elif payload.api_key and payload.api_key.strip():
+            db.set_setting("provider.ollama.api_key", payload.api_key.strip())
     else:
         if payload.clear_key:
             db.set_setting(f"provider.{name}.api_key", "")
-        elif payload.api_key is not None and payload.api_key.strip():
+        elif payload.api_key and payload.api_key.strip():
             db.set_setting(f"provider.{name}.api_key", payload.api_key.strip())
-        if payload.model is not None:
-            db.set_setting(f"provider.{name}.model", payload.model.strip())
+        put_or_clear(f"provider.{name}.model", payload.model)
     invalidate_probe_cache()
     return JSONResponse({"ok": True, "provider": provider_status(name)})
 

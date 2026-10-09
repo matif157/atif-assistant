@@ -861,6 +861,8 @@ def test_providers() -> None:
         check("model falls back to the default", llm.provider_model("groq") == "openai/gpt-oss-120b")
         db.set_setting("provider.groq.model", "custom-model")
         check("model override is used", llm.provider_model("groq") == "custom-model")
+        client.post("/api/providers/groq", json={"model": ""})
+        check("clearing the model reverts to the default", llm.provider_model("groq") == "openai/gpt-oss-120b")
 
         # --- masking never reveals the whole key.
         check("mask keeps only the tail", llm.mask_key("sk-abcdef123456") == "\u20263456")
