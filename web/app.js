@@ -301,12 +301,113 @@ document.getElementById("btn-insights").addEventListener("click", async () => {
         iBody.appendChild(r);
       }
     }
+    await renderPlaces(iBody);
     if (!iBody.childNodes.length) iBody.textContent = "No history yet.";
   } catch {
     iBody.textContent = "Could not load insights.";
   }
 });
 document.getElementById("close-insights").addEventListener("click", () => (iSheet.hidden = true));
+
+function sectionHead(text) {
+  const h = document.createElement("div");
+  h.className = "ihead";
+  h.textContent = text;
+  return h;
+}
+
+async function renderPlaces(box) {
+  let places = [];
+  let routines = [];
+  try {
+    ({ places } = await (await fetch("/api/places")).json());
+    ({ routines } = await (await fetch("/api/routines")).json());
+  } catch {
+    return;
+  }
+  if (!places.length && !routines.length) return;
+
+  box.appendChild(sectionHead("PLACES (observed visits only)"));
+
+  const derive = document.createElement("button");
+  derive.className = "ghost small";
+  derive.textContent = "DERIVE ROUTINES";
+  derive.addEventListener("click", async () => {
+    derive.disabled = true;
+    await fetch("/api/routines/derive", { method: "POST" });
+    box.innerHTML = "";
+    await renderPlaces(box);
+  });
+  box.appendChild(derive);
+
+  for (const p of places) {
+    const row = document.createElement("div");
+    row.className = "mrow";
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = p.name || "(unnamed place)";
+    const m = document.createElement("div");
+    m.className = "m";
+    m.textContent = `${p.kind || "unknown"} · ${p.visits || 0} visits`;
+    row.append(t, m);
+
+    const wrap = document.createElement("div");
+    wrap.className = "resolve-row";
+    const input = document.createElement("input");
+    input.placeholder = "name this place";
+    input.value = p.name || "";
+    const btn = document.createElement("button");
+    btn.className = "ghost small";
+    btn.textContent = "NAME";
+    btn.addEventListener("click", async () => {
+      const name = input.value.trim();
+      if (!name) {
+        input.focus();
+        return;
+      }
+      btn.disabled = true;
+      const res = await fetch(`/api/places/${p.id}/name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      btn.disabled = false;
+      if (res.ok) {
+        t.textContent = name;
+        btn.textContent = "SAVED";
+      } else {
+        btn.textContent = "FAILED";
+      }
+    });
+    wrap.append(input, btn);
+    row.appendChild(wrap);
+    box.appendChild(row);
+  }
+
+  box.appendChild(sectionHead("ROUTINES (candidates, not certainties)"));
+  if (!routines.length) {
+    const r = document.createElement("div");
+    r.className = "mrow";
+    r.textContent = "No routines derived yet.";
+    box.appendChild(r);
+    return;
+  }
+  for (const r of routines) {
+    const row = document.createElement("div");
+    row.className = "mrow";
+    const k = document.createElement("div");
+    k.className = "k";
+    k.textContent = `${r.weekday || "?"} · ${r.hour_bucket != null ? `${r.hour_bucket}:00` : "?"} · ${r.status}`;
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = r.name || r.place_id;
+    const m = document.createElement("div");
+    m.className = "m";
+    m.textContent = `${r.observations || 0} observations · confidence ${Number(r.confidence || 0).toFixed(2)}`;
+    row.append(k, t, m);
+    box.appendChild(row);
+  }
+}
 
 /* decision ledger */
 const dSheet = document.getElementById("decisions-sheet");
