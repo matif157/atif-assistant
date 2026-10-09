@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI
@@ -388,6 +389,28 @@ def media_content(media_id: int) -> JSONResponse:
     if not path.exists():
         return JSONResponse({"error": "file missing"}, status_code=404)
     return JSONResponse({"path": str(path), "size": path.stat().st_size})
+
+
+@app.get("/api/export")
+def export_backup() -> JSONResponse:
+    """Download the curated memory as JSON."""
+    data = db.export_data()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    headers = {
+        "Content-Disposition": f'attachment; filename="atif-backup-{stamp}.json"'
+    }
+    return JSONResponse(data, headers=headers)
+
+
+@app.post("/api/import")
+def import_backup(payload: dict) -> JSONResponse:
+    """Restore a backup add-only. Never deletes or overwrites existing rows."""
+    if payload.get("app") and payload.get("app") != "atif-assistant":
+        return JSONResponse({"error": "not an Atif Assistant backup"}, status_code=400)
+    if not isinstance(payload.get("tables"), dict):
+        return JSONResponse({"error": "missing tables"}, status_code=400)
+    added = db.import_data(payload)
+    return JSONResponse({"ok": True, "added": added})
 
 
 @app.get("/api/works")

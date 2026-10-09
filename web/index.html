@@ -160,8 +160,20 @@
       <button class="ghost" id="test-voice">TEST VOICE</button>
     </div>
     <div id="settings-status" class="hint"></div>
+
+    <label>BACKUP</label>
+    <div class="form-actions">
+      <button class="ghost" id="export-backup">EXPORT DATA</button>
+      <button class="ghost" id="import-backup-btn">IMPORT DATA</button>
+      <input id="import-backup" type="file" accept=".json,application/json" hidden>
+    </div>
+    <div id="backup-status" class="hint"></div>
+
+    <button class="ghost" id="install-app" hidden>INSTALL APP</button>
+
     <p class="hint">Settings are stored on your machine and applied on every device
-    that opens this address. Nothing here is sent to a third party.</p>
+    that opens this address. Nothing here is sent to a third party. Import only
+    ever adds memory; it never deletes or overwrites what is already there.</p>
   </div>
 </div>
 

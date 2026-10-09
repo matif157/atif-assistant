@@ -1271,3 +1271,151 @@ def list_routines(limit: int = 50) -> list[dict[str, Any]]:
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------- backup
+
+# Tables included in an export. Deliberately excludes raw `messages` (chat
+# transcripts) and `evidence` (source lines can be huge and are re-ingestible),
+# so a backup carries the curated memory, not the raw firehose.
+EXPORT_TABLES = (
+    "facts",
+    "episodes",
+    "patterns",
+    "rules",
+    "decisions",
+    "learned",
+    "notes",
+    "works",
+    "media",
+    "places",
+    "location_points",
+    "routines",
+    "settings",
+)
+
+
+def export_data() -> dict[str, Any]:
+    """A JSON-serialisable snapshot of the curated memory."""
+    conn = connect()
+    tables: dict[str, list[dict[str, Any]]] = {}
+    for t in EXPORT_TABLES:
+        try:
+            rows = conn.execute(f"SELECT * FROM {t}").fetchall()
+        except sqlite3.OperationalError:
+            continue
+        tables[t] = [dict(r) for r in rows]
+    return {
+        "app": "atif-assistant",
+        "version": 1,
+        "exported_at": now(),
+        "counts": counts(),
+        "tables": tables,
+    }
+
+
+def import_data(payload: dict[str, Any]) -> dict[str, int]:
+    """Restore a backup, add-only and de-duplicated.
+
+    Never deletes or overwrites an existing row: an import can only add memory
+    that is missing. This is the conservative direction - a malformed backup
+    cannot destroy the live database.
+    """
+    tables = payload.get("tables") or {}
+    added = {k: 0 for k in ("facts", "episodes", "notes", "decisions", "works", "settings")}
+    conn = connect()
+
+    seen_facts = {r["text"] for r in conn.execute("SELECT text FROM facts")}
+    for f in tables.get("facts", []):
+        text = (f.get("text") or "").strip()
+        if not text or text in seen_facts:
+            continue
+        add_fact(
+            text,
+            source=f.get("source"),
+            confidence=f.get("confidence", 0.5),
+            evidence=f.get("evidence", 1),
+            last_verified=f.get("last_verified"),
+        )
+        seen_facts.add(text)
+        added["facts"] += 1
+
+    seen_eps = {
+        (r["title"], r["occurred_at"])
+        for r in conn.execute("SELECT title, occurred_at FROM episodes")
+    }
+    for e in tables.get("episodes", []):
+        title = (e.get("title") or "").strip()
+        key = (title, e.get("occurred_at"))
+        if not title or key in seen_eps:
+            continue
+        add_episode(
+            title=title,
+            summary=e.get("summary"),
+            occurred_at=e.get("occurred_at"),
+            source=e.get("source"),
+        )
+        seen_eps.add(key)
+        added["episodes"] += 1
+
+    seen_notes = {r["body"] for r in conn.execute("SELECT body FROM notes")}
+    for n in tables.get("notes", []):
+        body = (n.get("body") or "").strip()
+        if not body or body in seen_notes:
+            continue
+        add_note(n.get("title"), body, n.get("tags"), n.get("mood"))
+        seen_notes.add(body)
+        added["notes"] += 1
+
+    seen_dec = {
+        (r["topic"], r["decision"])
+        for r in conn.execute("SELECT topic, decision FROM decisions")
+    }
+    for d in tables.get("decisions", []):
+        key = (d.get("topic"), d.get("decision"))
+        if key[0] is None or key in seen_dec:
+            continue
+        add_decision(
+            topic=d.get("topic"),
+            decided_at=d.get("decided_at"),
+            decision=d.get("decision"),
+            evidence=d.get("evidence"),
+            assumptions=d.get("assumptions"),
+            alternatives=d.get("alternatives"),
+            prediction=d.get("prediction"),
+            confidence=d.get("confidence"),
+            expected_outcome=d.get("expected_outcome"),
+            review_date=d.get("review_date"),
+        )
+        seen_dec.add(key)
+        added["decisions"] += 1
+
+    seen_works = {r["title"] for r in conn.execute("SELECT title FROM works")}
+    for w in tables.get("works", []):
+        title = (w.get("title") or "").strip()
+        if not title or title in seen_works:
+            continue
+        conn.execute(
+            "INSERT INTO works(title, description, status, data, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                title,
+                w.get("description"),
+                w.get("status", "active"),
+                w.get("data"),
+                now(),
+                now(),
+            ),
+        )
+        conn.commit()
+        seen_works.add(title)
+        added["works"] += 1
+
+    for s in tables.get("settings", []):
+        key, value = s.get("key"), s.get("value")
+        if key is None or value is None:
+            continue
+        set_setting(str(key), str(value))
+        added["settings"] += 1
+
+    return added

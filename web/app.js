@@ -923,6 +923,73 @@ if ("speechSynthesis" in window) {
   window.speechSynthesis.onvoiceschanged = loadVoices;
 }
 
+/* -------------------------------------------------------------- backup */
+
+const backupStatus = document.getElementById("backup-status");
+
+document.getElementById("export-backup").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = "/api/export";
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  if (backupStatus) backupStatus.textContent = "Export started.";
+});
+
+document.getElementById("import-backup-btn").addEventListener("click", () => {
+  document.getElementById("import-backup").click();
+});
+
+document.getElementById("import-backup").addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  if (backupStatus) backupStatus.textContent = "Importing...";
+  try {
+    const payload = JSON.parse(await file.text());
+    const res = await fetch("/api/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "import failed");
+    const a = body.added || {};
+    if (backupStatus) {
+      backupStatus.textContent = `Imported: ${a.facts || 0} facts, ${a.notes || 0} notes, ${
+        a.decisions || 0
+      } decisions.`;
+    }
+  } catch (err) {
+    if (backupStatus) backupStatus.textContent = `Import failed: ${err.message}`;
+  } finally {
+    e.target.value = "";
+  }
+});
+
+/* --------------------------------------------------------- install (PWA) */
+
+let installPrompt = null;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  const btn = document.getElementById("install-app");
+  if (btn) btn.hidden = false;
+});
+
+document.getElementById("install-app").addEventListener("click", async () => {
+  const btn = document.getElementById("install-app");
+  if (!installPrompt) {
+    if (backupStatus) backupStatus.textContent = "Use your browser menu: Add to Home screen.";
+    return;
+  }
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  if (btn) btn.hidden = true;
+});
+
 /* ---------------------------------------------------------------- wiring */
 
 /* boot */

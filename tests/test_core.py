@@ -776,6 +776,58 @@ def test_uploads() -> None:
     db.reset_db_path()
 
 
+def test_backup() -> None:
+    """Export produces a downloadable snapshot; import restores add-only."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\nbackup")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db.use_test_db(base / "a.db")
+        db.init_db()
+        client = TestClient(app)
+
+        db.add_fact("I prefer morning work", source="test", confidence=0.7)
+        client.post("/api/notes", json={"title": "t", "body": "note body"})
+        client.post(
+            "/api/decisions",
+            json={"topic": "job", "decision": "stay", "prediction": "calmer", "confidence": 0.6},
+        )
+
+        exp = client.get("/api/export").json()
+        check("export has metadata", exp.get("app") == "atif-assistant" and "tables" in exp)
+        check("export includes the fact", any("morning work" in f["text"] for f in exp["tables"]["facts"]))
+        check(
+            "export sets a download filename",
+            client.get("/api/export").headers.get("content-disposition", "").startswith("attachment"),
+        )
+
+        # Restore into a different, empty database.
+        db.use_test_db(base / "b.db")
+        db.init_db()
+        added = client.post("/api/import", json=exp).json()["added"]
+        check("import adds the fact", added["facts"] == 1)
+        check("import adds the note", added["notes"] == 1)
+        check("import adds the decision", added["decisions"] == 1)
+
+        again = client.post("/api/import", json=exp).json()["added"]
+        check("re-import is a no-op", again["facts"] == 0 and again["notes"] == 0)
+
+        check(
+            "a foreign file is rejected",
+            client.post("/api/import", json={"app": "other", "tables": {}}).status_code == 400,
+        )
+        check(
+            "a file without tables is rejected",
+            client.post("/api/import", json={"app": "atif-assistant"}).status_code == 400,
+        )
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -805,6 +857,7 @@ def main() -> int:
     test_extended_api()
     test_location()
     test_uploads()
+    test_backup()
 
     if before is not None:
         from atif_assistant import db

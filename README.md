@@ -211,6 +211,8 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `POST /api/routines/derive` | rebuild routines from stored visits |
 | `POST /api/upload` | ingest a file (base64/text JSON); text becomes memory |
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
+| `GET /api/export` | download the curated memory as JSON |
+| `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
 | `GET/POST /api/settings` | stored key/value settings |
 | `GET/POST /api/notes` | quick notes |
 | `GET/POST /api/works` | tracked projects |
@@ -421,6 +423,17 @@ The app is a PWA. See [`docs/OFFLINE-ANDROID.md`](docs/OFFLINE-ANDROID.md) for
 installing it on a phone (Termux or Tailscale), using a local Ollama model, and
 the honest note on why there is no signed APK yet. Build a portable bundle with
 `./scripts/package_offline.sh` (excludes `data/`, `.venv/`, `.git/`).
+
+---
+
+## Backup
+
+**Settings → EXPORT DATA** downloads a JSON snapshot of the curated memory
+(facts, episodes, notes, decisions, works, media metadata, places, routines,
+settings). **IMPORT DATA** restores one. Import is add-only and de-duplicated:
+it can add missing memory but can never delete or overwrite what is already
+there, so a malformed backup cannot damage the live database. Raw chat
+transcripts and raw source lines are intentionally not included.
 
 ---
 
