@@ -20,6 +20,7 @@
   <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
   <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
   <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
+  <button class="ghost" id="btn-rules" title="Rules and plans">RULES</button>
   <button class="ghost" id="btn-upload" title="Upload a file">UPLOAD</button>
   <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
   <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
@@ -55,6 +56,14 @@
     <button class="ghost" id="close-insights">CLOSE</button>
   </div>
   <div id="insights-body"></div>
+</div>
+
+<div class="sheet" id="rules-sheet" hidden>
+  <div class="sheet-head">
+    <strong>RULES &amp; PLANS</strong>
+    <button class="ghost" id="close-rules">CLOSE</button>
+  </div>
+  <div id="rules-body"></div>
 </div>
 
 <div class="sheet" id="learned-sheet" hidden>
@@ -97,6 +106,7 @@
     </label>
     <div class="form-actions">
       <button class="ghost" id="do-upload">UPLOAD TO MEMORY</button>
+      <button class="ghost" id="make-plan" hidden>MAKE STRICT PLAN</button>
       <button class="ghost" id="toggle-library">RECENT FILES</button>
     </div>
     <div id="upload-status" class="hint"></div>

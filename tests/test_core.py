@@ -1438,6 +1438,93 @@ def test_upload_reads() -> None:
     db.reset_db_path()
 
 
+def test_plan() -> None:
+    """A document becomes a strict, editable plan: rules are stored, enforced,
+    and always under the user's control."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, plan
+    from atif_assistant.app import app
+
+    print("\nplan")
+
+    parsed = plan.parse_plan("TITLE: Marathon Plan\nRULE: Run on Tuesday\nRULE: Rest on Sunday\n")
+    check("plan title is parsed", parsed["title"] == "Marathon Plan")
+    check("plan rules are parsed", parsed["rules"] == ["Run on Tuesday", "Rest on Sunday"])
+    check("empty plan parses to nothing", plan.parse_plan("no structure here")["rules"] == [])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "plan.db")
+        db.init_db()
+        client = TestClient(app)
+
+        async def fake_complete(messages, **kw):
+            return (
+                "TITLE: Saving Plan\n"
+                "RULE: Save 500 every month\n"
+                "RULE: Do not buy takeaway on weekdays\n",
+                "groq",
+            )
+
+        orig = plan.complete
+        plan.complete = fake_complete
+        try:
+            # Strict plan: rules are approved immediately and enforced.
+            r = client.post("/api/plan", json={"text": "save 500 monthly, no weekday takeaway", "strict": True}).json()
+            check("plan is drafted", r.get("ok") is True and r["title"] == "Saving Plan")
+            check("plan created an episode", r.get("episode_id") is not None)
+            check("strict plan enforces two rules", len(r["rules"]) == 2 and all(x["approved"] for x in r["rules"]))
+
+            rules = {x["text"]: x for x in client.get("/api/rules").json()["rules"]}
+            check("rules are listed", set(rules) == {"Save 500 every month", "Do not buy takeaway on weekdays"})
+            check("enforced rules reach the guardrails prompt", any(
+                "Save 500 every month" in rule["text"] for rule in db.approved_rules()
+            ))
+
+            # Candidate plan: not enforced until approved.
+            r2 = client.post("/api/plan", json={"text": "study twice a week", "strict": False}).json()
+            cand = r2["rules"][0]
+            check("non-strict plan starts as candidates", cand["approved"] is False)
+            check(
+                "approving a candidate enforces it",
+                client.post(f"/api/rules/{cand['id']}/approve").json().get("ok") is True,
+            )
+            check(
+                "approving a missing rule is a 404",
+                client.post("/api/rules/999999/approve").status_code == 404,
+            )
+
+            check(
+                "a rule can be removed",
+                client.delete(f"/api/rules/{cand['id']}").json().get("ok") is True,
+            )
+            check(
+                "removing a missing rule is a 404",
+                client.delete("/api/rules/999999").status_code == 404,
+            )
+            remaining = [x["text"] for x in client.get("/api/rules").json()["rules"]]
+            check("removed rule is gone", "Save 500 every month" in remaining and "Study twice a week" not in remaining)
+
+            # No provider -> honest failure, nothing invented.
+            async def boom(messages, **kw):
+                raise plan.ProviderError("no provider")
+
+            plan.complete = boom
+            check(
+                "plan without a provider fails cleanly",
+                client.post("/api/plan", json={"text": "some document"}).status_code == 503,
+            )
+        finally:
+            plan.complete = orig
+
+        check(
+            "plan with no input is rejected",
+            client.post("/api/plan", json={}).status_code == 400,
+        )
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -1473,6 +1560,7 @@ def main() -> int:
     test_misc_endpoints()
     test_extract()
     test_upload_reads()
+    test_plan()
     test_structure_guard()
 
     if before is not None:

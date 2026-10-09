@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, engine, learn, location, router, uploads
+from . import db, engine, extract, learn, location, plan, router, uploads
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .llm import (
     invalidate_probe_cache,
@@ -45,6 +45,13 @@ class DecisionIn(BaseModel):
 
 class ResolveIn(BaseModel):
     actual_outcome: str
+
+
+class PlanIn(BaseModel):
+    media_id: int | None = None
+    text: str | None = None
+    related_to: str | None = None
+    strict: bool = True
 
 
 @app.on_event("startup")
@@ -509,6 +516,87 @@ def import_backup(payload: dict) -> JSONResponse:
         return JSONResponse({"error": "missing tables"}, status_code=400)
     added = db.import_data(payload)
     return JSONResponse({"ok": True, "added": added})
+
+
+@app.post("/api/plan")
+async def make_plan(payload: PlanIn) -> JSONResponse:
+    """Turn a document (uploaded file or raw text) into a strict plan.
+
+    The model drafts a title and concrete rules, grounded only in the document.
+    The rules are stored; in strict mode they are approved, so every later
+    answer is held to them.
+    """
+    text = payload.text
+    related = payload.related_to
+    if not text and payload.media_id is not None:
+        row = db.connect().execute(
+            "SELECT path, tags FROM media WHERE id=?", (payload.media_id,)
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "media not found"}, status_code=404)
+        stored = Path(row["path"])
+        if not stored.exists():
+            return JSONResponse({"error": "the file is missing on disk"}, status_code=404)
+        result = extract.extract(stored.name, stored.read_bytes())
+        text = result.get("text")
+        related = related or row["tags"]
+        if not text:
+            return JSONResponse(
+                {"error": result.get("reason") or "the file could not be read"},
+                status_code=400,
+            )
+    if not text or not text.strip():
+        return JSONResponse(
+            {"error": "provide text or the id of a readable upload"}, status_code=400
+        )
+
+    drafted = await plan.draft_plan(text, related)
+    if not drafted:
+        return JSONResponse(
+            {"error": "no plan could be drafted (no provider, or nothing actionable in the file)"},
+            status_code=503,
+        )
+
+    source = f"plan:{payload.media_id}" if payload.media_id is not None else f"plan:{db.now()}"
+    title = drafted["title"] or "Uploaded plan"
+    body = "\n".join(f"- {r}" for r in drafted["rules"]) or "(no concrete commitments found)"
+    episode_id = db.add_episode(
+        title=f"PLAN: {title}", summary=body, occurred_at=db.now(), source=source
+    )
+    added = [
+        {"id": db.add_rule(text=r, code="PLAN", source=source, approved=payload.strict),
+         "text": r, "approved": payload.strict}
+        for r in drafted["rules"]
+    ]
+    return JSONResponse(
+        {
+            "ok": True,
+            "title": title,
+            "episode_id": episode_id,
+            "rules": added,
+            "strict": payload.strict,
+            "provider": drafted.get("provider"),
+        }
+    )
+
+
+@app.get("/api/rules")
+def get_rules() -> dict:
+    return {"rules": db.list_rules()}
+
+
+@app.post("/api/rules/{rule_id}/approve")
+def approve_rule(rule_id: int) -> JSONResponse:
+    if not db.set_rule_approved(rule_id, True):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": rule_id})
+
+
+@app.delete("/api/rules/{rule_id}")
+def remove_rule(rule_id: int) -> JSONResponse:
+    if not db.delete_rule(rule_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": rule_id})
 
 
 @app.get("/api/works")

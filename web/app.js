@@ -1127,6 +1127,8 @@ function fileToBase64(file) {
   });
 }
 
+let lastMediaId = null;
+
 async function uploadFile() {
   const fileEl = document.getElementById("upload-file");
   const relatedEl = document.getElementById("upload-related");
@@ -1159,6 +1161,8 @@ async function uploadFile() {
     } else {
       statusEl.textContent = s.uploadedStored;
     }
+    lastMediaId = data.media_id;
+    document.getElementById("make-plan").hidden = !data.read;
     fileEl.value = "";
     if (relatedEl) relatedEl.value = "";
   } catch {
@@ -1167,6 +1171,34 @@ async function uploadFile() {
 }
 
 document.getElementById("do-upload").addEventListener("click", uploadFile);
+
+document.getElementById("make-plan").addEventListener("click", async () => {
+  const btn = document.getElementById("make-plan");
+  const statusEl = document.getElementById("upload-status");
+  if (lastMediaId == null) return;
+  btn.disabled = true;
+  statusEl.textContent = "Drafting a strict plan...";
+  try {
+    const res = await fetch("/api/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ media_id: lastMediaId, strict: true }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      statusEl.textContent = `Plan failed: ${data.error || res.status}`;
+    } else if (!data.rules.length) {
+      statusEl.textContent = `Plan "${data.title}" has no concrete commitments to enforce.`;
+    } else {
+      statusEl.textContent = `Plan "${data.title}" added - ${data.rules.length} strict rule(s) now enforced.`;
+      openRules();
+    }
+  } catch {
+    statusEl.textContent = "Plan failed.";
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function humanSize(n) {
   if (n == null) return "";
@@ -1224,6 +1256,94 @@ document.getElementById("toggle-library").addEventListener("click", () => {
   if (!box) return;
   box.hidden = !box.hidden;
   if (!box.hidden) loadLibrary();
+});
+
+/* --------------------------------------------------------------- rules */
+
+const rulesSheet = document.getElementById("rules-sheet");
+const rulesBody = document.getElementById("rules-body");
+
+function ruleCard(r) {
+  const row = document.createElement("div");
+  row.className = "mrow";
+
+  const k = document.createElement("div");
+  k.className = "k";
+  k.textContent = r.approved ? "ENFORCED" : "CANDIDATE";
+  const t = document.createElement("div");
+  t.className = "t";
+  t.textContent = r.text;
+  const d = document.createElement("div");
+  d.className = "m";
+  d.textContent = [r.code, r.source, r.created_at].filter(Boolean).join(" · ");
+  row.append(k, t, d);
+
+  const actions = document.createElement("div");
+  actions.className = "m";
+  if (!r.approved) {
+    const ap = document.createElement("button");
+    ap.className = "ghost small";
+    ap.textContent = "ENFORCE";
+    ap.addEventListener("click", async () => {
+      await fetch(`/api/rules/${r.id}/approve`, { method: "POST" });
+      loadRules();
+    });
+    actions.appendChild(ap);
+  }
+  const rm = document.createElement("button");
+  rm.className = "ghost small";
+  rm.textContent = "REMOVE";
+  rm.addEventListener("click", async () => {
+    await fetch(`/api/rules/${r.id}`, { method: "DELETE" });
+    row.remove();
+    if (!rulesBody.querySelector(".mrow")) rulesBody.textContent = "No rules yet.";
+  });
+  actions.appendChild(rm);
+  row.appendChild(actions);
+  return row;
+}
+
+async function loadRules() {
+  if (!rulesBody) return;
+  rulesBody.textContent = "loading...";
+  try {
+    const { rules = [] } = await (await fetch("/api/rules")).json();
+    rulesBody.innerHTML = "";
+    if (!rules.length) {
+      rulesBody.textContent =
+        "No rules yet. Upload a plan or document, then choose MAKE STRICT PLAN.";
+      return;
+    }
+    const enforced = rules.filter((r) => r.approved);
+    const candidates = rules.filter((r) => !r.approved);
+    if (enforced.length) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = `ENFORCED - ${enforced.length}`;
+      rulesBody.appendChild(h);
+      for (const r of enforced) rulesBody.appendChild(ruleCard(r));
+    }
+    if (candidates.length) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = `CANDIDATES - ${candidates.length}`;
+      rulesBody.appendChild(h);
+      for (const r of candidates) rulesBody.appendChild(ruleCard(r));
+    }
+  } catch {
+    rulesBody.textContent = "Could not load rules.";
+  }
+}
+
+function openRules() {
+  if (!rulesSheet) return;
+  rulesSheet.hidden = false;
+  loadRules();
+}
+
+document.getElementById("btn-rules").addEventListener("click", openRules);
+document.getElementById("close-rules").addEventListener("click", () => {
+  if (rulesSheet) rulesSheet.hidden = true;
 });
 
 /* ------------------------------------------------------------ settings ui */

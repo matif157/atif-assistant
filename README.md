@@ -210,6 +210,10 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `GET /api/routines` | observed place/routine candidates |
 | `POST /api/routines/derive` | rebuild routines from stored visits |
 | `POST /api/upload` | ingest a file (base64/text JSON); readable files become memory |
+| `POST /api/plan` | draft a strict plan from an upload or text; stores checkable rules |
+| `GET /api/rules` | every stored rule, enforced first |
+| `POST /api/rules/{id}/approve` | enforce a candidate rule |
+| `DELETE /api/rules/{id}` | remove a rule |
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
@@ -433,6 +437,20 @@ the UI says whether the file was read or merely stored. Nothing is guessed from
 bytes. Matching evidence lines are also offered to the model on `/api/ask`, so
 the assistant can answer from a file you uploaded. Use the **UPLOAD** button.
 
+## Strict plans and rules
+
+After a readable upload, **MAKE STRICT PLAN** (or `POST /api/plan` with a
+`media_id` or raw `text`) asks the model to draft a short title and up to eight
+concrete, checkable rules grounded only in that document. In strict mode those
+rules are approved immediately and injected into every later answer as standing
+commitments, so the assistant holds you to the plan instead of quietly dropping
+it. Non-strict rules wait as candidates.
+
+**RULES** in the header lists them, lets you enforce a candidate, and lets you
+remove any rule. Nothing is added silently: an empty or unactionable document
+produces a title with no rules, and with no provider the endpoint returns `503`
+rather than inventing a plan.
+
 ---
 
 ## Offline and Android
@@ -583,10 +601,11 @@ you almost certainly won't.
 | `atif_assistant/location.py` | place naming / geocoding |
 | `atif_assistant/uploads.py` | file ingest → memory |
 | `atif_assistant/extract.py` | text/PDF/Office/WhatsApp extraction |
+| `atif_assistant/plan.py` | document → strict checkable plan |
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 285 checks |
+| `tests/test_core.py` | 301 checks |
 
 ---
 
@@ -596,7 +615,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-285 checks across twenty-four groups:
+301 checks across twenty-five groups:
 
 | Group | Covers |
 |---|---|
@@ -619,6 +638,7 @@ you almost certainly won't.
 | uploads | sha256 dedupe, text→evidence+episode, media-library listing |
 | extract | text/markup/PDF/docx/xlsx decoded; WhatsApp parsed; unreadable files report a reason |
 | upload reading | readable uploads report read + chars and reach evidence search; images report read=false |
+| plan | document → grounded TITLE/RULE draft; strict rules enforced, candidates approvable, rules removable |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
 | providers | key/model precedence, masking, settings/export redaction, save/clear, TEST endpoint |
 | ask endpoint | every question class routes to the honest mode; exchange persisted; repeat counting |

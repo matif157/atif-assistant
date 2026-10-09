@@ -258,6 +258,17 @@ def _guardrails(ctx: dict[str, Any]) -> str:
             + ". State clearly that this needs a qualified professional, "
             "and give the practical next step."
         )
+    # Approved rules are standing commitments the user added (often from an
+    # uploaded plan). They must reach every answer, not just retrieval.
+    commitments = db.approved_rules()
+    if commitments:
+        lines.append(
+            "USER COMMITMENTS (approved rules and plans - treat these as "
+            "standing instructions and hold the user to them; never silently "
+            "drop one, and name it when the user is drifting from it):"
+        )
+        for r in commitments[:12]:
+            lines.append(f"- {r['text']}")
     # Output language and length are user settings. The reality labels stay in
     # English brackets so the Reality Engine can still parse and colour them.
     if (ctx.get("language") or "").lower().startswith("ur"):

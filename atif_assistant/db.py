@@ -739,6 +739,36 @@ def approved_rules() -> list[dict[str, Any]]:
     ]
 
 
+def list_rules(limit: int = 200) -> list[dict[str, Any]]:
+    """Every stored rule, approved first, newest first."""
+    conn = connect()
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM rules ORDER BY approved DESC, created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    ]
+
+
+def set_rule_approved(rule_id: int, approved: bool) -> bool:
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE rules SET approved=? WHERE id=?", (int(approved), rule_id)
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_rule(rule_id: int) -> bool:
+    """Remove a rule and its search-index row so nothing cites a gone rule."""
+    conn = connect()
+    cur = conn.execute("DELETE FROM rules WHERE id=?", (rule_id,))
+    conn.execute("DELETE FROM memory_fts WHERE kind='rule' AND ref_id=?", (rule_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def add_decision(**kw: Any) -> int:
     conn = connect()
     cols = (
