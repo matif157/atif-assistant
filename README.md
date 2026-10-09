@@ -213,6 +213,10 @@ labels, brake warnings, self-audit notes, pattern hits, and repeat count.
 | `GET /api/media/{id}/content` | locate a stored upload on disk |
 | `GET /api/export` | download the curated memory as JSON |
 | `POST /api/import` | restore a backup, add-only (never deletes or overwrites) |
+| `GET /api/providers` | provider config with masked keys and live readiness |
+| `POST /api/providers/{name}` | set or clear a provider key/model/url |
+| `POST /api/providers/{name}/test` | test one provider (optionally with unsaved values) |
+| `POST /api/providers/test` | test every provider |
 | `GET/POST /api/settings` | stored key/value settings |
 | `GET/POST /api/notes` | quick notes |
 | `GET/POST /api/works` | tracked projects |
@@ -426,6 +430,34 @@ the honest note on why there is no signed APK yet. Build a portable bundle with
 
 ---
 
+## Models & API keys
+
+Atif Assistant tries providers in order (`groq → gemini → openrouter → ollama`)
+and falls back to an offline answer if none is reachable. **Settings → MODELS &
+API KEYS** manages them without editing files: each provider has a key field, a
+model field, a **TEST** button, and there is a **TEST ALL**. A key can be tested
+before it is saved.
+
+Resolution order for a key or model is **saved setting → `.env` → built-in
+default**. Saving an empty key (or CLEAR) stores a blank, which *is* an override,
+so clearing a key in the UI really disables it even if `.env` still holds one.
+
+Keys are stored in the local, gitignored database and are **never returned** by
+the API — only a masked hint (`…last4`). They are also excluded from
+`/api/settings` and from `EXPORT DATA` backups. This is a local-only app on your
+machine; the values are not encrypted at rest.
+
+Defaults are chosen to actually work on a free account:
+
+| Provider | Default model | Note |
+|---|---|---|
+| Groq | `openai/gpt-oss-120b` | free tier, fastest |
+| Gemini | `gemini-2.0-flash` | needs a valid key |
+| OpenRouter | `nvidia/nemotron-3-super-120b-a12b:free` | paid models need credits; free tier rate-limits |
+| Ollama | `llama3.2` | local, set the URL too |
+
+---
+
 ## Backup
 
 **Settings → EXPORT DATA** downloads a JSON snapshot of the curated memory
@@ -511,7 +543,7 @@ you almost certainly won't.
 | `atif_assistant/app.py` | API + static serving |
 | `scripts/seed_memory.py` | archive → memory |
 | `scripts/ingest_evidence.py` | chat exports → raw evidence |
-| `tests/test_core.py` | 168 checks |
+| `tests/test_core.py` | 191 checks |
 
 ---
 
@@ -521,7 +553,7 @@ you almost certainly won't.
 .venv/bin/python -m tests.test_core
 ```
 
-168 checks across eighteen groups:
+191 checks across nineteen groups:
 
 | Group | Covers |
 |---|---|
@@ -543,6 +575,7 @@ you almost certainly won't.
 | location | ingest dedup, place clustering, naming, routine derivation |
 | uploads | sha256 dedupe, text→evidence+episode, media-library listing |
 | backup | export snapshot, add-only de-duplicated import, bad-file rejection |
+| providers | key/model precedence, masking, settings/export redaction, save/clear, TEST endpoint |
 
 Every group runs against a scratch database. At the end of the run the test
 suite compares the real database against a snapshot taken before it started,

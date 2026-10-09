@@ -7,21 +7,78 @@ never silently useless.
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 import httpx
 
-from .config import MODEL_DEFAULTS, PROVIDER_ORDER
+from .config import (
+    MODEL_DEFAULTS,
+    PROVIDER_ENV_KEYS,
+    PROVIDER_LABELS,
+    PROVIDER_ORDER,
+)
 
 
 class ProviderError(RuntimeError):
     pass
 
 
+# --------------------------------------------------------- runtime config
+#
+# A key or model can be set two ways: in `.env` (read once at launch) or at
+# runtime from the Settings sheet (stored in the local database). The database
+# wins when a row is present - including an empty row, which means "cleared",
+# so clearing a key in the UI really disables it even if `.env` still has one.
+
+def _override(name: str, field: str) -> str | None:
+    """Return the stored runtime value, or None if it was never set.
+
+    None means "fall back to the environment". An empty string is a real value
+    that intentionally blanks the setting.
+    """
+    try:
+        from . import db
+
+        return db.get_setting(f"provider.{name}.{field}", None)
+    except Exception:  # noqa: BLE001 - config must never crash a request
+        return None
+
+
+def provider_key(name: str) -> str:
+    """The API key for a provider: database override, else environment."""
+    override = _override(name, "api_key")
+    if override is not None:
+        return override
+    return os.environ.get(PROVIDER_ENV_KEYS.get(name, ""), "")
+
+
+def provider_model(name: str) -> str:
+    """The model slug for a provider: database override, else default."""
+    override = _override(name, "model")
+    if override is not None:
+        return override
+    return MODEL_DEFAULTS.get(name, "")
+
+
+def ollama_url() -> str:
+    """The local server URL: database override, else environment, else default."""
+    override = _override("ollama", "url")
+    if override is not None:
+        return override
+    return os.environ.get("ATIF_ASSISTANT_OLLAMA_URL", "http://127.0.0.1:11434")
+
+
+def mask_key(key: str) -> str:
+    """A safe hint for the UI. Never returns enough to reconstruct the key."""
+    if not key:
+        return ""
+    tail = key[-4:] if len(key) >= 4 else key
+    return f"…{tail}"
+
+
 async def _groq(model: str, messages: list[dict], **kw: Any) -> str:
-    key = os.environ.get("GROQ_API_KEY")
+    key = kw.get("key") or provider_key("groq")
     if not key:
         raise ProviderError("no GROQ_API_KEY")
     async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
@@ -40,7 +97,7 @@ async def _groq(model: str, messages: list[dict], **kw: Any) -> str:
 
 
 async def _gemini(model: str, messages: list[dict], **kw: Any) -> str:
-    key = os.environ.get("GEMINI_API_KEY")
+    key = kw.get("key") or provider_key("gemini")
     if not key:
         raise ProviderError("no GEMINI_API_KEY")
     system = "\n\n".join(
@@ -75,7 +132,7 @@ async def _gemini(model: str, messages: list[dict], **kw: Any) -> str:
 
 
 async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
-    key = os.environ.get("OPENROUTER_API_KEY")
+    key = kw.get("key") or provider_key("openrouter")
     if not key:
         raise ProviderError("no OPENROUTER_API_KEY")
     async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
@@ -97,7 +154,8 @@ async def _openrouter(model: str, messages: list[dict], **kw: Any) -> str:
 
 
 async def _ollama(model: str, messages: list[dict], **kw: Any) -> str:
-    base = os.environ.get("ATIF_ASSISTANT_OLLAMA_URL", "http://127.0.0.1:11434")
+    base = kw.get("base") or ollama_url()
+    key = kw.get("key") or provider_key("ollama")
     system = "\n\n".join(
         m["content"] for m in messages if m["role"] == "system"
     )
@@ -106,9 +164,11 @@ async def _ollama(model: str, messages: list[dict], **kw: Any) -> str:
         for m in messages
         if m["role"] != "system"
     )
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
     async with httpx.AsyncClient(timeout=kw.get("timeout", 120)) as client:
         r = await client.post(
             f"{base}/api/generate",
+            headers=headers,
             json={
                 "model": model,
                 "system": system,
@@ -143,7 +203,7 @@ async def complete(
             continue
         try:
             text = await handler(
-                MODEL_DEFAULTS.get(name, ""), messages, temperature=temperature,
+                provider_model(name), messages, temperature=temperature,
                 max_tokens=max_tokens,
             )
             if text and text.strip():
@@ -155,9 +215,9 @@ async def complete(
     raise ProviderError(f"no provider available: {last_error}")
 
 
-async def ollama_is_up() -> bool:
+async def ollama_is_up(url: str | None = None) -> bool:
     """Actually probe Ollama. Being configured is not being ready."""
-    base = os.environ.get("ATIF_ASSISTANT_OLLAMA_URL", "http://127.0.0.1:11434")
+    base = url or ollama_url()
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             r = await client.get(f"{base}/api/tags")
@@ -166,11 +226,34 @@ async def ollama_is_up() -> bool:
         return False
 
 
-PROVIDER_KEYS = {
-    "groq": "GROQ_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-}
+# Live probe results, cached so a status poll does not spend API quota.
+_PROBE_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
+_PROBE_TTL = 120.0
+
+
+def invalidate_probe_cache() -> None:
+    """Drop the cached probe so the next status call reflects a config change."""
+    _PROBE_CACHE["at"] = 0.0
+    _PROBE_CACHE["result"] = None
+
+
+def provider_status(name: str) -> dict[str, Any]:
+    """Configuration (not readiness) for one provider, with a masked key."""
+    key = provider_key(name)
+    configured = name == "ollama" or bool(key)
+    out = {
+        "name": name,
+        "label": PROVIDER_LABELS.get(name, name),
+        "configured": configured,
+        "model": provider_model(name),
+        "key_set": bool(key),
+        "key_hint": mask_key(key),
+        "ready": False,
+        "error": None,
+    }
+    if name == "ollama":
+        out["url"] = ollama_url()
+    return out
 
 
 def available_providers() -> list[dict[str, Any]]:
@@ -182,31 +265,11 @@ def available_providers() -> list[dict[str, Any]]:
     "configured" and would be reported ready by a presence check alone. Use
     ``probe_providers()`` for the live answer.
     """
-    out = []
-    for name in PROVIDER_ORDER:
-        out.append(
-            {
-                "name": name,
-                "ready": False,
-                "configured": bool(os.environ.get(PROVIDER_KEYS.get(name, "")))
-                if name != "ollama"
-                else True,
-                "note": MODEL_DEFAULTS.get(name, ""),
-            }
-        )
-    return out
-
-
-# Live probe results, cached so a status poll does not spend API quota.
-_PROBE_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
-_PROBE_TTL = 120.0
+    return [provider_status(name) for name in PROVIDER_ORDER]
 
 
 async def _probe_one(name: str) -> dict[str, Any]:
     """Make the smallest possible real call to one provider."""
-    key = PROVIDER_KEYS.get(name)
-    if name != "ollama" and not os.environ.get(key or ""):
-        return {"ready": False, "configured": False, "error": "no key set"}
     if name == "ollama":
         ok = await ollama_is_up()
         return {
@@ -214,10 +277,12 @@ async def _probe_one(name: str) -> dict[str, Any]:
             "configured": True,
             "error": None if ok else "ollama not reachable",
         }
+    if not provider_key(name):
+        return {"ready": False, "configured": False, "error": "no key set"}
     handler = HANDLERS.get(name)
     try:
         await handler(
-            MODEL_DEFAULTS.get(name, ""),
+            provider_model(name),
             [{"role": "user", "content": "ping"}],
             temperature=0.0,
             max_tokens=1,
@@ -255,9 +320,10 @@ async def probe_providers(force: bool = False) -> list[dict[str, Any]]:
     out = [
         {
             "name": name,
+            "label": PROVIDER_LABELS.get(name, name),
             "ready": probe["ready"],
             "configured": probe["configured"],
-            "note": MODEL_DEFAULTS.get(name, ""),
+            "note": provider_model(name),
             "error": probe["error"],
         }
         for name, probe in zip(PROVIDER_ORDER, probes)
@@ -265,3 +331,78 @@ async def probe_providers(force: bool = False) -> list[dict[str, Any]]:
     _PROBE_CACHE["at"] = now
     _PROBE_CACHE["result"] = out
     return out
+
+
+async def test_provider(
+    name: str,
+    api_key: str | None = None,
+    model: str | None = None,
+    url: str | None = None,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Test one provider with optional unsaved overrides.
+
+    Used by the Settings sheet's TEST button so a key can be checked before it
+    is stored. Results are never cached, and the key is never echoed back.
+    """
+    import time
+
+    if name not in HANDLERS:
+        return {"ready": False, "error": "unknown provider", "provider": name}
+
+    use_model = model or provider_model(name)
+    started = time.monotonic()
+    try:
+        if name == "ollama":
+            ok = await ollama_is_up(url or ollama_url())
+            return {
+                "provider": name,
+                "ready": ok,
+                "model": use_model,
+                "error": None if ok else "not reachable",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+        if not (api_key or provider_key(name)):
+            return {
+                "provider": name,
+                "ready": False,
+                "model": use_model,
+                "error": "no key set",
+                "latency_ms": 0,
+            }
+        await HANDLERS[name](
+            use_model,
+            [{"role": "user", "content": "ping"}],
+            temperature=0.0,
+            max_tokens=1,
+            timeout=timeout,
+            key=api_key or None,
+        )
+        return {
+            "provider": name,
+            "ready": True,
+            "model": use_model,
+            "error": None,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+    except httpx.HTTPStatusError as exc:
+        body = ""
+        try:
+            body = exc.response.json().get("error", {}).get("message", "")
+        except Exception:  # noqa: BLE001
+            body = ""
+        return {
+            "provider": name,
+            "ready": False,
+            "model": use_model,
+            "error": f"HTTP {exc.response.status_code}" + (f": {body[:120]}" if body else ""),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+    except Exception as exc:  # noqa: BLE001 - any failure means not ready
+        return {
+            "provider": name,
+            "ready": False,
+            "model": use_model,
+            "error": f"{type(exc).__name__}: {str(exc)[:120]}",
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }

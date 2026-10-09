@@ -6,6 +6,7 @@ Run:  .venv/bin/python -m tests.test_core
 from __future__ import annotations
 
 import base64
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -828,6 +829,106 @@ def test_backup() -> None:
     db.reset_db_path()
 
 
+def test_providers() -> None:
+    """API keys are configurable at runtime, masked, and never leaked."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, llm
+    from atif_assistant.app import app
+
+    print("\nproviders")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "p.db")
+        db.init_db()
+        client = TestClient(app)
+
+        # --- resolver precedence: DB override wins, empty row means cleared.
+        old_env = os.environ.get("GROQ_API_KEY")
+        os.environ["GROQ_API_KEY"] = "env-key-value"
+        try:
+            check("env key is used when no override", llm.provider_key("groq") == "env-key-value")
+            db.set_setting("provider.groq.api_key", "")
+            check("empty override clears the env key", llm.provider_key("groq") == "")
+            db.set_setting("provider.groq.api_key", "db-key-value")
+            check("db override wins over env", llm.provider_key("groq") == "db-key-value")
+        finally:
+            if old_env is None:
+                os.environ.pop("GROQ_API_KEY", None)
+            else:
+                os.environ["GROQ_API_KEY"] = old_env
+
+        # --- model resolution.
+        check("model falls back to the default", llm.provider_model("groq") == "openai/gpt-oss-120b")
+        db.set_setting("provider.groq.model", "custom-model")
+        check("model override is used", llm.provider_model("groq") == "custom-model")
+
+        # --- masking never reveals the whole key.
+        check("mask keeps only the tail", llm.mask_key("sk-abcdef123456") == "\u20263456")
+        check("empty key masks to empty", llm.mask_key("") == "")
+
+        # --- keys are hidden from the generic settings endpoint.
+        db.set_setting("theme", "dark")
+        saved = client.get("/api/settings").json()
+        check("provider keys hidden from /api/settings", not any(k.startswith("provider.") for k in saved))
+        check("ordinary settings still returned", saved.get("theme") == "dark")
+
+        # --- keys are excluded from backups.
+        exp = client.get("/api/export").json()
+        exported = [r.get("key") for r in exp["tables"].get("settings", [])]
+        check("provider keys excluded from export", not any(str(k).startswith("provider.") for k in exported))
+
+        # --- save and clear through the API, with a masked response.
+        db.set_setting("provider.groq.api_key", "")
+        r = client.post("/api/providers/groq", json={"api_key": "sk-live-9999"})
+        body = r.json()
+        check("save reports the key set", body["provider"]["key_set"] is True)
+        check("save response is masked", body["provider"]["key_hint"] == "\u20269999")
+        check("key actually stored", llm.provider_key("groq") == "sk-live-9999")
+        client.post("/api/providers/groq", json={"clear_key": True})
+        check("clear blanks the key", llm.provider_key("groq") == "")
+
+        # --- GET /api/providers lists all with labels.
+        listing = client.get("/api/providers").json()
+        names = [p["name"] for p in listing["providers"]]
+        check("providers endpoint lists all", names == listing["order"] and "groq" in names)
+        check("providers carry a label", all(p.get("label") for p in listing["providers"]))
+
+        # --- unknown provider rejected.
+        check("unknown provider is a 404", client.post("/api/providers/nope", json={}).status_code == 404)
+
+        # --- the TEST endpoint, with the network call stubbed out.
+        original = llm.HANDLERS.get("groq")
+
+        async def ok_handler(model, messages, **kw):
+            ok_handler.seen_key = kw.get("key")
+            return "pong"
+
+        async def boom_handler(model, messages, **kw):
+            raise RuntimeError("provider exploded")
+
+        try:
+            llm.HANDLERS["groq"] = ok_handler
+            t = client.post("/api/providers/groq/test", json={"api_key": "unsaved-key"}).json()
+            check("test reports ready for a working provider", t["ready"] is True)
+            check("test passes the unsaved key through", ok_handler.seen_key == "unsaved-key")
+            check("test returns latency", isinstance(t["latency_ms"], int))
+
+            llm.HANDLERS["groq"] = boom_handler
+            t2 = client.post("/api/providers/groq/test", json={"api_key": "unsaved-key"}).json()
+            check("test reports failure when the provider raises", t2["ready"] is False)
+            check("test surfaces the error", "provider exploded" in (t2["error"] or ""))
+
+            all_res = client.post("/api/providers/test").json()["results"]
+            check("test all returns one result per provider", len(all_res) == len(listing["order"]))
+        finally:
+            if original is not None:
+                llm.HANDLERS["groq"] = original
+
+        llm.invalidate_probe_cache()
+
+    db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -858,6 +959,7 @@ def main() -> int:
     test_location()
     test_uploads()
     test_backup()
+    test_providers()
 
     if before is not None:
         from atif_assistant import db

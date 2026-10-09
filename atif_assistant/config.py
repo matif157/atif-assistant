@@ -43,13 +43,29 @@ def _provider_order() -> list[str]:
 
 PROVIDER_ORDER = _provider_order()
 
+# Environment variable that holds each provider's key. An empty/missing value
+# means "not configured"; the UI can also override these at runtime (see llm.py).
+PROVIDER_ENV_KEYS = {
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
+}
+
 MODEL_DEFAULTS = {
-    "groq": os.environ.get("ATIF_ASSISTANT_GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "groq": os.environ.get("ATIF_ASSISTANT_GROQ_MODEL", "openai/gpt-oss-120b"),
     "gemini": os.environ.get("ATIF_ASSISTANT_GEMINI_MODEL", "gemini-2.0-flash"),
     "openrouter": os.environ.get(
-        "ATIF_ASSISTANT_OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct"
+        "ATIF_ASSISTANT_OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
     ),
     "ollama": os.environ.get("ATIF_ASSISTANT_OLLAMA_MODEL", "llama3.2"),
+}
+
+PROVIDER_LABELS = {
+    "groq": "Groq",
+    "gemini": "Gemini",
+    "openrouter": "OpenRouter",
+    "ollama": "Local / Ollama",
 }
 
 # Retrieval

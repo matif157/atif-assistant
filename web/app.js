@@ -965,6 +965,7 @@ function syncSettingsForm() {
 
 document.getElementById("btn-settings").addEventListener("click", () => {
   syncSettingsForm();
+  loadProviders();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
 });
@@ -1017,6 +1018,186 @@ document.getElementById("test-voice").addEventListener("click", () => {
   );
   settings.speak = was;
 });
+
+/* -------------------------------------------------- providers (API keys) */
+
+const providersEl = document.getElementById("providers-list");
+const providersStatus = document.getElementById("providers-status");
+
+function providerBadge(state) {
+  const b = document.createElement("span");
+  b.className = "pbadge";
+  b.dataset.role = "badge";
+  b.classList.add(state === "ready" ? "pok" : state === "error" ? "pbad" : "punknown");
+  b.textContent = state === "ready" ? "READY" : state === "error" ? "ERROR" : "UNKNOWN";
+  return b;
+}
+
+function renderProvider(p) {
+  const card = document.createElement("div");
+  card.className = "pcard";
+  card.dataset.name = p.name;
+
+  const head = document.createElement("div");
+  head.className = "phead";
+  const title = document.createElement("strong");
+  title.textContent = p.label || p.name;
+  head.append(title, providerBadge(p.ready ? "ready" : p.error ? "error" : "unknown"));
+  card.appendChild(head);
+
+  const mkRow = (labelText, role, value, placeholder, type) => {
+    const row = document.createElement("label");
+    row.className = "prow";
+    row.textContent = labelText;
+    const input = document.createElement("input");
+    input.type = type || "text";
+    input.dataset.role = role;
+    if (type === "password") input.autocomplete = "off";
+    if (value != null) input.value = value;
+    if (placeholder) input.placeholder = placeholder;
+    row.appendChild(input);
+    card.appendChild(row);
+  };
+
+  mkRow(
+    "API key",
+    "key",
+    "",
+    p.key_set ? `saved (${p.key_hint}) — type to replace` : "paste key",
+    "password"
+  );
+  mkRow("Model", "model", p.model || "", "");
+  if (p.name === "ollama") mkRow("URL", "url", p.url || "", "");
+
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  const save = document.createElement("button");
+  save.className = "ghost small";
+  save.textContent = "SAVE";
+  const test = document.createElement("button");
+  test.className = "ghost small";
+  test.textContent = "TEST";
+  actions.append(save, test);
+  card.appendChild(actions);
+
+  const note = document.createElement("div");
+  note.className = "hint";
+  note.dataset.role = "note";
+  if (!p.key_set && p.name !== "ollama") note.textContent = "no key set";
+  card.appendChild(note);
+
+  save.addEventListener("click", () => saveProvider(card));
+  test.addEventListener("click", () => testProvider(card));
+  return card;
+}
+
+async function loadProviders() {
+  if (!providersEl) return;
+  try {
+    const data = await (await fetch("/api/providers")).json();
+    providersEl.innerHTML = "";
+    for (const p of data.providers) providersEl.appendChild(renderProvider(p));
+  } catch {
+    providersEl.textContent = "Could not load providers.";
+  }
+}
+
+function providerPayload(card) {
+  const get = (role) => card.querySelector(`[data-role="${role}"]`);
+  const payload = {};
+  const key = get("key");
+  if (key && key.value.trim()) payload.api_key = key.value.trim();
+  const model = get("model");
+  if (model && model.value.trim()) payload.model = model.value.trim();
+  const url = get("url");
+  if (url && url.value.trim()) payload.url = url.value.trim();
+  return payload;
+}
+
+function setCardBadge(card, state, text) {
+  const badge = card.querySelector('[data-role="badge"]');
+  if (!badge) return;
+  badge.className = "pbadge " + (state === "ready" ? "pok" : state === "error" ? "pbad" : "punknown");
+  badge.textContent = text || (state === "ready" ? "READY" : state === "error" ? "ERROR" : "UNKNOWN");
+}
+
+async function saveProvider(card) {
+  const name = card.dataset.name;
+  const note = card.querySelector('[data-role="note"]');
+  if (note) note.textContent = "Saving…";
+  try {
+    const res = await fetch(`/api/providers/${name}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(providerPayload(card)),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "save failed");
+    const key = card.querySelector('[data-role="key"]');
+    if (key) key.value = "";
+    if (note) note.textContent = "Saved.";
+    await loadProviders();
+  } catch (err) {
+    if (note) note.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function testProvider(card) {
+  const name = card.dataset.name;
+  const note = card.querySelector('[data-role="note"]');
+  if (note) note.textContent = "Testing…";
+  setCardBadge(card, "unknown", "…");
+  try {
+    const res = await fetch(`/api/providers/${name}/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(providerPayload(card)),
+    });
+    const body = await res.json();
+    if (body.ready) {
+      setCardBadge(card, "ready", "READY");
+      if (note) note.textContent = `OK · ${body.model} · ${body.latency_ms} ms`;
+    } else {
+      setCardBadge(card, "error", "ERROR");
+      if (note) note.textContent = body.error || "not ready";
+    }
+  } catch (err) {
+    setCardBadge(card, "error", "ERROR");
+    if (note) note.textContent = err.message;
+  }
+}
+
+async function testAllProviders() {
+  if (!providersStatus) return;
+  providersStatus.textContent = "Testing all providers…";
+  try {
+    const res = await fetch("/api/providers/test", { method: "POST" });
+    const data = await res.json();
+    let ready = 0;
+    const results = data.results || [];
+    for (const r of results) {
+      const card = providersEl.querySelector(`[data-name="${r.provider}"]`);
+      if (card) {
+        setCardBadge(card, r.ready ? "ready" : "error", r.ready ? "READY" : "ERROR");
+        const note = card.querySelector('[data-role="note"]');
+        if (note) {
+          note.textContent = r.ready
+            ? `OK · ${r.model} · ${r.latency_ms} ms`
+            : r.error || "not ready";
+        }
+      }
+      if (r.ready) ready += 1;
+    }
+    providersStatus.textContent = `${ready} of ${results.length} providers ready.`;
+  } catch (err) {
+    providersStatus.textContent = `Test failed: ${err.message}`;
+  }
+}
+
+if (providersEl) {
+  const testAll = document.getElementById("test-all-providers");
+  if (testAll) testAll.addEventListener("click", testAllProviders);
+}
 
 mic.addEventListener("click", toggleMic);
 

@@ -17,8 +17,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db, engine, learn, location, router, uploads
-from .config import TAILSCALE_HOST, WEB_DIR
-from .llm import probe_providers
+from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
+from .llm import (
+    invalidate_probe_cache,
+    probe_providers,
+    provider_status,
+    test_provider,
+)
 
 app = FastAPI(title="Atif Assistant", version="0.1.0")
 
@@ -252,7 +257,13 @@ def service_worker() -> FileResponse:
 def get_settings():
     conn = db.connect()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
-    return {r["key"]: r["value"] for r in rows}
+    # API keys live under `provider.*`. They are never returned here; the
+    # provider endpoints expose only a masked hint.
+    return {
+        r["key"]: r["value"]
+        for r in rows
+        if not r["key"].startswith("provider.")
+    }
 
 
 @app.post("/api/settings")
@@ -260,8 +271,88 @@ def set_settings(payload: dict):
     for k, v in payload.items():
         if v is None:
             continue
+        if str(k).startswith("provider."):
+            continue
         db.set_setting(str(k), str(v))
     return {"ok": True}
+
+
+# ------------------------------------------------------------ providers
+
+class ProviderIn(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+    url: str | None = None
+    clear_key: bool = False
+
+
+@app.get("/api/providers")
+async def list_providers(probe: bool = False) -> dict:
+    """Provider config with masked keys, plus a live readiness flag."""
+    live = {p["name"]: p for p in await probe_providers(force=probe)}
+    providers = []
+    for name in PROVIDER_ORDER:
+        status = provider_status(name)
+        status["ready"] = live.get(name, {}).get("ready", False)
+        status["error"] = live.get(name, {}).get("error")
+        providers.append(status)
+    return {"providers": providers, "order": PROVIDER_ORDER}
+
+
+@app.post("/api/providers/test")
+async def test_all_providers() -> dict:
+    """Test every provider with its stored config.
+
+    Declared before `/api/providers/{name}` so the literal path wins; otherwise
+    the path parameter would capture `test` and demand a body.
+    """
+    import asyncio
+
+    results = await asyncio.gather(*(test_provider(n) for n in PROVIDER_ORDER))
+    return {"results": results}
+
+
+@app.post("/api/providers/{name}")
+def save_provider(name: str, payload: ProviderIn) -> JSONResponse:
+    """Store a provider's key/model/url, or clear its key.
+
+    A key is stored as given, or blanked with ``clear_key``. An empty stored
+    key means 'disabled' and overrides any value still present in `.env`.
+    """
+    if name not in PROVIDER_LABELS:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if name == "ollama":
+        if payload.url is not None:
+            db.set_setting("provider.ollama.url", payload.url.strip())
+        if payload.model is not None:
+            db.set_setting("provider.ollama.model", payload.model.strip())
+        if payload.api_key:
+            db.set_setting("provider.ollama.api_key", payload.api_key.strip())
+        elif payload.clear_key:
+            db.set_setting("provider.ollama.api_key", "")
+    else:
+        if payload.clear_key:
+            db.set_setting(f"provider.{name}.api_key", "")
+        elif payload.api_key is not None and payload.api_key.strip():
+            db.set_setting(f"provider.{name}.api_key", payload.api_key.strip())
+        if payload.model is not None:
+            db.set_setting(f"provider.{name}.model", payload.model.strip())
+    invalidate_probe_cache()
+    return JSONResponse({"ok": True, "provider": provider_status(name)})
+
+
+@app.post("/api/providers/{name}/test")
+async def test_one_provider(name: str, payload: ProviderIn) -> JSONResponse:
+    """Test a provider, optionally with values not yet saved."""
+    if name not in PROVIDER_LABELS:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    result = await test_provider(
+        name,
+        api_key=payload.api_key,
+        model=payload.model,
+        url=payload.url,
+    )
+    return JSONResponse(result)
 
 
 class LocationIn(BaseModel):

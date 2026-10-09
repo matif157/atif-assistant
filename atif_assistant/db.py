@@ -1305,6 +1305,12 @@ def export_data() -> dict[str, Any]:
         except sqlite3.OperationalError:
             continue
         tables[t] = [dict(r) for r in rows]
+    # API keys (settings under `provider.*`) are deliberately excluded: a
+    # backup may be shared or stored elsewhere, and a key is not memory.
+    if "settings" in tables:
+        tables["settings"] = [
+            r for r in tables["settings"] if not str(r.get("key", "")).startswith("provider.")
+        ]
     return {
         "app": "atif-assistant",
         "version": 1,
@@ -1414,6 +1420,8 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
     for s in tables.get("settings", []):
         key, value = s.get("key"), s.get("value")
         if key is None or value is None:
+            continue
+        if str(key).startswith("provider."):
             continue
         set_setting(str(key), str(value))
         added["settings"] += 1
