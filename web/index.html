@@ -26,7 +26,18 @@
   <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
 </header>
 
-<main id="chat"></main>
+<div class="chat-wrap">
+  <div class="chat-col">
+    <main id="chat"></main>
+    <div id="reply-options" class="reply-options" hidden></div>
+  </div>
+  <aside id="basis-sidebar" class="basis-sidebar" hidden>
+    <div class="basis-head">
+      <strong>WHY THIS REPLY</strong>
+    </div>
+    <div id="basis-body"></div>
+  </aside>
+</div>
 
 <footer>
   <div class="route" id="route" hidden>

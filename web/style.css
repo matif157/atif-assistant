@@ -81,7 +81,7 @@ button { font-family: inherit; cursor: pointer; }
   letter-spacing: .1em;
 }
 
-/* chat */
+/* chat - styles moved to .chat-wrap #chat when using two-column layout; keep base for fallback? but we use wrap */
 #chat {
   flex: 1;
   overflow-y: auto;
@@ -437,4 +437,115 @@ textarea:focus { outline: none; border-color: var(--acc); }
   header { padding: 10px 10px; }
   header .ghost { padding: 4px 7px; font-size: 10px; letter-spacing: .06em; }
   .brand { font-size: 12px; }
+}
+
+/* two-column chat + basis sidebar */
+.chat-wrap {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+.chat-col {
+  flex: 1 1 60%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* chat overrides when wrapped */
+.chat-wrap #chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.basis-sidebar {
+  flex: 0 0 320px;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+  padding: 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.basis-sidebar[hidden] { display: none; }
+.basis-head {
+  font-size: 11px;
+  letter-spacing: .12em;
+  color: var(--dim);
+}
+.basis-row {
+  font-size: 11px;
+  color: var(--txt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg);
+}
+.basis-row small {
+  font-size: 10px;
+  color: var(--dim);
+}
+.basis-labels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.basis-lbl {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--acc);
+}
+.basis-lbl-text {
+  font-size: 10px;
+  color: var(--txt);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reply-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 16px 10px;
+}
+.reply-options[hidden] { display: none; }
+.reply-chip {
+  font-size: 10px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: transparent;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.reply-chip:hover {
+  color: var(--txt);
+  border-color: var(--acc);
+}
+
+@media (max-width: 920px) {
+  .basis-sidebar {
+    flex: 0 0 280px;
+  }
+}
+@media (max-width: 760px) {
+  .chat-wrap {
+    flex-direction: column;
+  }
+  .basis-sidebar {
+    flex: 0 0 auto;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    max-height: 40vh;
+  }
 }

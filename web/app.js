@@ -7,7 +7,140 @@ const mic = document.getElementById("mic");
 const statusline = document.getElementById("statusline");
 const dot = document.getElementById("dot");
 
-let session = localStorage.getItem("atif-assistant.session") || null;
+let lastBasis = null;
+
+function renderBasis(data) {
+  const sidebar = document.getElementById("basis-sidebar");
+  const body = document.getElementById("basis-body");
+  if (!body) return;
+  if (!data || (!data.route && !data.labels?.length && !data.critique?.length && !data.memories_used)) {
+    if (sidebar) sidebar.hidden = true;
+    body.innerHTML = "";
+    return;
+  }
+  if (sidebar) sidebar.hidden = false;
+  body.innerHTML = "";
+
+  const addRow = (title, content) => {
+    if (!content) return;
+    const row = document.createElement("div");
+    row.className = "basis-row";
+    const t = document.createElement("small");
+    t.textContent = title;
+    const c = document.createElement("div");
+    c.textContent = content;
+    row.appendChild(t);
+    row.appendChild(c);
+    body.appendChild(row);
+  };
+
+  if (data.route) {
+    addRow("MODE", `${(ROUTE_LABEL[data.route.mode] || (data.route.mode||"").toUpperCase())}${data.route.confidence ? " · "+Math.round(data.route.confidence*100)+"%" : ""}`);
+    addRow("WHY", data.route.reason || "");
+    addRow("INTENT", data.route.intent || "");
+    if (data.route.escalations?.length) {
+      addRow("ESCALATIONS", data.route.escalations.join("\n"));
+    }
+  }
+  addRow("PROVIDER", (data.provider||"").toUpperCase());
+  if (data.memories_used) addRow("MEMORIES USED", String(data.memories_used));
+  if (data.asked_count > 1) addRow("ASKED COUNT", String(data.asked_count));
+  if (data.speaker?.name) {
+    addRow("SPEAKER (advisory)", `${data.speaker.name}${data.speaker.score!=null ? " · "+Math.round(data.speaker.score*100)+"%" : ""}`);
+  }
+
+  if (data.labels?.length) {
+    const row = document.createElement("div");
+    row.className = "basis-row";
+    const t = document.createElement("small");
+    t.textContent = "LABELS";
+    const wrap = document.createElement("div");
+    wrap.className = "basis-labels";
+    for (const lbl of data.labels) {
+      const l = document.createElement("div");
+      const tag = document.createElement("div");
+      tag.className = "basis-lbl";
+      tag.textContent = (lbl.label || "").toUpperCase();
+      const txt = document.createElement("div");
+      txt.className = "basis-lbl-text";
+      txt.textContent = lbl.text || "";
+      l.appendChild(tag);
+      l.appendChild(txt);
+      wrap.appendChild(l);
+    }
+    row.appendChild(t);
+    row.appendChild(wrap);
+    body.appendChild(row);
+  }
+
+  if (data.critique?.length) {
+    addRow("CRITIQUE", data.critique.join("\n"));
+  }
+  if (data.warnings?.length) {
+    addRow("WARNINGS", data.warnings.join("\n"));
+  }
+  if (data.patterns?.length) {
+    addRow("PATTERNS", data.patterns.map(p => p.name || JSON.stringify(p)).join(", "));
+  }
+  if (data.professional_risk?.length) {
+    addRow("PROFESSIONAL RISK", data.professional_risk.join(", "));
+  }
+  if (data.rumination) addRow("RUMINATION", "YES");
+}
+
+function renderReplyOptions(data) {
+  const wrap = document.getElementById("reply-options");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!data) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  const mk = (label, fn) => {
+    const b = document.createElement("button");
+    b.className = "reply-chip";
+    b.textContent = label;
+    b.onclick = fn;
+    wrap.appendChild(b);
+  };
+  mk("Explain more", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = `Explain that more clearly: ${data.text?.slice(0,80) || ""}`; inEl.focus(); }
+  });
+  mk("Shorter", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = "Make it shorter."; inEl.focus(); }
+  });
+  mk("Facts only", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = "Answer with only [FACT]-supported points."; inEl.focus(); }
+  });
+  mk("Show basis", () => {
+    const sb = document.getElementById("basis-sidebar");
+    if (sb) sb.hidden = false;
+  });
+  mk("Give example", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = "Give a concrete example."; inEl.focus(); }
+  });
+  mk("Challenge this", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = "Challenge this answer - show the strongest case against it."; inEl.focus(); }
+  });
+  mk("In Urdu", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = inEl.value || "Reply in Urdu."; inEl.focus(); }
+  });
+  mk("In English", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = inEl.value || "Reply in English."; inEl.focus(); }
+  });
+  mk("Different angle", () => {
+    const inEl = document.getElementById("input");
+    if (inEl) { inEl.value = "Give a different angle on this."; inEl.focus(); }
+  });
+}
 
 // Apply the cached theme before first paint to avoid a flash of dark on light.
 if (localStorage.getItem("atif-assistant.theme") === "light") {
@@ -166,6 +299,9 @@ async function ask(question, opts = {}) {
     const data = await res.json();
     removeTyping();
     addBot(data);
+    lastBasis = data;
+    renderBasis(data);
+    renderReplyOptions(data);
     if (!opts.suppressSpeak && data.text && (settings.speak === "on" || spokeQuestion)) {
       speak(data.text, { lang: data.language });
     }
@@ -187,6 +323,9 @@ async function ask(question, opts = {}) {
       ? "Malformed response from server."
       : String(e.message || e);
     addBot({ text: `Request failed: ${detail}`, warnings: [] });
+    lastBasis = null;
+    renderBasis(null);
+    renderReplyOptions(null);
     return null;
   } finally {
     sendBtn.disabled = false;
