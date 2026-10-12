@@ -1,0 +1,8 @@
+{
+  "dirs_found": [
+    {"path": "~/Documents/Default Project/jarvis", "repo": "matif157/jarvis (github)", "note": "minimal scaffold"},
+    {"path": "~/Projects/atif-assistant/docs/jarvis", "note": "current planning docs"},
+    {"path": "~/Projects/atif-assistant", "note": "main evolving Atif Assistant system"}
+  ],
+  "note": "Only two actual jarvis code dirs found - minimal scaffold + atif-assistant evolution"
+}
