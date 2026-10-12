@@ -649,11 +649,20 @@ def approve_learned(fact_id: int) -> int:
     return fid
 
 
-def reject_learned(fact_id: int) -> None:
+def delete_learned(learned_id: int) -> bool:
     conn = connect()
-    conn.execute("UPDATE learned SET status='rejected' WHERE id=?", (fact_id,))
-    conn.execute("DELETE FROM memory_fts WHERE kind='learned' AND ref_id=?", (fact_id,))
+    cur = conn.execute("DELETE FROM learned WHERE id=?", (learned_id,))
+    conn.execute("DELETE FROM memory_fts WHERE kind='learned' AND ref_id=?", (learned_id,))
     conn.commit()
+    return cur.rowcount > 0
+
+
+def reject_learned(learned_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("UPDATE learned SET status='rejected' WHERE id=?", (learned_id,))
+    conn.execute("DELETE FROM memory_fts WHERE kind='learned' AND ref_id=?", (learned_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def add_episode(
@@ -1748,7 +1757,96 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
             continue
         if get_setting(str(key)) is not None:
             continue
-        set_setting(str(key), str(value))
-        added["settings"] += 1
+def delete_fact(fact_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
+    conn.execute("DELETE FROM memory_fts WHERE kind='fact' AND ref_id=?", (fact_id,))
+    conn.execute("DELETE FROM claims WHERE fact_id=?", (fact_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
-    return added
+
+def update_fact(fact_id: int, text: str | None = None, source: str | None = None,
+                confidence: float | None = None, evidence: int | None = None,
+                status: str | None = None) -> bool:
+    conn = connect()
+    fields = []
+    params = []
+    if text is not None:
+        fields.append("text=?"); params.append(text)
+    if source is not None:
+        fields.append("source=?"); params.append(source)
+    if confidence is not None:
+        fields.append("confidence=?"); params.append(confidence)
+    if evidence is not None:
+        fields.append("evidence=?"); params.append(evidence)
+    if status is not None:
+        fields.append("status=?"); params.append(status)
+    if not fields: return False
+    params.append(fact_id)
+    cur = conn.execute(f"UPDATE facts SET {', '.join(fields)}, updated_at=? WHERE id=?", (*params, now()))
+    conn.commit()
+    if text is not None:
+        conn.execute("DELETE FROM memory_fts WHERE kind='fact' AND ref_id=?", (fact_id,))
+        _fts_index("fact", fact_id, text[:80], text)
+        conn.execute("DELETE FROM claims WHERE fact_id=?", (fact_id,))
+        _index_claim(fact_id, text)
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_episode(ep_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM episodes WHERE id=?", (ep_id,))
+    conn.execute("DELETE FROM memory_fts WHERE kind='episode' AND ref_id=?", (ep_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_episode(ep_id: int, title: str | None = None, summary: str | None = None,
+                   occurred_at: str | None = None, source: str | None = None) -> bool:
+    conn = connect()
+    fields = []
+    params = []
+    if title is not None:
+        fields.append("title=?"); params.append(title)
+    if summary is not None:
+        fields.append("summary=?"); params.append(summary)
+    if occurred_at is not None:
+        fields.append("occurred_at=?"); params.append(occurred_at)
+    if source is not None:
+        fields.append("source=?"); params.append(source)
+    if not fields: return False
+    params.append(ep_id)
+    cur = conn.execute(f"UPDATE episodes SET {', '.join(fields)} WHERE id=?", (*params,))
+    conn.commit()
+    if title is not None or summary is not None:
+        full = " ".join(filter(None, [title or "", summary or ""]))
+        conn.execute("DELETE FROM memory_fts WHERE kind='episode' AND ref_id=?", (ep_id,))
+        _fts_index("episode", ep_id, (title or full)[:80], full)
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def update_rule(rule_id: int, text: str | None = None, code: str | None = None,
+                source: str | None = None, approved: bool | None = None) -> bool:
+    conn = connect()
+    fields = []
+    params = []
+    if text is not None:
+        fields.append("text=?"); params.append(text)
+    if code is not None:
+        fields.append("code=?"); params.append(code)
+    if source is not None:
+        fields.append("source=?"); params.append(source)
+    if approved is not None:
+        fields.append("approved=?"); params.append(int(approved))
+    if not fields: return False
+    params.append(rule_id)
+    cur = conn.execute(f"UPDATE rules SET {', '.join(fields)} WHERE id=?", (*params,))
+    conn.commit()
+    if text is not None or code is not None:
+        conn.execute("DELETE FROM memory_fts WHERE kind='rule' AND ref_id=?", (rule_id,))
+        _fts_index("rule", rule_id, code or "rule", text or "")
+        conn.commit()
+    return cur.rowcount > 0
