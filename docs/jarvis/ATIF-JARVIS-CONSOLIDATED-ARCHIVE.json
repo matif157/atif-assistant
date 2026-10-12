@@ -1,0 +1,19 @@
+{
+  "created_at": "2026-10-13T01:13:32.325082",
+  "files_in_github_docs_jarvis": [
+    "ATIF-ASSISTANT-FULL-EXPANDED.pdf",
+    "ATIF-ASSISTANT-MASTER-PLAN.pdf",
+    "ATIF-ASSISTANT-VISUAL-FLOW.html",
+    "Areej_WhatsApp_Summary_and_Questions.docx",
+    "JARVIS-ALL-QUESTIONS-DETAILED.md",
+    "JARVIS-ALL-QUESTIONS-INDEX.json",
+    "JARVIS-ASSISTANT-COMPLETE-PLAN.md",
+    "JARVIS-ASSISTANT-FULL-PLAN-2026-10-12.json",
+    "JARVIS-SESSION-FULL.txt",
+    "extract-every-question-from-shared-chatgpt-links.json",
+    "review-shared-chats-for-task-context.json",
+    "review_shared_chats_context.md",
+    "whatsapp-shared-extract.json"
+  ],
+  "note": "All planning data, shared chat extracts, WhatsApp summary included"
+}
