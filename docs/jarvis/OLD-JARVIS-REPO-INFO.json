@@ -1,0 +1,13 @@
+{
+  "found": true,
+  "repo": "matif157/jarvis",
+  "url": "https://github.com/matif157/jarvis",
+  "description": "minimal local-first personal assistant scaffold",
+  "created_at": "2026-10-08T23:25:30Z",
+  "pushed_at": "2026-10-08T23:25:36Z",
+  "commit": "81900e1",
+  "files": [
+    "README.md"
+  ],
+  "note": "This is a minimal scaffold; our current Atif Assistant is the evolved system"
+}
