@@ -1,0 +1,118 @@
+{
+  "generated_at": "2026-10-12T23:15:27.918225",
+  "total": 14,
+  "questions": [
+    {
+      "id": 1,
+      "name": "jarvis-project-vision",
+      "context": "Building Jarvis-like human+AI hybrid local assistant",
+      "question": "Create a local-first Jarvis-style assistant mixing human understanding + AI, emotions, offline-capable",
+      "category": "vision",
+      "importance": "critical"
+    },
+    {
+      "id": 2,
+      "name": "tools-integration",
+      "context": "Need to auto-connect with tools",
+      "question": "Integrate Google Drive, Gmail, WhatsApp, read/update data, manage memory/facts",
+      "category": "connectors",
+      "importance": "critical"
+    },
+    {
+      "id": 3,
+      "name": "smart-glasses",
+      "context": "Glasses with screen/camera/mic",
+      "question": "Find affordable smart glasses for voice+face recognition, spatial awareness, object/material detection",
+      "category": "hardware",
+      "importance": "critical"
+    },
+    {
+      "id": 4,
+      "name": "task-auto-extraction",
+      "context": "Auto-manage tasks from conversations",
+      "question": "Extract tasks from chats (WhatsApp etc), auto-update todos based on context",
+      "category": "tasks",
+      "importance": "critical"
+    },
+    {
+      "id": 5,
+      "name": "data-management",
+      "context": "Handle huge data locally",
+      "question": "How to manage huge data without cloud? Smart offline approach?",
+      "category": "data",
+      "importance": "critical"
+    },
+    {
+      "id": 6,
+      "name": "offline-llm-limits",
+      "context": "Understand offline LLM constraints",
+      "question": "How do offline local LLM agents work? Limited by programming - how to extend?",
+      "category": "ai",
+      "importance": "critical"
+    },
+    {
+      "id": 7,
+      "name": "phased-modular",
+      "context": "Phased approach",
+      "question": "Split into phases sorted by easiness; each phase standalone; missing phase doesn't break system",
+      "category": "architecture",
+      "importance": "critical"
+    },
+    {
+      "id": 8,
+      "name": "human-understanding",
+      "context": "Human+AI hybrid",
+      "question": "Make it human-understanding intelligence mixed with AI, have emotions sometimes",
+      "category": "ai",
+      "importance": "high"
+    },
+    {
+      "id": 9,
+      "name": "piecewise-reconstruction",
+      "context": "Incomplete info handling",
+      "question": "Don't find exact info - search piecewise, merge, infer, complete incomplete data",
+      "category": "reasoning",
+      "importance": "critical"
+    },
+    {
+      "id": 10,
+      "name": "archive-everything",
+      "context": "Preserve all discussion",
+      "question": "Archive all data/questions from this chat - give names, context, save in Downloads and GitHub as DOCX/PDF",
+      "category": "meta",
+      "importance": "critical"
+    },
+    {
+      "id": 11,
+      "name": "spatial-mapping-3d",
+      "context": "Home/objects mapping",
+      "question": "Map home via location+camera, save object shapes/materials, 3D reconstruction later",
+      "category": "spatial",
+      "importance": "high"
+    },
+    {
+      "id": 12,
+      "name": "voice-tone-face-id",
+      "context": "Personal recognition",
+      "question": "Auto-recognize voice tone and face when called by name, save context per person",
+      "category": "perception",
+      "importance": "high"
+    },
+    {
+      "id": 13,
+      "name": "capability-estimation",
+      "context": "Physical reasoning",
+      "question": "Estimate if strength can break object / how to break efficiently",
+      "category": "reasoning",
+      "importance": "medium"
+    },
+    {
+      "id": 14,
+      "name": "planning-output",
+      "context": "Detailed plan",
+      "question": "Create flowchart, tree structure, phases, tools matrix, visuals",
+      "category": "planning",
+      "importance": "critical"
+    }
+  ]
+}
