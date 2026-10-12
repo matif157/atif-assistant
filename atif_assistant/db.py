@@ -1767,7 +1767,7 @@ def delete_fact(fact_id: int) -> bool:
     conn = connect()
     cur = conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
     conn.execute("DELETE FROM memory_fts WHERE kind='fact' AND ref_id=?", (fact_id,))
-    conn.execute("DELETE FROM claims WHERE fact_id=?", (fact_id,))
+    conn.execute("DELETE FROM claims_fts WHERE fact_id=?", (fact_id,))
     conn.commit()
     return cur.rowcount > 0
 
@@ -1790,12 +1790,14 @@ def update_fact(fact_id: int, text: str | None = None, source: str | None = None
         fields.append("status=?"); params.append(status)
     if not fields: return False
     params.append(fact_id)
-    cur = conn.execute(f"UPDATE facts SET {', '.join(fields)}, updated_at=? WHERE id=?", (*params, now()))
+    qparams = list(params[:-1]) + [now(), params[-1]]
+    cur = conn.execute(f"UPDATE facts SET {', '.join(fields)}, updated_at=? WHERE id=?", qparams)
+
     conn.commit()
     if text is not None:
         conn.execute("DELETE FROM memory_fts WHERE kind='fact' AND ref_id=?", (fact_id,))
         _fts_index("fact", fact_id, text[:80], text)
-        conn.execute("DELETE FROM claims WHERE fact_id=?", (fact_id,))
+        conn.execute("DELETE FROM claims_fts WHERE fact_id=?", (fact_id,))
         _index_claim(fact_id, text)
         conn.commit()
     return cur.rowcount > 0
