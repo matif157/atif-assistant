@@ -1757,6 +1757,12 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
             continue
         if get_setting(str(key)) is not None:
             continue
+        set_setting(str(key), str(value))
+        added["settings"] += 1
+
+    return added
+
+
 def delete_fact(fact_id: int) -> bool:
     conn = connect()
     cur = conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
