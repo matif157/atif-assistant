@@ -922,6 +922,12 @@ async function loadSettings() {
     for (const k of Object.keys(settings)) {
       if (saved[k] != null && saved[k] !== "") settings[k] = saved[k];
     }
+    // reply_language is stored in snake_case (it is also a request field), but
+    // the local setting is camelCase. Without this the saved choice is lost on
+    // every reload and /api/ask then clobbers the server default back to "auto".
+    if (saved.reply_language != null && saved.reply_language !== "") {
+      settings.replyLanguage = saved.reply_language;
+    }
   } catch {
     /* defaults are fine */
   }
