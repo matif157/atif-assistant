@@ -148,12 +148,18 @@
   <div id="decisions-body"></div>
 </div>
 
-<div class="sheet" id="upload-sheet" hidden>
+<div class="sheet" id="data-sheet" hidden>
   <div class="sheet-head">
-    <strong>UPLOAD</strong>
-    <button class="ghost" id="close-upload">CLOSE</button>
+    <strong>DATA</strong>
+    <button class="ghost" id="close-data">CLOSE</button>
   </div>
-  <div class="upload-body">
+  <div style="display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <button class="ghost small" id="tab-upload">UPLOAD</button>
+    <button class="ghost small" id="tab-import">IMPORT</button>
+    <button class="ghost small" id="tab-media">LIBRARY</button>
+  </div>
+  <div id="data-upload">
+    <div class="upload-body">
     <label>FILE<input type="file" id="upload-file"></label>
     <label>THIS FILE IS RELATED TO
       <input id="upload-related" placeholder="e.g. my business plan, my CV, gym diet">
