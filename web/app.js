@@ -2371,6 +2371,10 @@ async function handsFreeSubmit(text, speaker) {
   speak(data.text, { force: true, lang: data.language, onEnd: handsFreeResume });
 }
 
+let mediaSelected = new Set();
+let decSelected = new Set();
+let decAll = [];
+
 /* --------------------------------------------------------------- uploads */
 
 const dataSheet = document.getElementById("data-sheet");
