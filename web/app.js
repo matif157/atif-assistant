@@ -841,39 +841,100 @@ dForm.addEventListener("submit", async (e) => {
 /* learned facts sheet */
 const lSheet = document.getElementById("learned-sheet");
 const lBody = document.getElementById("learned-body");
+let learnedSelected = new Set();
+let learnedAll = [];
 
-async function refreshLearned() {
-  let candidates = [];
+function updateLearnedSelCount() {
+  const el = document.getElementById("learned-count");
+  if (el) el.textContent = String(learnedSelected.size);
+}
+
+async function loadLearned(filter) {
+  const f = filter || (document.getElementById("learned-filter")?.value) || "candidate";
   try {
-    ({ candidates } = await (await fetch("/api/learned")).json());
-  } catch {
-    return; // non-critical
-  }
-  if (!candidates?.length) return;
-  lSheet.hidden = false;
+    const res = await fetch("/api/learned");
+    const data = await res.json();
+    learnedAll = data.candidates || [];
+    if (f === "approved") learnedAll = (data.approved || []);
+    else if (f === "rejected") learnedAll = (data.rejected || []);
+    else if (f === "all") learnedAll = [...(data.candidates||[]), ...(data.approved||[]), ...(data.rejected||[])];
+    learnedSelected.clear();
+    updateLearnedSelCount();
+    renderLearned();
+    lSheet.hidden = false;
+  } catch (e) {}
+}
+
+function renderLearned() {
+  const q = (document.getElementById("learned-search")?.value || "").toLowerCase();
+  if (!lBody) return;
   lBody.innerHTML = "";
-  for (const c of candidates) {
+  let items = learnedAll;
+  if (q) items = items.filter(x => (x.text||"").toLowerCase().includes(q) || String(x.id).includes(q));
+  for (const c of items) {
     const row = document.createElement("div");
     row.className = "mrow";
+    const chk = document.createElement("input");
+    chk.type = "checkbox";
+    chk.checked = learnedSelected.has(c.id);
+    chk.addEventListener("change", () => {
+      if (chk.checked) learnedSelected.add(c.id); else learnedSelected.delete(c.id);
+      updateLearnedSelCount();
+    });
     const t = document.createElement("div");
     t.className = "t";
+    t.style.flex = "1";
     t.textContent = c.text;
+    const edit = document.createElement("input");
+    edit.value = c.text;
+    edit.style.display = "none";
     const btns = document.createElement("div");
     btns.className = "m";
+    const bEdit = document.createElement("button");
+    bEdit.className = "ghost small";
+    bEdit.textContent = "EDIT";
+    let editing = false;
+    bEdit.addEventListener("click", async () => {
+      if (!editing) {
+        editing = true;
+        t.style.display = "none";
+        edit.style.display = "block";
+        bEdit.textContent = "SAVE";
+      } else {
+        editing = false;
+        await fetch(`/api/learned/${c.id}`, {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({text: edit.value})});
+        t.textContent = edit.value;
+        t.style.display = "block";
+        edit.style.display = "none";
+        bEdit.textContent = "EDIT";
+      }
+    });
     for (const [label, act] of [["APPROVE", "approve"], ["REJECT", "reject"]]) {
       const b = document.createElement("button");
       b.className = "ghost small";
       b.textContent = label;
       b.addEventListener("click", async () => {
         await fetch(`/api/learned/${c.id}/${act}`, { method: "POST" });
-        row.remove();
-        if (!lBody.childNodes.length) lSheet.hidden = true;
+        await loadLearned();
       });
       btns.appendChild(b);
     }
-    row.append(t, btns);
+    const bDel = document.createElement("button");
+    bDel.className = "ghost small";
+    bDel.textContent = "DEL";
+    bDel.addEventListener("click", async () => {
+      await fetch(`/api/learned/${c.id}`, { method: "DELETE" });
+      await loadLearned();
+    });
+    btns.appendChild(bDel);
+    btns.appendChild(bEdit);
+    row.append(chk, t, edit, btns);
     lBody.appendChild(row);
   }
+}
+
+async function refreshLearned() {
+  await loadLearned();
 }
 
 /* Poll for background-extracted candidates without blocking the reply. */
@@ -886,6 +947,43 @@ async function refreshLearnedIfAny() {
   }
 }
 document.getElementById("close-learned").addEventListener("click", () => (lSheet.hidden = true));
+const lf = document.getElementById("learned-filter");
+if (lf) lf.addEventListener("change", () => loadLearned(lf.value));
+const ls = document.getElementById("learned-search");
+if (ls) ls.addEventListener("input", () => renderLearned());
+const lsa = document.getElementById("learned-select-all");
+if (lsa) lsa.addEventListener("click", () => {
+  for (const it of learnedAll) learnedSelected.add(it.id);
+  updateLearnedSelCount();
+  renderLearned();
+});
+const lsc = document.getElementById("learned-clear");
+if (lsc) lsc.addEventListener("click", () => {
+  learnedSelected.clear();
+  updateLearnedSelCount();
+  renderLearned();
+});
+const lap = document.getElementById("learned-approve");
+if (lap) lap.addEventListener("click", async () => {
+  if (!learnedSelected.size) return;
+  await fetch("/api/learned/bulk", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({action:"approve", ids:Array.from(learnedSelected)})});
+  await loadLearned();
+});
+const lrj = document.getElementById("learned-reject");
+if (lrj) lrj.addEventListener("click", async () => {
+  if (!learnedSelected.size) return;
+  await fetch("/api/learned/bulk", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({action:"reject", ids:Array.from(learnedSelected)})});
+  await loadLearned();
+});
+const ldel = document.getElementById("learned-delete");
+if (ldel) ldel.addEventListener("click", async () => {
+  if (!learnedSelected.size) return;
+  if (!confirm("Delete selected learned?")) return;
+  await fetch("/api/learned/bulk", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({action:"delete", ids:Array.from(learnedSelected)})});
+  await loadLearned();
+});
+const lrf = document.getElementById("learned-refresh");
+if (lrf) lrf.addEventListener("click", () => loadLearned());
 
 /* WhatsApp import (propose-then-approve) */
 let waPreviewItems = [];
