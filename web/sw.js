@@ -1,7 +1,7 @@
-const CACHE = "atif-assistant-v28";
+const CACHE = "atif-assistant-v29";
 // Shell only. App JS/CSS must never be served stale, or fixes appear not to
 // work. The index is network-first so updates land immediately.
-const SHELL = ["/", "/static/style.css", "/static/icon.svg"];
+const SHELL = ["/", "/static/style.css", "/static/app.js", "/static/icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
