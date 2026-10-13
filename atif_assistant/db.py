@@ -1902,3 +1902,68 @@ def update_rule(rule_id: int, text: str | None = None, code: str | None = None,
         _fts_index("rule", rule_id, code or "rule", text or "")
         conn.commit()
     return cur.rowcount > 0
+
+
+def update_learned(learned_id: int, text: str | None = None, subject: str | None = None,
+                   kind: str | None = None, source: str | None = None,
+                   confidence: float | None = None, status: str | None = None) -> bool:
+    conn = connect()
+    fields = []
+    params = []
+    if text is not None:
+        fields.append("text=?"); params.append(text.strip() if text else "")
+    if subject is not None:
+        fields.append("subject=?"); params.append((subject or "").strip())
+    if kind is not None:
+        fields.append("kind=?"); params.append(kind)
+    if source is not None:
+        fields.append("source=?"); params.append(source)
+    if confidence is not None:
+        c = float(confidence)
+        if c < 0.0: c = 0.0
+        if c > 1.0: c = 1.0
+        fields.append("confidence=?"); params.append(c)
+    if status is not None and status in ("candidate", "approved", "rejected"):
+        fields.append("status=?"); params.append(status)
+    if not fields:
+        return False
+    params.append(learned_id)
+    cur = conn.execute(f"UPDATE learned SET {', '.join(fields)} WHERE id=?", (*params,))
+    conn.commit()
+    if text is not None:
+        conn.execute("DELETE FROM memory_fts WHERE kind='learned' AND ref_id=?", (learned_id,))
+        _fts_index("learned", learned_id, (text or "")[:80], text or "")
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def update_decision(decision_id: int, topic: str | None = None, decision: str | None = None,
+                    prediction: str | None = None, confidence: float | None = None,
+                    review_date: str | None = None, actual_outcome: str | None = None,
+                    resolved_at: str | None = None) -> bool:
+    conn = connect()
+    fields = []
+    params = []
+    if topic is not None:
+        fields.append("topic=?"); params.append((topic or "").strip())
+    if decision is not None:
+        fields.append("decision=?"); params.append((decision or "").strip())
+    if prediction is not None:
+        fields.append("prediction=?"); params.append((prediction or "").strip())
+    if confidence is not None:
+        c = float(confidence)
+        if c < 0.0: c = 0.0
+        if c > 1.0: c = 1.0
+        fields.append("confidence=?"); params.append(c)
+    if review_date is not None:
+        fields.append("review_date=?"); params.append(review_date or None)
+    if actual_outcome is not None:
+        fields.append("actual_outcome=?"); params.append((actual_outcome or "").strip())
+    if resolved_at is not None:
+        fields.append("resolved_at=?"); params.append(resolved_at or None)
+    if not fields:
+        return False
+    params.append(decision_id)
+    cur = conn.execute(f"UPDATE decisions SET {', '.join(fields)} WHERE id=?", (*params,))
+    conn.commit()
+    return cur.rowcount > 0
