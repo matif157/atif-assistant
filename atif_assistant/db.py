@@ -562,7 +562,9 @@ def find_contradictions(limit: int = 5) -> list[dict[str, Any]]:
                         {
                             "subject": subject,
                             "a": texts.get(fa),
+                            "a_id": fa,
                             "b": texts.get(fb),
+                            "b_id": fb,
                         }
                     )
     return out[:limit]

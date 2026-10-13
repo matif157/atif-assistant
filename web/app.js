@@ -496,8 +496,12 @@ memq.addEventListener("input", () => {
 const iSheet = document.getElementById("insights-sheet");
 const iBody = document.getElementById("insights-body");
 
-document.getElementById("btn-insights").addEventListener("click", async () => {
+document.getElementById("btn-insights").addEventListener("click", () => {
   iSheet.hidden = false;
+  loadInsights();
+});
+
+async function loadInsights() {
   iBody.textContent = "loading...";
   try {
     const d = await (await fetch("/api/insights")).json();
@@ -529,15 +533,41 @@ document.getElementById("btn-insights").addEventListener("click", async () => {
     if (d.contradictions?.length) {
       const h = document.createElement("div");
       h.className = "ihead";
-      h.textContent = "CONFLICTING MEMORY";
+      h.textContent = "CONFLICTING MEMORY - PICK THE ONE THAT HOLDS";
       iBody.appendChild(h);
       for (const c of d.contradictions) {
         const r = document.createElement("div");
         r.className = "mrow";
-        const t = document.createElement("div");
-        t.className = "t";
-        t.textContent = `${c.subject}: "${c.a}" vs "${c.b}"`;
-        r.appendChild(t);
+        const k = document.createElement("div");
+        k.className = "k";
+        k.textContent = c.subject || "claim";
+        r.appendChild(k);
+        // Two claims that cannot both be true. There is no verdict here; the
+        // app only offers a way to settle it. "KEEP THIS" deletes the other
+        // fact, so the surviving memory is the one the user actually trusts.
+        for (const side of ["a", "b"]) {
+          const other = side === "a" ? "b" : "a";
+          const line = document.createElement("div");
+          line.className = "t";
+          line.textContent = c[side];
+          const keep = document.createElement("button");
+          keep.className = "ghost small";
+          keep.textContent = "KEEP THIS";
+          keep.style.marginLeft = "8px";
+          keep.addEventListener("click", async () => {
+            const otherId = c[`${other}_id`];
+            if (otherId == null) return;
+            if (!confirm(`Keep "${c[side]}" and forget "${c[other]}"?`)) return;
+            keep.disabled = true;
+            const res = await fetch(`/api/facts/${otherId}`, { method: "DELETE" });
+            if (res.ok) loadInsights();
+            else keep.textContent = "FAILED";
+          });
+          if (c[`${other}_id`] != null && c[`${side}_id`] != null) {
+            line.appendChild(keep);
+          }
+          r.appendChild(line);
+        }
         iBody.appendChild(r);
       }
     }
@@ -546,7 +576,7 @@ document.getElementById("btn-insights").addEventListener("click", async () => {
   } catch {
     iBody.textContent = "Could not load insights.";
   }
-});
+}
 document.getElementById("close-insights").addEventListener("click", () => (iSheet.hidden = true));
 
 function sectionHead(text) {

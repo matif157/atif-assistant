@@ -253,12 +253,16 @@ def test_contradictions() -> None:
         db.use_test_db(Path(tmp) / "c.db")
         db.init_db()
 
-        db.add_fact("My sleep schedule is consistent.", source="test", confidence=0.8)
-        db.add_fact("My sleep schedule is not consistent at all.", source="test", confidence=0.8)
+        fa = db.add_fact("My sleep schedule is consistent.", source="test", confidence=0.8)
+        fb = db.add_fact("My sleep schedule is not consistent at all.", source="test", confidence=0.8)
         found = db.find_contradictions()
         check("negated same-subject claims are flagged", len(found) >= 1)
         check("subject is reported", bool(found and found[0]["subject"]))
         check("both sides are reported", bool(found and found[0]["a"] and found[0]["b"]))
+        check(
+            "each side carries the fact id so it can be settled",
+            found and {found[0]["a_id"], found[0]["b_id"]} == {fa, fb},
+        )
 
         # Two consistent facts must not be flagged.
         db.add_fact("My job title is engineer.", source="test")
@@ -1312,6 +1316,24 @@ def test_misc_endpoints() -> None:
             "deleting a missing decision is a 404",
             client.delete("/api/decisions/999999").status_code == 404,
         )
+
+        # --- insights: a contradiction is surfaced with both fact ids, and
+        # keeping one side (deleting the other) settles it.
+        db.add_fact("My commute is long", source="test")
+        db.add_fact("My commute is not long", source="test")
+        con = client.get("/api/insights").json()["contradictions"]
+        mine = next((c for c in con if c["subject"] == "commute"), None)
+        check(
+            "a contradiction is surfaced with both fact ids",
+            bool(mine and mine.get("a_id") and mine.get("b_id")),
+        )
+        if mine:
+            client.delete(f"/api/facts/{mine['a_id']}")
+            after = client.get("/api/insights").json()["contradictions"]
+            check(
+                "keeping one side settles the contradiction",
+                not any(c["subject"] == "commute" for c in after),
+            )
 
         # --- learned gating: candidates surface; approve promotes; reject drops.
         lid = db.add_learned("My sister lives in Oslo", kind="durable", source="test")
