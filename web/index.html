@@ -83,8 +83,25 @@
 
 <div class="sheet" id="learned-sheet" hidden>
   <div class="sheet-head">
-    <strong>LEARNED - NEEDS YOUR APPROVAL</strong>
+    <strong>LEARNED</strong>
     <button class="ghost" id="close-learned">CLOSE</button>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <select id="learned-filter">
+      <option value="candidate" selected>Candidate</option>
+      <option value="all">All</option>
+      <option value="approved">Approved</option>
+      <option value="rejected">Rejected</option>
+    </select>
+    <input id="learned-search" placeholder="Search learned..." style="flex:1;min-width:140px">
+    <button class="ghost" id="learned-select-all">Select all</button>
+    <button class="ghost" id="learned-clear">Clear</button>
+    <span style="opacity:.7">Selected:</span>
+    <span id="learned-count">0</span>
+    <button class="ghost" id="learned-approve">Approve</button>
+    <button class="ghost" id="learned-reject">Reject</button>
+    <button class="ghost" id="learned-delete">Delete</button>
+    <button class="ghost" id="learned-refresh">Refresh</button>
   </div>
   <div id="learned-body"></div>
 </div>
