@@ -1153,13 +1153,12 @@ async function stageWhatsApp() {
 }
 
 document.getElementById("btn-import")?.addEventListener("click", () => {
-  const sheet = document.getElementById("import-sheet");
-  if (sheet) sheet.hidden = false;
-  loadWhatsAppStatus();
+  const dataSheet = document.getElementById("data-sheet");
+  if (dataSheet) { dataSheet.hidden = false; showDataTab("import"); loadWhatsAppStatus(); }
 });
 document.getElementById("close-import")?.addEventListener("click", () => {
-  const sheet = document.getElementById("import-sheet");
-  if (sheet) sheet.hidden = true;
+  const dataSheet = document.getElementById("data-sheet");
+  if (dataSheet) dataSheet.hidden = true;
 });
 document.getElementById("wa-preview")?.addEventListener("click", previewWhatsApp);
 document.getElementById("wa-stage")?.addEventListener("click", stageWhatsApp);
@@ -2374,13 +2373,32 @@ async function handsFreeSubmit(text, speaker) {
 
 /* --------------------------------------------------------------- uploads */
 
-const uSheet = document.getElementById("upload-sheet");
+const dataSheet = document.getElementById("data-sheet");
+const dataUpload = document.getElementById("data-upload");
+const dataImport = document.getElementById("data-import");
+const dataMedia = document.getElementById("data-media");
 
-document.getElementById("btn-upload").addEventListener("click", () => {
-  uSheet.hidden = false;
+function showDataTab(tab) {
+  if (dataUpload) dataUpload.hidden = (tab !== "upload");
+  if (dataImport) dataImport.hidden = (tab !== "import");
+  if (dataMedia) dataMedia.hidden = (tab !== "media");
+}
+
+document.getElementById("btn-data")?.addEventListener("click", () => {
+  if (dataSheet) { dataSheet.hidden = false; showDataTab("upload"); }
 });
-document.getElementById("close-upload").addEventListener("click", () => {
-  uSheet.hidden = true;
+document.getElementById("close-data")?.addEventListener("click", () => {
+  if (dataSheet) dataSheet.hidden = true;
+});
+document.getElementById("tab-upload")?.addEventListener("click", () => showDataTab("upload"));
+document.getElementById("tab-import")?.addEventListener("click", () => { showDataTab("import"); loadWhatsAppStatus(); });
+document.getElementById("tab-media")?.addEventListener("click", () => { showDataTab("media"); loadMediaLibrary(); });
+
+document.getElementById("btn-upload")?.addEventListener("click", () => {
+  if (dataSheet) { dataSheet.hidden = false; showDataTab("upload"); }
+});
+document.getElementById("close-upload")?.addEventListener("click", () => {
+  // no-op in new flow
 });
 
 function fileToBase64(file) {
