@@ -381,6 +381,16 @@ document.getElementById("btn-memory").addEventListener("click", async () => {
 });
 document.getElementById("close-memory").addEventListener("click", () => (sheet.hidden = true));
 
+// The right REST endpoint for a memory kind, or null if the kind is read-only.
+function memoryEndpoint(kind) {
+  const k = (kind || "").toLowerCase();
+  if (k === "fact") return "/api/facts";
+  if (k === "episode") return "/api/episodes";
+  if (k === "rule") return "/api/rules";
+  if (k === "learned") return "/api/learned";
+  return null;
+}
+
 async function searchMemory(q) {
   const r = await fetch(`/api/memory?q=${encodeURIComponent(q)}&limit=25`);
   const { results } = await r.json();
@@ -389,21 +399,91 @@ async function searchMemory(q) {
     memResults.innerHTML = `<div class="mrow"><div class="t">No matching memory.</div></div>`;
     return;
   }
-  for (const m of results) {
-    const row = document.createElement("div");
-    row.className = "mrow";
-    const k = document.createElement("div");
-    k.className = "k";
-    k.textContent = (m.kind || "fact").toUpperCase() + (m.confidence != null ? ` · ${Number(m.confidence).toFixed(2)}` : "");
-    const t = document.createElement("div");
-    t.className = "t";
-    t.textContent = m.text || m.title || m.summary || "";
-    const meta = document.createElement("div");
-    meta.className = "m";
-    meta.textContent = m.source || "";
-    row.append(k, t, meta);
-    memResults.appendChild(row);
-  }
+  for (const m of results) memResults.appendChild(memoryRow(m));
+}
+
+// One editable memory card. Facts/episodes/rules/learned can be edited and
+// deleted in place; the change goes straight to the same API the assistant
+// reads from, so the next reply reflects it.
+function memoryRow(m) {
+  const row = document.createElement("div");
+  row.className = "mrow";
+
+  const k = document.createElement("div");
+  k.className = "k";
+  k.textContent = (m.kind || "fact").toUpperCase() + (m.confidence != null ? ` · ${Number(m.confidence).toFixed(2)}` : "");
+  const t = document.createElement("div");
+  t.className = "t";
+  t.textContent = m.text || m.title || m.summary || "";
+  const meta = document.createElement("div");
+  meta.className = "m";
+  meta.textContent = m.source || "";
+  row.append(k, t, meta);
+
+  const endpoint = memoryEndpoint(m.kind);
+  if (!endpoint) return row;
+
+  const actions = document.createElement("div");
+  actions.className = "m";
+
+  const edit = document.createElement("button");
+  edit.className = "ghost small";
+  edit.textContent = "EDIT";
+  edit.addEventListener("click", () => {
+    if (row.querySelector("textarea")) return;
+    const box = document.createElement("textarea");
+    box.className = "mem-edit";
+    box.value = m.text || m.title || m.summary || "";
+    t.replaceWith(box);
+    box.focus();
+
+    const save = document.createElement("button");
+    save.className = "ghost small";
+    save.textContent = "SAVE";
+    save.addEventListener("click", async () => {
+      const field = m.kind === "episode" ? "title" : "text";
+      const body = {};
+      body[field] = box.value;
+      const res = await fetch(`${endpoint}/${m.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        m.text = box.value;
+        m.title = box.value;
+        t.textContent = box.value;
+        box.replaceWith(t);
+        save.remove();
+        cancel.remove();
+      } else {
+        meta.textContent = "could not save";
+      }
+    });
+    const cancel = document.createElement("button");
+    cancel.className = "ghost small";
+    cancel.textContent = "CANCEL";
+    cancel.addEventListener("click", () => {
+      box.replaceWith(t);
+      save.remove();
+      cancel.remove();
+    });
+    actions.append(save, cancel);
+  });
+  actions.appendChild(edit);
+
+  const del = document.createElement("button");
+  del.className = "ghost small";
+  del.textContent = "DELETE";
+  del.addEventListener("click", async () => {
+    const res = await fetch(`${endpoint}/${m.id}`, { method: "DELETE" });
+    if (res.ok) row.remove();
+    else meta.textContent = "could not delete";
+  });
+  actions.appendChild(del);
+
+  row.appendChild(actions);
+  return row;
 }
 
 let memTimer;
@@ -640,6 +720,22 @@ function decisionCard(d, due) {
   });
   wrap.append(input, btn);
   row.appendChild(wrap);
+
+  const del = document.createElement("button");
+  del.className = "ghost small";
+  del.textContent = "DELETE";
+  del.addEventListener("click", async () => {
+    if (!confirm(`Delete decision "${d.topic || "(untitled)"}"?`)) return;
+    del.disabled = true;
+    const res = await fetch(`/api/decisions/${d.id}`, { method: "DELETE" });
+    if (!res.ok) {
+      del.disabled = false;
+      del.textContent = "FAILED";
+      return;
+    }
+    row.remove();
+  });
+  row.appendChild(del);
   return row;
 }
 
@@ -2137,6 +2233,47 @@ function ruleCard(r) {
     });
     actions.appendChild(ap);
   }
+  const ed = document.createElement("button");
+  ed.className = "ghost small";
+  ed.textContent = "EDIT";
+  ed.addEventListener("click", () => {
+    if (row.querySelector("textarea")) return;
+    const box = document.createElement("textarea");
+    box.className = "mem-edit";
+    box.value = r.text || "";
+    t.replaceWith(box);
+    box.focus();
+    const save = document.createElement("button");
+    save.className = "ghost small";
+    save.textContent = "SAVE";
+    save.addEventListener("click", async () => {
+      const res = await fetch(`/api/rules/${r.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: box.value }),
+      });
+      if (res.ok) {
+        r.text = box.value;
+        t.textContent = box.value;
+        box.replaceWith(t);
+        save.remove();
+        cancel.remove();
+      } else {
+        d.textContent = "could not save";
+      }
+    });
+    const cancel = document.createElement("button");
+    cancel.className = "ghost small";
+    cancel.textContent = "CANCEL";
+    cancel.addEventListener("click", () => {
+      box.replaceWith(t);
+      save.remove();
+      cancel.remove();
+    });
+    actions.append(save, cancel);
+  });
+  actions.appendChild(ed);
+
   const rm = document.createElement("button");
   rm.className = "ghost small";
   rm.textContent = "REMOVE";

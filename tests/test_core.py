@@ -1293,6 +1293,21 @@ def test_misc_endpoints() -> None:
             "resolving a missing decision is a 404",
             client.post("/api/decisions/999999/resolve", json={"actual_outcome": "x"}).status_code == 404,
         )
+        did2 = client.post(
+            "/api/decisions", json={"topic": "delete me", "decision": "gone"}
+        ).json()["id"]
+        check(
+            "deleting a decision is ok",
+            client.delete(f"/api/decisions/{did2}").json().get("ok") is True,
+        )
+        check(
+            "deleted decision leaves the ledger",
+            not any(d["id"] == did2 for d in client.get("/api/decisions").json()["open"]),
+        )
+        check(
+            "deleting a missing decision is a 404",
+            client.delete("/api/decisions/999999").status_code == 404,
+        )
 
         # --- learned gating: candidates surface; approve promotes; reject drops.
         lid = db.add_learned("My sister lives in Oslo", kind="durable", source="test")

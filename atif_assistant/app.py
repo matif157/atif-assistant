@@ -454,6 +454,13 @@ def resolve_decision(decision_id: int, payload: ResolveIn) -> JSONResponse:
     return JSONResponse({"ok": True, "id": decision_id})
 
 
+@app.delete("/api/decisions/{decision_id}")
+def delete_decision(decision_id: int) -> JSONResponse:
+    if not db.delete_decision(decision_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": decision_id})
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")

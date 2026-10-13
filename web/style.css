@@ -228,6 +228,8 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .mrow .k { font-size: 10px; color: var(--acc); letter-spacing: .08em; margin-bottom: 4px; }
 .mrow .t { font-size: 13px; }
 .mrow .m { font-size: 10px; color: var(--dim); margin-top: 5px; }
+.mrow .m button { margin-right: 6px; }
+.mem-edit { width: 100%; min-height: 60px; margin-top: 4px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; font-size: 13px; resize: vertical; }
 .mrow.due { border-color: rgba(251,191,36,.45); }
 .mrow.due .k { color: var(--warn); }
 

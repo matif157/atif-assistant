@@ -874,6 +874,13 @@ def resolve_decision(decision_id: int, actual_outcome: str) -> bool:
     return True
 
 
+def delete_decision(decision_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM decisions WHERE id=?", (decision_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def save_message(
     session: str,
     role: str,
