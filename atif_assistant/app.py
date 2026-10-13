@@ -915,6 +915,114 @@ def list_social_posts(limit: int = 20):
     return {"posts": [dict(r) for r in rows]}
 
 
+@app.get("/api/facts")
+def list_facts(limit: int = 100) -> dict:
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT * FROM facts ORDER BY confidence DESC, id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return {"facts": [dict(r) for r in rows]}
+
+
+@app.post("/api/facts")
+def create_fact(payload: dict) -> JSONResponse:
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "text is required"}, status_code=400)
+    try:
+        confidence = float(payload.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "confidence must be a number"}, status_code=400)
+    fid = db.add_fact(text, confidence=confidence, source=payload.get("source") or "manual")
+    return JSONResponse({"ok": True, "id": fid}, status_code=201)
+
+
+@app.put("/api/facts/{fact_id}")
+def update_fact(fact_id: int, payload: dict) -> JSONResponse:
+    def _float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    ok = db.update_fact(
+        fact_id,
+        text=payload.get("text"),
+        source=payload.get("source"),
+        confidence=_float(payload.get("confidence")) if payload.get("confidence") is not None else None,
+        evidence=_int(payload.get("evidence")) if payload.get("evidence") is not None else None,
+        status=payload.get("status"),
+    )
+    if not ok:
+        return JSONResponse({"error": "not found or no changes"}, status_code=404)
+    return JSONResponse({"ok": True, "id": fact_id})
+
+
+@app.delete("/api/facts/{fact_id}")
+def delete_fact(fact_id: int) -> JSONResponse:
+    if not db.delete_fact(fact_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": fact_id})
+
+
+@app.get("/api/episodes")
+def list_episodes(limit: int = 100) -> dict:
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT * FROM episodes ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return {"episodes": [dict(r) for r in rows]}
+
+
+@app.put("/api/episodes/{episode_id}")
+def update_episode(episode_id: int, payload: dict) -> JSONResponse:
+    ok = db.update_episode(
+        episode_id,
+        title=payload.get("title"),
+        summary=payload.get("summary"),
+        occurred_at=payload.get("occurred_at"),
+        source=payload.get("source"),
+    )
+    if not ok:
+        return JSONResponse({"error": "not found or no changes"}, status_code=404)
+    return JSONResponse({"ok": True, "id": episode_id})
+
+
+@app.delete("/api/episodes/{episode_id}")
+def delete_episode(episode_id: int) -> JSONResponse:
+    if not db.delete_episode(episode_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": episode_id})
+
+
+@app.put("/api/rules/{rule_id}")
+def update_rule(rule_id: int, payload: dict) -> JSONResponse:
+    approved = payload.get("approved")
+    ok = db.update_rule(
+        rule_id,
+        text=payload.get("text"),
+        code=payload.get("code"),
+        source=payload.get("source"),
+        approved=bool(approved) if approved is not None else None,
+    )
+    if not ok:
+        return JSONResponse({"error": "not found or no changes"}, status_code=404)
+    return JSONResponse({"ok": True, "id": rule_id})
+
+
+@app.delete("/api/learned/{learned_id}")
+def delete_learned(learned_id: int) -> JSONResponse:
+    if not db.delete_learned(learned_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "id": learned_id})
+
+
 # Mounted last so the API routes above are matched before the static handler.
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

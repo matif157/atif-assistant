@@ -2132,6 +2132,106 @@ def test_ollama() -> None:
     db.reset_db_path()
 
 
+def test_crud() -> None:
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\ncrud")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db.use_test_db(base / "crud.db")
+        db.init_db()
+        client = TestClient(app)
+
+        # --- facts: create, list, update, delete.
+        created = client.post("/api/facts", json={"text": "I work mornings", "confidence": 0.7})
+        check("a fact can be created", created.status_code == 201 and created.json()["ok"])
+        fid = created.json()["id"]
+        listed = client.get("/api/facts").json()["facts"]
+        check("the created fact is listed", any(f["id"] == fid for f in listed))
+        check(
+            "blank fact text is rejected",
+            client.post("/api/facts", json={"text": "   "}).status_code == 400,
+        )
+        check(
+            "non-numeric confidence is rejected",
+            client.post("/api/facts", json={"text": "x", "confidence": "abc"}).status_code == 400,
+        )
+        upd = client.put(f"/api/facts/{fid}", json={"text": "I work evenings", "status": "active"})
+        check("a fact can be updated", upd.status_code == 200 and upd.json()["ok"])
+        check(
+            "the update is visible",
+            any(f["id"] == fid and "evenings" in f["text"] for f in client.get("/api/facts").json()["facts"]),
+        )
+        check(
+            "updating a missing fact is a 404",
+            client.put("/api/facts/999999", json={"text": "x"}).status_code == 404,
+        )
+        check(
+            "updating with no fields is a 404",
+            client.put(f"/api/facts/{fid}", json={}).status_code == 404,
+        )
+        check("a fact can be deleted", client.delete(f"/api/facts/{fid}").status_code == 200)
+        check(
+            "the deleted fact is gone",
+            not any(f["id"] == fid for f in client.get("/api/facts").json()["facts"]),
+        )
+        check(
+            "deleting a missing fact is a 404",
+            client.delete(f"/api/facts/{fid}").status_code == 404,
+        )
+
+        # --- episodes: list, update, delete.
+        eid = db.add_episode("Morning walk", summary="thirty minutes")
+        eps = client.get("/api/episodes").json()["episodes"]
+        check("episodes are listed", any(e["id"] == eid for e in eps))
+        check(
+            "an episode can be updated",
+            client.put(f"/api/episodes/{eid}", json={"title": "Evening walk"}).json()["ok"],
+        )
+        check(
+            "the episode update is visible",
+            any(
+                e["id"] == eid and e["title"] == "Evening walk"
+                for e in client.get("/api/episodes").json()["episodes"]
+            ),
+        )
+        check("an episode can be deleted", client.delete(f"/api/episodes/{eid}").status_code == 200)
+        check(
+            "deleting a missing episode is a 404",
+            client.delete(f"/api/episodes/{eid}").status_code == 404,
+        )
+
+        # --- rules: update (text and approval).
+        rid = db.add_rule("Old rule text", code="R1")
+        check(
+            "a rule can be updated",
+            client.put(f"/api/rules/{rid}", json={"text": "New rule text", "approved": True}).json()["ok"],
+        )
+        rules = client.get("/api/rules").json()["rules"]
+        match = next((r for r in rules if r["id"] == rid), None)
+        check("the rule update is visible", match and match["text"] == "New rule text")
+        check("the rule is now approved", match and int(match["approved"]) == 1)
+        check(
+            "updating a missing rule is a 404",
+            client.put("/api/rules/999999", json={"text": "x"}).status_code == 404,
+        )
+
+        # --- learned: candidates can be deleted or rejected.
+        lid = db.add_learned("My dog is called Rufus", kind="durable", source="test")
+        check(
+            "a learned candidate can be rejected via api",
+            client.post(f"/api/learned/{lid}/reject").json().get("ok") is True,
+        )
+        lid2 = db.add_learned("I grew up in Lahore", kind="durable", source="test")
+        check("a learned candidate can be removed", db.delete_learned(lid2) is True)
+        check("removing it again reports nothing", db.delete_learned(lid2) is False)
+
+        db.reset_db_path()
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -2174,6 +2274,7 @@ def main() -> int:
     test_stt()
     test_voice()
     test_ollama()
+    test_crud()
     test_structure_guard()
 
     if before is not None:
