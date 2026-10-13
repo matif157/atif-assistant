@@ -22,6 +22,7 @@
   <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
   <button class="ghost" id="btn-rules" title="Rules and plans">RULES</button>
   <button class="ghost" id="btn-upload" title="Upload a file">UPLOAD</button>
+  <button class="ghost" id="btn-import" title="Import local data">IMPORT</button>
   <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
   <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
 </header>
@@ -84,6 +85,28 @@
     <button class="ghost" id="close-learned">CLOSE</button>
   </div>
   <div id="learned-body"></div>
+</div>
+
+<div class="sheet" id="import-sheet" hidden>
+  <div class="sheet-head">
+    <strong>IMPORT (local, read-only)</strong>
+    <button class="ghost" id="close-import">CLOSE</button>
+  </div>
+  <div id="wa-status" class="card" style="margin:.5rem 0; padding:.75rem"></div>
+  <div id="wa-chats" style="margin:.5rem 0; max-height:220px; overflow:auto; padding:.25rem; border:1px solid var(--border); border-radius:8px"></div>
+  <div id="wa-controls" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.5rem 0">
+    <label style="display:flex; align-items:center; gap:.25rem"><input type="checkbox" id="wa-fromme"> From me only</label>
+    <button id="wa-preview" class="btn">Preview</button>
+    <span id="wa-preview-meta" class="muted"></span>
+    <button id="wa-selectall" class="btn ghost small">Select all</button>
+    <button id="wa-clear" class="btn ghost small">Clear selection</button>
+  </div>
+  <div id="wa-preview-wrap" style="margin:.5rem 0; max-height:360px; overflow:auto"></div>
+  <div style="margin:.5rem 0">
+    <button id="wa-stage" class="btn primary" style="display:none">Stage selected as candidates</button>
+    <span id="wa-stage-meta" class="muted"></span>
+  </div>
+  <p class="hint">Staged messages become LEARNED candidates for approval. Nothing is auto-promoted to facts.</p>
 </div>
 
 <div class="sheet" id="decisions-sheet" hidden>

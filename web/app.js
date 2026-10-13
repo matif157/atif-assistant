@@ -887,6 +887,199 @@ async function refreshLearnedIfAny() {
 }
 document.getElementById("close-learned").addEventListener("click", () => (lSheet.hidden = true));
 
+/* WhatsApp import (propose-then-approve) */
+let waPreviewItems = [];
+let waSelected = new Set(); // key "msg_id:chat_id"
+
+async function loadWhatsAppStatus() {
+  const statusEl = document.getElementById("wa-status");
+  const chatsEl = document.getElementById("wa-chats");
+  if (!statusEl || !chatsEl) return;
+  statusEl.textContent = "loading...";
+  chatsEl.innerHTML = "";
+  try {
+    const res = await fetch("/api/import/whatsapp/status");
+    const s = await res.json();
+    if (!s.exists) {
+      statusEl.textContent = s.error || "WhatsApp Desktop DB not found in common macOS locations.";
+      chatsEl.innerHTML = "";
+      return;
+    }
+    const sz = s.size ? `(${Math.round(s.size/1024/1024)}MB)` : "";
+    statusEl.textContent = `Found: ${s.path} ${sz}. Chats: ${s.chats?.length || 0}`;
+    for (const c of s.chats || []) {
+      const row = document.createElement("label");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = ".5rem";
+      row.style.margin = ".25rem 0";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.name = "wa-chat";
+      cb.value = c.chat_id;
+      cb.checked = true;
+      const label = document.createElement("span");
+      label.textContent = `${c.chat_name} · ${c.msg_count}`;
+      row.append(cb, label);
+      chatsEl.appendChild(row);
+    }
+  } catch (e) {
+    statusEl.textContent = `Error: ${e.message}`;
+  }
+}
+
+async function previewWhatsApp() {
+  const wrap = document.getElementById("wa-preview-wrap");
+  const meta = document.getElementById("wa-preview-meta");
+  const stageBtn = document.getElementById("wa-stage");
+  if (!wrap || !meta) return;
+  wrap.innerHTML = "";
+  meta.textContent = "loading...";
+  if (stageBtn) stageBtn.style.display = "none";
+  waSelected.clear();
+  waPreviewItems = [];
+  const checks = Array.from(document.querySelectorAll('input[name="wa-chat"]:checked'));
+  const chat_ids = checks.map((x) => parseInt(x.value)).filter((n) => !isNaN(n));
+  const from_me = document.getElementById("wa-fromme")?.checked;
+  const body = {
+    chat_ids: chat_ids.length ? chat_ids : null,
+    from_me: from_me ? true : null,
+    limit: 50,
+    offset: 0,
+  };
+  try {
+    const res = await fetch("/api/import/whatsapp/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.items || !data.items.length) {
+      meta.textContent = "No messages found.";
+      return;
+    }
+    waPreviewItems = data.items;
+    meta.textContent = `Showing ${data.items.length} of ${data.total}`;
+    const table = document.createElement("table");
+    table.style.width = "100%";
+    table.style.fontSize = ".9rem";
+    table.innerHTML = "<thead><tr><th></th><th>Time</th><th>Chat</th><th>Me</th><th>Text</th></tr></thead>";
+    const tbody = document.createElement("tbody");
+    for (const it of data.items) {
+      const tr = document.createElement("tr");
+      const key = it.msg_id + ":" + it.chat_id;
+      const td1 = document.createElement("td");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = true;
+      cb.dataset.key = key;
+      cb.dataset.item = JSON.stringify(it);
+      cb.addEventListener("change", () => {
+        if (cb.checked) waSelected.add(key); else waSelected.delete(key);
+        updateWaStageBtn();
+      });
+      td1.appendChild(cb);
+      const td2 = document.createElement("td");
+      td2.textContent = it.when ? it.when.substring(0, 16) : "—";
+      const td3 = document.createElement("td");
+      td3.textContent = it.chat_name || "";
+      const td4 = document.createElement("td");
+      td4.textContent = it.from_me ? "Y" : "N";
+      const td5 = document.createElement("td");
+      td5.textContent = (it.text || "").length > 120 ? (it.text || "").substring(0, 120) + "…" : (it.text || "");
+      tr.append(td1, td2, td3, td4, td5);
+      tbody.appendChild(tr);
+      waSelected.add(key);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    updateWaStageBtn();
+  } catch (e) {
+    meta.textContent = `Error: ${e.message}`;
+  }
+}
+
+function updateWaStageBtn() {
+  const btn = document.getElementById("wa-stage");
+  if (!btn) return;
+  btn.style.display = waSelected.size > 0 ? "inline-block" : "none";
+  const meta = document.getElementById("wa-stage-meta");
+  if (meta) meta.textContent = waSelected.size ? `${waSelected.size} selected` : "";
+}
+
+async function stageWhatsApp() {
+  if (waSelected.size === 0) {
+    alert("No items selected");
+    return;
+  }
+  const items = [];
+  const checks = Array.from(document.querySelectorAll('#wa-preview-wrap input[type="checkbox"]'));
+  for (const cb of checks) {
+    if (cb.checked && cb.dataset.key) {
+      try {
+        items.push(JSON.parse(cb.dataset.item || "{}"));
+      } catch { /* ignore */ }
+    }
+  }
+  if (items.length === 0) {
+    alert("No items selected");
+    return;
+  }
+  const btn = document.getElementById("wa-stage");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/import/whatsapp/stage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    const data = await res.json();
+    alert(`Staged ${data.staged}, skipped ${data.skipped?.length || 0}`);
+    if (typeof refreshLearnedIfAny === "function") refreshLearnedIfAny();
+    // switch to learned sheet if exists
+    const lSheet = document.getElementById("learned-sheet");
+    if (lSheet) {
+      lSheet.hidden = false;
+      if (typeof refreshLearned === "function") refreshLearned();
+    }
+    const wrap = document.getElementById("wa-preview-wrap");
+    if (wrap) wrap.innerHTML = "";
+    waSelected.clear();
+    if (btn) { btn.style.display = "none"; btn.disabled = false; }
+    const meta = document.getElementById("wa-stage-meta");
+    if (meta) meta.textContent = "";
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+    if (btn) btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-import")?.addEventListener("click", () => {
+  const sheet = document.getElementById("import-sheet");
+  if (sheet) sheet.hidden = false;
+  loadWhatsAppStatus();
+});
+document.getElementById("close-import")?.addEventListener("click", () => {
+  const sheet = document.getElementById("import-sheet");
+  if (sheet) sheet.hidden = true;
+});
+document.getElementById("wa-preview")?.addEventListener("click", previewWhatsApp);
+document.getElementById("wa-stage")?.addEventListener("click", stageWhatsApp);
+document.getElementById("wa-selectall")?.addEventListener("click", () => {
+  document.querySelectorAll('#wa-preview-wrap input[type="checkbox"]').forEach((cb) => {
+    cb.checked = true;
+    if (cb.dataset.key) waSelected.add(cb.dataset.key);
+  });
+  updateWaStageBtn();
+});
+document.getElementById("wa-clear")?.addEventListener("click", () => {
+  document.querySelectorAll('#wa-preview-wrap input[type="checkbox"]').forEach((cb) => {
+    cb.checked = false;
+    if (cb.dataset.key) waSelected.delete(cb.dataset.key);
+  });
+  updateWaStageBtn();
+});
+
 /* ------------------------------------------------------------- settings */
 
 const settings = {

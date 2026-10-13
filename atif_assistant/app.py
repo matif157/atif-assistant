@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from . import db, engine, learn, location, ollama, plan, router, stt, tts, uploads, voice_id
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
+from .importers import whatsapp
 from .llm import (
     invalidate_probe_cache,
     probe_providers,
@@ -411,6 +412,92 @@ def approve(fact_id: int) -> dict:
 def reject(fact_id: int) -> dict:
     db.reject_learned(fact_id)
     return {"ok": True}
+
+
+@app.get("/api/import/whatsapp/status")
+def wa_status() -> JSONResponse:
+    try:
+        s = whatsapp.get_status()
+        return JSONResponse(s)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"exists": False, "chats": [], "error": str(e)})
+
+
+@app.post("/api/import/whatsapp/preview")
+def wa_preview(payload: dict) -> JSONResponse:
+    try:
+        chat_ids = payload.get("chat_ids") if isinstance(payload, dict) else None
+        if chat_ids is not None:
+            if not isinstance(chat_ids, list) or not all(isinstance(x, int) for x in chat_ids):
+                return JSONResponse({"error": "invalid chat_ids"}, status_code=400)
+        from_me = payload.get("from_me") if isinstance(payload, dict) else None
+        if from_me is not None and not isinstance(from_me, bool):
+            from_me = None
+        limit = payload.get("limit", 50) if isinstance(payload, dict) else 50
+        offset = payload.get("offset", 0) if isinstance(payload, dict) else 0
+        date_from = payload.get("date_from") if isinstance(payload, dict) else None
+        date_to = payload.get("date_to") if isinstance(payload, dict) else None
+        try:
+            limit = int(limit)
+            offset = int(offset)
+        except Exception:
+            return JSONResponse({"error": "invalid params"}, status_code=400)
+        res = whatsapp.preview_messages(
+            chat_ids=chat_ids,
+            from_me=from_me,
+            limit=limit,
+            offset=offset,
+            date_from=date_from if isinstance(date_from, str) else None,
+            date_to=date_to if isinstance(date_to, str) else None,
+        )
+        return JSONResponse(res)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
+@app.post("/api/import/whatsapp/stage")
+def wa_stage(payload: dict) -> JSONResponse:
+    try:
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not items:
+            return JSONResponse({"error": "no items"}, status_code=400)
+        staged = 0
+        skipped: list[dict[str, Any]] = []
+        conn = db.connect()
+        # load existing learned whatsapp entries for dedup
+        existing = conn.execute("SELECT id, source FROM learned WHERE kind='whatsapp'").fetchall()
+        for it in items:
+            try:
+                msg_id = int(it.get("msg_id")) if it.get("msg_id") is not None else None
+                chat_id = int(it.get("chat_id")) if it.get("chat_id") is not None else None
+            except Exception:
+                skipped.append({"reason": "invalid ids", "item": it})
+                continue
+            text = str(it.get("text") or "").strip()
+            if not text or msg_id is None or chat_id is None:
+                skipped.append({"reason": "invalid item", "item": {"msg_id": msg_id, "chat_id": chat_id}})
+                continue
+            # dedup
+            is_dup = False
+            for ex in existing:
+                src = ex["source"] or ""
+                if f"msg_id={msg_id}" in src and f"chat_id={chat_id}" in src:
+                    is_dup = True
+                    break
+            if is_dup:
+                skipped.append({"reason": "already staged or exists", "item": {"msg_id": msg_id, "chat_id": chat_id}})
+                continue
+            chat_name = it.get("chat_name") or f"chat-{chat_id}"
+            from_me = bool(it.get("from_me"))
+            when = it.get("when") if isinstance(it.get("when"), str) else ""
+            src = f"whatsapp:desktop|chat_id={chat_id}|chat_name={chat_name}|msg_id={msg_id}|from_me={1 if from_me else 0}|when={when}"
+            db.add_learned(text=text, kind="whatsapp", source=src, confidence=0.7, subject=None)
+            staged += 1
+        return JSONResponse({"staged": staged, "skipped": skipped, "total": len(items)})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
 
 
 @app.get("/api/history/{session}")
