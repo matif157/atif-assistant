@@ -881,6 +881,41 @@ def delete_decision(decision_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def delete_media(media_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM media WHERE id=?", (media_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def media_path(media_id: int) -> str | None:
+    conn = connect()
+    row = conn.execute("SELECT path FROM media WHERE id=?", (media_id,)).fetchone()
+    return row["path"] if row else None
+
+
+def media_path_in_use(path: str) -> bool:
+    conn = connect()
+    row = conn.execute("SELECT 1 FROM media WHERE path=? LIMIT 1", (path,)).fetchone()
+    return row is not None
+
+
+def update_media(media_id: int, tags: str | None = None, kind: str | None = None) -> bool:
+    conn = connect()
+    fields = []
+    params = []
+    if tags is not None:
+        fields.append("tags=?"); params.append(tags)
+    if kind is not None:
+        fields.append("kind=?"); params.append(kind)
+    if not fields:
+        return False
+    params.append(media_id)
+    cur = conn.execute(f"UPDATE media SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def save_message(
     session: str,
     role: str,

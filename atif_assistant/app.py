@@ -896,6 +896,35 @@ def add_media(payload: dict):
     return {"id": int(cur.lastrowid)}
 
 
+@app.put("/api/media/{media_id}")
+def update_media(media_id: int, payload: dict) -> JSONResponse:
+    if not db.update_media(media_id, tags=payload.get("tags"), kind=payload.get("kind")):
+        return JSONResponse({"error": "not found or nothing to update"}, status_code=404)
+    return JSONResponse({"ok": True, "id": media_id})
+
+
+@app.delete("/api/media/{media_id}")
+def delete_media(media_id: int) -> JSONResponse:
+    """Delete a media row, and its file when nothing else points at it.
+
+    Uploads are de-duplicated by content hash, so one stored file can back more
+    than one row. The file is unlinked only when it lives under the uploads dir
+    and no remaining row references it, so a shared upload is never destroyed.
+    """
+    path = db.media_path(media_id)
+    if path is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    db.delete_media(media_id)
+    try:
+        p = Path(path).resolve()
+        if p.is_relative_to(uploads.UPLOADS_DIR.resolve()) and not db.media_path_in_use(path):
+            p.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        # A read-only or already-missing file must never fail the delete.
+        pass
+    return JSONResponse({"ok": True, "id": media_id})
+
+
 @app.get("/api/social/accounts")
 def list_social_accounts():
     conn = db.connect()

@@ -1240,7 +1240,8 @@ def test_misc_endpoints() -> None:
     content lookups all behave through the HTTP layer."""
     from fastapi.testclient import TestClient
 
-    from atif_assistant import db
+    from atif_assistant import db, uploads
+
     from atif_assistant.app import app
 
     print("\nmisc endpoints")
@@ -1249,6 +1250,9 @@ def test_misc_endpoints() -> None:
         db.use_test_db(base / "misc.db")
         db.init_db()
         client = TestClient(app)
+        prev_uploads = uploads.UPLOADS_DIR
+        uploads.UPLOADS_DIR = base / "uploads"
+        uploads.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
         # --- memory: empty query lists facts, a query searches them.
         db.add_fact("I prefer morning work", source="test", confidence=0.8)
@@ -1349,8 +1353,48 @@ def test_misc_endpoints() -> None:
             "media row with no file on disk is a 404",
             client.get(f"/api/media/{missing}/content").status_code == 404,
         )
+        check(
+            "media tags can be edited",
+            client.put(f"/api/media/{good}", json={"tags": "tax 2025"}).json().get("ok")
+            is True,
+        )
+        check(
+            "edited media tags are stored",
+            any(
+                r["id"] == good and r["tags"] == "tax 2025"
+                for r in client.get("/api/media").json()["media"]
+            ),
+        )
+        check(
+            "editing a missing media row is a 404",
+            client.put("/api/media/999999", json={"tags": "x"}).status_code == 404,
+        )
+        check(
+            "deleting a media row is ok",
+            client.delete(f"/api/media/{good}").json().get("ok") is True,
+        )
+        check(
+            "deleted media leaves the list",
+            not any(r["id"] == good for r in client.get("/api/media").json()["media"]),
+        )
+        check(
+            "deleting a missing media row is a 404",
+            client.delete("/api/media/999999").status_code == 404,
+        )
+
+        # The stored file is removed only when the last row pointing at it is
+        # deleted (uploads are de-duplicated by content hash).
+        stored = uploads.UPLOADS_DIR / "abc123_note.txt"
+        stored.write_text("hi")
+        m1 = client.post("/api/media", json={"path": str(stored), "kind": "text"}).json()["id"]
+        m2 = client.post("/api/media", json={"path": str(stored), "kind": "text"}).json()["id"]
+        client.delete(f"/api/media/{m1}")
+        check("shared upload survives one delete", stored.exists())
+        client.delete(f"/api/media/{m2}")
+        check("last delete removes the stored file", not stored.exists())
 
     db.reset_db_path()
+    uploads.UPLOADS_DIR = prev_uploads
 
 
 def _make_pdf(text: str = "Hello PDF plan") -> bytes:

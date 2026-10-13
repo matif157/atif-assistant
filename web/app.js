@@ -2189,10 +2189,67 @@ async function loadLibrary() {
       t.textContent = meta.filename || m.path || "(file)";
       const d = document.createElement("div");
       d.className = "m";
-      d.textContent = [m.tags ? `related to: ${m.tags}` : "", m.created_at || ""]
-        .filter(Boolean)
-        .join(" · ");
-      row.append(k, t, d);
+      const tagsText = () =>
+        [m.tags ? `related to: ${m.tags}` : "", m.created_at || ""]
+          .filter(Boolean)
+          .join(" · ");
+      d.textContent = tagsText();
+
+      const actions = document.createElement("div");
+      actions.className = "m";
+      const ed = document.createElement("button");
+      ed.className = "ghost small";
+      ed.textContent = "RELATED TO";
+      ed.addEventListener("click", () => {
+        if (row.querySelector("input.media-edit")) return;
+        const input2 = document.createElement("input");
+        input2.className = "media-edit";
+        input2.placeholder = "what is this about";
+        input2.value = m.tags || "";
+        input2.style.cssText = "width:100%;margin-top:4px";
+        ed.replaceWith(input2);
+        input2.focus();
+        const save = document.createElement("button");
+        save.className = "ghost small";
+        save.textContent = "SAVE";
+        save.addEventListener("click", async () => {
+          const res = await fetch(`/api/media/${m.id}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ tags: input2.value.trim() }),
+          });
+          if (res.ok) {
+            m.tags = input2.value.trim();
+            d.textContent = tagsText();
+            input2.replaceWith(ed);
+            save.remove();
+            cancel.remove();
+          } else {
+            d.textContent = "could not save";
+          }
+        });
+        const cancel = document.createElement("button");
+        cancel.className = "ghost small";
+        cancel.textContent = "CANCEL";
+        cancel.addEventListener("click", () => {
+          input2.replaceWith(ed);
+          save.remove();
+          cancel.remove();
+        });
+        actions.append(save, cancel);
+      });
+      const del = document.createElement("button");
+      del.className = "ghost small";
+      del.textContent = "DELETE";
+      del.addEventListener("click", async () => {
+        if (!confirm(`Delete ${meta.filename || m.path || "this file"}?`)) return;
+        const res = await fetch(`/api/media/${m.id}`, { method: "DELETE" });
+        if (res.ok) row.remove();
+        else d.textContent = "could not delete";
+      });
+      actions.append(ed, del);
+
+      row.append(k, t, d, actions);
       box.appendChild(row);
     }
   } catch {
