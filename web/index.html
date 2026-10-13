@@ -130,6 +130,21 @@
     <button class="ghost" id="toggle-log">LOG A DECISION</button>
     <button class="ghost" id="close-decisions">CLOSE</button>
   </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <select id="dec-filter">
+      <option value="all">All</option>
+      <option value="due">Due</option>
+      <option value="open">Open</option>
+      <option value="resolved">Resolved</option>
+      <option value="overdue">Overdue</option>
+    </select>
+    <input id="dec-search" placeholder="Search decisions..." style="flex:1;min-width:140px">
+    <button class="ghost" id="dec-select-all">Select all</button>
+    <button class="ghost" id="dec-clear">Clear</button>
+    <span style="opacity:.7">Sel</span>
+    <span id="dec-count">0</span>
+    <button class="ghost" id="dec-bulk-delete">Delete</button>
+  </div>
   <form id="decision-form" hidden>
     <label>TOPIC<input name="topic" required placeholder="the thing you are deciding"></label>
     <label>WHAT YOU ARE DOING<input name="decision" required placeholder="the action, concretely"></label>
