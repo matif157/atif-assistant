@@ -106,27 +106,23 @@
   <div id="learned-body"></div>
 </div>
 
-<div class="sheet" id="import-sheet" hidden>
-  <div class="sheet-head">
-    <strong>IMPORT (local, read-only)</strong>
-    <button class="ghost" id="close-import">CLOSE</button>
+  <div id="data-import" hidden>
+    <div id="wa-status" class="card" style="margin:.5rem .75rem .5rem .75rem; padding:.75rem"></div>
+    <div id="wa-chats" style="margin:.5rem .75rem .5rem .75rem; max-height:220px; overflow:auto; padding:.25rem; border:1px solid var(--border); border-radius:8px"></div>
+    <div id="wa-controls" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.5rem .75rem">
+      <label style="display:flex; align-items:center; gap:.25rem"><input type="checkbox" id="wa-fromme"> From me only</label>
+      <button id="wa-preview" class="btn">Preview</button>
+      <span id="wa-preview-meta" class="muted"></span>
+      <button id="wa-selectall" class="btn ghost small">Select all</button>
+      <button id="wa-clear" class="btn ghost small">Clear selection</button>
+    </div>
+    <div id="wa-preview-wrap" style="margin:.5rem .75rem .5rem .75rem; max-height:360px; overflow:auto"></div>
+    <div style="margin:.5rem .75rem">
+      <button id="wa-stage" class="btn primary" style="display:none">Stage selected as candidates</button>
+      <span id="wa-stage-meta" class="muted"></span>
+    </div>
+    <p class="hint" style="margin:0 .75rem .75rem .75rem">Staged messages become LEARNED candidates for approval. Nothing is auto-promoted to facts.</p>
   </div>
-  <div id="wa-status" class="card" style="margin:.5rem 0; padding:.75rem"></div>
-  <div id="wa-chats" style="margin:.5rem 0; max-height:220px; overflow:auto; padding:.25rem; border:1px solid var(--border); border-radius:8px"></div>
-  <div id="wa-controls" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.5rem 0">
-    <label style="display:flex; align-items:center; gap:.25rem"><input type="checkbox" id="wa-fromme"> From me only</label>
-    <button id="wa-preview" class="btn">Preview</button>
-    <span id="wa-preview-meta" class="muted"></span>
-    <button id="wa-selectall" class="btn ghost small">Select all</button>
-    <button id="wa-clear" class="btn ghost small">Clear selection</button>
-  </div>
-  <div id="wa-preview-wrap" style="margin:.5rem 0; max-height:360px; overflow:auto"></div>
-  <div style="margin:.5rem 0">
-    <button id="wa-stage" class="btn primary" style="display:none">Stage selected as candidates</button>
-    <span id="wa-stage-meta" class="muted"></span>
-  </div>
-  <p class="hint">Staged messages become LEARNED candidates for approval. Nothing is auto-promoted to facts.</p>
-</div>
 
 <div class="sheet" id="decisions-sheet" hidden>
   <div class="sheet-head">
@@ -175,6 +171,10 @@
     WhatsApp exports are read into memory and become searchable. Images, scans
     and voice notes are read by Gemini vision and Groq Whisper when those keys
     are set. Same file twice is stored once.</p>
+    </div>
+  </div>
+  <div id="data-media" hidden>
+    <div id="media-body" style="padding:.5rem .75rem; max-height:420px; overflow:auto"></div>
   </div>
 </div>
 
