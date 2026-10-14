@@ -35,6 +35,99 @@ DOC_EXTS = {".pdf", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ppt", ".
 MAX_BYTES = 25 * 1024 * 1024
 MAX_TEXT_CHARS = 20_000
 
+# Advisory extraction from readable uploads. A directive sentence becomes a
+# RULES row with approved=0; a durable personal fact becomes a LEARNED row with
+# status='candidate'. Nothing here changes behaviour on its own - a human
+# approves either row in the RULES or LEDGER screen first.
+MAX_RULES_PER_UPLOAD = 5
+MAX_LEARNED_PER_UPLOAD = 5
+
+_DIRECTIVE = re.compile(
+    r"^\s*(?:always|never|please|kindly|don'?t|do not|remember to|make sure|stop)\b"
+    r"|^\s*(?:you|atif)\s+(?:must|should|shall|need to|have to)\b"
+    r"|\b(?:and|,)\s*(?:always|never)\s+\w+",
+    re.IGNORECASE,
+)
+_FACT = re.compile(
+    r"\b(?:my|our)\s+(?:name|address|city|country|job|title|boss|wife|husband|"
+    r"mother|father|mom|dad|son|daughter|sister|brother|phone|email|birthday|"
+    r"home|flat|apartment|car|school|university|company|religion|language)\b"
+    r"|\bi\s+(?:live|work|stay|study|speak|prefer|like|hate|need|want|am)\b",
+    re.IGNORECASE,
+)
+_SKIP_LINE = re.compile(r"^\s*(#|//|;|https?://|www\.)")
+_LIST_MARK = re.compile(r"^\s*(?:[-*•–]|\d+[.)])\s+")
+
+
+def _sentences(text: str) -> list[str]:
+    """Split an upload into candidate sentences, dropping headings and URLs.
+
+    List markers are stripped rather than skipped - people write "- always
+    answer in Urdu" in notes all the time, and that line is exactly a rule.
+    """
+    out: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or _SKIP_LINE.search(line):
+            continue
+        line = _LIST_MARK.sub("", line).strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            s = sentence.strip()
+            if s:
+                out.append(s)
+    return out
+
+
+def _rule_exists(text: str) -> bool:
+    conn = db.connect()
+    return (
+        conn.execute("SELECT 1 FROM rules WHERE text=?", (text,)).fetchone()
+        is not None
+    )
+
+
+def _learned_exists(text: str) -> bool:
+    conn = db.connect()
+    return (
+        conn.execute("SELECT 1 FROM learned WHERE text=?", (text,)).fetchone()
+        is not None
+    )
+
+
+def classify_upload_text(text: str, source: str = "upload") -> dict[str, list[int]]:
+    """Propose rules and LEARNED candidates from readable upload text.
+
+    Propose-then-approve: rules land unapproved and learned rows land as
+    candidates, so an uploaded file can never silently change how the
+    assistant behaves. Re-uploading the same file creates no duplicates
+    because every proposal is checked against what is already stored.
+    """
+    rules_added: list[int] = []
+    learned_added: list[int] = []
+    for sentence in _sentences(text):
+        if not 12 <= len(sentence) <= 160:
+            continue
+        if _DIRECTIVE.search(sentence):
+            if len(rules_added) >= MAX_RULES_PER_UPLOAD or _rule_exists(sentence):
+                continue
+            rules_added.append(
+                db.add_rule(
+                    text=sentence, code=None,
+                    source=f"{source}:proposal", approved=False,
+                )
+            )
+            continue  # a directive is an instruction, not a personal fact
+        if _FACT.search(sentence):
+            if len(learned_added) >= MAX_LEARNED_PER_UPLOAD or _learned_exists(sentence):
+                continue
+            learned_added.append(
+                db.add_learned(
+                    text=sentence, kind="durable",
+                    source=f"{source}:proposal", confidence=0.5,
+                )
+            )
+    return {"rules_added": rules_added, "learned_added": learned_added}
+
 
 def detect_kind(filename: str) -> str:
     ext = Path(filename).suffix.lower()
@@ -153,6 +246,8 @@ def ingest_upload(
         "read_chars": 0,
         "text_source": None,
         "read_reason": None,
+        "rules_added": [],
+        "learned_added": [],
     }
 
     # Read the file's text locally, falling back to hosted models for audio,
@@ -194,6 +289,11 @@ def ingest_upload(
                 occurred_at=db.now(),
                 source=f"{source}:{filename}",
             )
+            # Only genuinely new content is classified, so re-uploading the
+            # same file cannot stack duplicate proposals on top of each other.
+            classified = classify_upload_text(body, source=f"{source}:{filename}")
+            report["rules_added"] = classified["rules_added"]
+            report["learned_added"] = classified["learned_added"]
             if meta.get("whatsapp_summary"):
                 report["whatsapp_summary"] = meta["whatsapp_summary"]
 

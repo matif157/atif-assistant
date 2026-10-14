@@ -2650,6 +2650,16 @@ async function uploadFile() {
     } else {
       statusEl.textContent = s.uploadedStored;
     }
+    // The server proposes rules and LEARNED candidates from readable uploads,
+    // but nothing is active until approved - say where to review them.
+    const proposals = [];
+    if (data.rules_added?.length) {
+      proposals.push(`${data.rules_added.length} rule proposal(s) in RULES`);
+    }
+    if (data.learned_added?.length) {
+      proposals.push(`${data.learned_added.length} candidate fact(s) in LEDGER`);
+    }
+    if (proposals.length) statusEl.textContent += ` · proposed: ${proposals.join("; ")}`;
     lastMediaId = data.media_id;
     document.getElementById("make-plan").hidden = !data.read;
     fileEl.value = "";
