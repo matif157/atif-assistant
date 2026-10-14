@@ -222,7 +222,13 @@ async def _ollama(model: str, messages: list[dict], **kw: Any) -> str:
                 "system": system,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": kw.get("temperature", 0.4)},
+                "options": {
+                    "temperature": kw.get("temperature", 0.4),
+                    # Ollama's default context can be smaller than our system
+                    # prompt plus retrieved memory; an overflowing prompt is
+                    # silently truncated and the model rambles.
+                    "num_ctx": kw.get("num_ctx", 4096),
+                },
             },
         )
         r.raise_for_status()

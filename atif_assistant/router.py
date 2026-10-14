@@ -247,8 +247,12 @@ def route(text: str, repeat_count: int = 0) -> Route:
 
     # --- Rule 6: repetition is itself the signal. Once a class of question
     # has been asked enough times, the mode stops mattering and the loop
-    # becomes the subject.
-    if repeat_count >= 3:
+    # becomes the subject. Only the emotionally loaded classes loop - a
+    # fact lookup repeated is still a lookup, and the catch-all "other"
+    # bucket is a graveyard of one-offs, not a habit.
+    if repeat_count >= 3 and question_class(text) in (
+        "comparison", "self_worth", "decision",
+    ):
         return Route(
             mode=CHALLENGE,
             reason=f"Repeated question ({repeat_count + 1}x) - repetition is "
@@ -277,6 +281,21 @@ def route(text: str, repeat_count: int = 0) -> Route:
         return Route(
             mode=ASK,
             reason="Knowledge question with a checkable answer.",
+            confidence=0.8,
+            escalations=escalations,
+            intent=intent,
+        )
+
+    # --- Rule 8.5: memory recall is not a position to challenge.
+    # "Remind me where I live" asks the assistant to read its own record
+    # back, not to argue with the user. Rumination and self-worth probes are
+    # already caught by the earlier rules, so what reaches here is recall.
+    if low.startswith(
+        ("remind me ", "what's my ", "what is my ", "where do i ", "who am i")
+    ):
+        return Route(
+            mode=ASK,
+            reason="Memory recall; answered from the record, not challenged.",
             confidence=0.8,
             escalations=escalations,
             intent=intent,

@@ -58,7 +58,7 @@ MODEL_DEFAULTS = {
     "openrouter": os.environ.get(
         "ATIF_ASSISTANT_OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
     ),
-    "ollama": os.environ.get("ATIF_ASSISTANT_OLLAMA_MODEL", "llama3.2:1b"),
+    "ollama": os.environ.get("ATIF_ASSISTANT_OLLAMA_MODEL", "llama3.2:3b"),
 }
 
 PROVIDER_LABELS = {

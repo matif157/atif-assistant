@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from . import constitution as C
-from . import db, radar
+from . import db, radar, router
 from .config import RETRIEVAL_LIMIT
 from .llm import ProviderError, complete
 
@@ -53,6 +53,14 @@ Example:
 [ASSUMPTION] That the user was loved less. Nothing in the record establishes this.
 
 Rules:
+- [FACT] also covers well-established general knowledge - a capital city, a
+  historical date, basic science. Reserve [UNKNOWN] for questions that neither
+  the user's memory record nor common knowledge can answer.
+- Answer the question actually asked, in one or two labelled lines. Do not
+  pad with observations the question did not ask for.
+- Every label must be followed by a short sentence - never emit a bare
+  "[UNKNOWN]" token on its own. "[UNKNOWN] Where you live. The record states
+  no location." is the right shape.
 - Never invent a comparison, ranking or percentage between people.
 - If asked "does she love me more", the correct core answer is UNKNOWN.
 - Never recommend searching old messages or re-reading chats to resolve a feeling.
@@ -363,6 +371,11 @@ _LABEL_RE = re.compile(
     r"\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]", re.IGNORECASE
 )
 
+# A label must be followed by real text; "[UNKNOWN]" alone is not an answer.
+_LABELLED_CONTENT = re.compile(
+    r"\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]\s*\S", re.IGNORECASE
+)
+
 # Models occasionally emit the label in a non-ASCII bracket pair: fullwidth
 # 【FACT】, ［FACT］, or CJK corner brackets 「FACT」. A strict ASCII match then
 # reports "no labels", the brake fires on an answer that was actually labelled,
@@ -432,9 +445,15 @@ _REQUIRED_CHALLENGE_SECTIONS = (
 
 
 def structure_ok(text: str, challenge_mode: bool = False) -> bool:
-    """True when the response keeps the Reality Engine's required structure."""
+    """True when the response keeps the Reality Engine's required structure.
+
+    A bare label token ("[UNKNOWN]" alone on a line) does not count: a label
+    with no sentence after it answers nothing, and small models emit exactly
+    that when they want out of a question. Requiring content after the label
+    routes such answers through the repair pass instead of shipping them.
+    """
     text = normalize_labels(text)
-    if not _LABEL_RE.search(text):
+    if not _LABELLED_CONTENT.search(text):
         return False
     if challenge_mode:
         upper = text.upper()
@@ -504,6 +523,15 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         for part in (
             ctx_block,
             f"GUARDRAILS:\n{guard}" if guard else "",
+            # A knowledge question wants the answer, not an essay about the
+            # memory record; say so explicitly for small models that tend to
+            # pad or refuse.
+            (
+                "NOTE: this is a general knowledge question. Answer it "
+                "directly from what you know, in one or two labelled lines."
+                if router.question_class(question) == "knowledge"
+                else ""
+            ),
             f"QUESTION: {question}",
         )
         if part
@@ -520,17 +548,25 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         text, provider = _offline_answer(question, ctx), "offline"
 
     # Adversarial second pass: find what the draft got wrong, then fix it.
+    # Pure knowledge questions carry no personal stakes - the pass only adds
+    # latency there, and on a small local model its "revision" tends to be
+    # critique-shaped text that overwrites a fine answer.
     draft = text
-    critique, revised, critique_notes = await _self_critique(
-        question, text, ctx, provider
-    )
-    if revised and (structure_ok(revised) or not structure_ok(draft)):
-        text = revised
+    critique_notes: list[str] = []
+    if router.question_class(question) != "knowledge":
+        critique, revised, critique_notes = await _self_critique(
+            question, text, ctx, provider
+        )
+        if revised and (structure_ok(revised) or not structure_ok(draft)):
+            # A revision that trips any brake is worse than the draft by
+            # definition, however structured it looks.
+            if not audit_response(revised):
+                text = revised
     if provider != "offline" and not structure_ok(text):
         repaired = await _repair_structure(
             text, provider, language=_effective_language(ctx)
         )
-        if structure_ok(repaired):
+        if structure_ok(repaired) and not audit_response(repaired):
             text = repaired
             critique_notes.append("Answer reformatted to restore Reality Engine labels.")
 
@@ -650,7 +686,10 @@ async def _self_critique(
 
     revision = None
     rm = re.search(r"REVISION:\s*(.+)\Z", raw, re.DOTALL | re.I)
-    if rm:
+    # A SOUND verdict means the draft stands: small models like to fill in a
+    # REVISION section anyway, and accepting it would replace a good answer
+    # with the auditor's ramble. Only a NEEDS_REVISION verdict may revise.
+    if rm and verdict == "NEEDS_REVISION":
         candidate = rm.group(1).strip()
         # A revision that is empty, a placeholder, or obviously truncated is
         # discarded rather than replacing a working draft.

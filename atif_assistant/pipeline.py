@@ -116,7 +116,7 @@ async def check_offline_host() -> dict[str, Any]:
         return _row("offline-host", "Offline model host", "fail", _ms(started),
                     f"running, but {s.get('model')} is not downloaded "
                     f"(has: {', '.join(s.get('models') or []) or 'none'})",
-                    "Press DOWNLOAD MODEL in Settings (or: ollama pull llama3.2:1b).")
+                    "Press DOWNLOAD MODEL in Settings to fetch the model above.")
     return _row("offline-host", "Offline model host", "pass", _ms(started),
                 f"running at {s.get('url')} with {s.get('model')}")
 
