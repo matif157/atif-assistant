@@ -60,6 +60,7 @@
   <div class="sheet-head">
     <strong>MEMORY</strong>
     <input id="memq" placeholder="search facts, episodes, rules">
+    <button class="ghost" id="mem-add" title="Add a fact">+ ADD</button>
     <button class="ghost" id="close-memory">CLOSE</button>
   </div>
   <div id="mem-results"></div>
@@ -77,6 +78,18 @@
   <div class="sheet-head">
     <strong>RULES &amp; PLANS</strong>
     <button class="ghost" id="close-rules">CLOSE</button>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <select id="rules-filter">
+      <option value="all" selected>All</option>
+      <option value="enforced">Enforced</option>
+      <option value="candidate">Candidates</option>
+    </select>
+    <input id="rules-search" placeholder="Search rules..." style="flex:1;min-width:140px">
+    <button class="ghost" id="rules-select-all">SELECT ALL</button>
+    <button class="ghost" id="rules-clear">CLEAR</button>
+    <span id="rules-count" style="opacity:.7">0</span>
+    <button class="ghost" id="rules-bulk-delete">BULK DELETE</button>
   </div>
   <div id="rules-body"></div>
 </div>

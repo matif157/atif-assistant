@@ -381,6 +381,21 @@ document.getElementById("btn-memory").addEventListener("click", async () => {
 });
 document.getElementById("close-memory").addEventListener("click", () => (sheet.hidden = true));
 
+document.getElementById("mem-add")?.addEventListener("click", async () => {
+  const text = prompt("New fact to remember:");
+  if (text == null || !text.trim()) return;
+  const res = await fetch("/api/facts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: text.trim(), source: "manual" }),
+  });
+  if (!res.ok) {
+    alert("Could not save that fact");
+    return;
+  }
+  await searchMemory(memq.value || "");
+});
+
 // The right REST endpoint for a memory kind, or null if the kind is read-only.
 function memoryEndpoint(kind) {
   const k = (kind || "").toLowerCase();
@@ -568,6 +583,47 @@ async function loadInsights() {
           }
           r.appendChild(line);
         }
+        if (c.a_id != null && c.b_id != null) {
+          const actions = document.createElement("div");
+          actions.className = "m";
+          // Neither button destroys evidence on its own: DISMISS only hides a
+          // pair the person judged harmless, MERGE rewrites memory once with
+          // wording the person wrote.
+          const dismiss = document.createElement("button");
+          dismiss.className = "ghost small";
+          dismiss.textContent = "NOT A CONFLICT";
+          dismiss.style.marginRight = "8px";
+          dismiss.addEventListener("click", async () => {
+            dismiss.disabled = true;
+            const res = await fetch(
+              `/api/insights/contradictions/${c.a_id}/${c.b_id}/review`,
+              { method: "POST" },
+            );
+            if (res.ok) loadInsights();
+            else dismiss.textContent = "FAILED";
+          });
+          const merge = document.createElement("button");
+          merge.className = "ghost small";
+          merge.textContent = "MERGE...";
+          merge.addEventListener("click", async () => {
+            const text = prompt("What should memory say after the merge?", c.a || "");
+            if (text == null || !text.trim()) return;
+            merge.disabled = true;
+            const res = await fetch("/api/insights/contradictions/merge", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                keep_id: c.a_id,
+                remove_id: c.b_id,
+                reconciled_text: text.trim(),
+              }),
+            });
+            if (res.ok) loadInsights();
+            else merge.textContent = "FAILED";
+          });
+          actions.append(dismiss, merge);
+          r.appendChild(actions);
+        }
         iBody.appendChild(r);
       }
     }
@@ -688,6 +744,16 @@ function decisionCard(d, due) {
   const row = document.createElement("div");
   row.className = due ? "mrow due" : "mrow";
 
+  const chk = document.createElement("input");
+  chk.type = "checkbox";
+  chk.checked = decSelected.has(d.id);
+  chk.addEventListener("change", () => {
+    if (chk.checked) decSelected.add(d.id);
+    else decSelected.delete(d.id);
+    updateDecCount();
+  });
+  row.appendChild(chk);
+
   const k = document.createElement("div");
   k.className = "k";
   const conf = d.confidence != null ? ` conf ${d.confidence}` : "";
@@ -766,36 +832,141 @@ function decisionCard(d, due) {
     row.remove();
   });
   row.appendChild(del);
+
+  const ed = document.createElement("button");
+  ed.className = "ghost small";
+  ed.textContent = "EDIT";
+  ed.addEventListener("click", () => openDecisionEditor(row, d));
+  row.appendChild(ed);
   return row;
+}
+
+function openDecisionEditor(row, d) {
+  if (row.querySelector(".dec-edit")) return;
+  const box = document.createElement("div");
+  box.className = "dec-edit";
+  box.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;width:100%;margin-top:6px";
+  const mkField = (label, value, type) => {
+    const w = document.createElement("label");
+    w.style.cssText = "font-size:.75rem;opacity:.85;display:flex;flex-direction:column;gap:2px";
+    w.textContent = label;
+    const i = document.createElement("input");
+    i.value = value ?? "";
+    if (type === "number") {
+      i.type = "number";
+      i.min = "0";
+      i.max = "1";
+      i.step = "0.05";
+    } else if (type === "date") {
+      i.type = "date";
+    }
+    w.appendChild(i);
+    box.appendChild(w);
+    return i;
+  };
+  const topicIn = mkField("TOPIC", d.topic, "text");
+  const decIn = mkField("DECISION", d.decision, "text");
+  const confIn = mkField("CONFIDENCE 0-1", d.confidence, "number");
+  const revIn = mkField("REVIEW ON", d.review_date, "date");
+
+  const save = document.createElement("button");
+  save.className = "ghost small";
+  save.textContent = "SAVE";
+  const cancel = document.createElement("button");
+  cancel.className = "ghost small";
+  cancel.textContent = "CANCEL";
+  cancel.addEventListener("click", () => box.remove());
+  save.addEventListener("click", async () => {
+    const body = {
+      topic: topicIn.value.trim(),
+      decision: decIn.value.trim(),
+      review_date: revIn.value,
+    };
+    if (confIn.value !== "") {
+      const c = Number(confIn.value);
+      if (Number.isNaN(c) || c < 0 || c > 1) {
+        alert("Confidence must be between 0 and 1");
+        return;
+      }
+      body.confidence = c;
+    }
+    save.disabled = true;
+    const res = await fetch(`/api/decisions/${d.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    save.disabled = false;
+    if (!res.ok) {
+      alert("Could not save that change");
+      return;
+    }
+    await loadDecisions();
+  });
+  box.append(save, cancel);
+  row.appendChild(box);
+}
+
+function updateDecCount() {
+  const el = document.getElementById("dec-count");
+  if (el) el.textContent = String(decSelected.size);
 }
 
 async function loadDecisions() {
   dBody.textContent = "loading...";
   try {
-    const { due = [], open = [] } = await (await fetch("/api/decisions")).json();
-    dBody.innerHTML = "";
-
+    const { due = [], open = [], resolved = [] } = await (await fetch("/api/decisions")).json();
     const dueIds = new Set(due.map((d) => d.id));
-    const rest = open.filter((d) => !dueIds.has(d.id));
-
-    if (due.length) {
-      const h = document.createElement("div");
-      h.className = "ihead";
-      h.textContent = `DUE FOR REVIEW - ${due.length}`;
-      dBody.appendChild(h);
-      for (const d of due) dBody.appendChild(decisionCard(d, true));
-    }
-    if (rest.length) {
-      const h = document.createElement("div");
-      h.className = "ihead";
-      h.textContent = `OPEN - ${rest.length}`;
-      dBody.appendChild(h);
-      for (const d of rest) dBody.appendChild(decisionCard(d, false));
-    }
-    if (!dBody.childNodes.length) dBody.textContent = "Nothing open.";
+    decAll = [
+      ...due.map((d) => ({ ...d, due: true })),
+      ...open.filter((d) => !dueIds.has(d.id)).map((d) => ({ ...d, due: false })),
+      ...resolved.map((d) => ({ ...d, due: false })),
+    ];
+    renderDecisions();
   } catch {
     dBody.textContent = "Could not load decisions.";
   }
+}
+
+function renderDecisions() {
+  const filter = document.getElementById("dec-filter")?.value || "all";
+  const q = (document.getElementById("dec-search")?.value || "").toLowerCase();
+  const n = new Date();
+  const today = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(
+    n.getDate(),
+  ).padStart(2, "0")}`;
+
+  const matches = decAll.filter((d) => {
+    if (filter === "due" && !d.due) return false;
+    if (filter === "open" && d.resolved_at) return false;
+    if (filter === "resolved" && !d.resolved_at) return false;
+    // "overdue" is strictly past-due: due covers today, overdue does not.
+    if (filter === "overdue" && !(d.due && d.review_date && d.review_date < today)) return false;
+    if (q) {
+      const hay = `${d.topic || ""} ${d.decision || ""} ${d.prediction || ""}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  dBody.innerHTML = "";
+  if (!matches.length) {
+    dBody.textContent = decAll.length ? "Nothing matches that filter." : "Nothing open.";
+    return;
+  }
+  let lastGroup = "";
+  for (const d of matches) {
+    const group = d.resolved_at ? "RESOLVED" : d.due ? "DUE FOR REVIEW" : "OPEN";
+    if (group !== lastGroup) {
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = group;
+      dBody.appendChild(h);
+      lastGroup = group;
+    }
+    dBody.appendChild(decisionCard(d, d.due));
+  }
+  updateDecCount();
 }
 
 document.getElementById("btn-decisions").addEventListener("click", () => {
@@ -807,6 +978,28 @@ document.getElementById("close-decisions").addEventListener("click", () => {
 });
 document.getElementById("toggle-log").addEventListener("click", () => {
   dForm.hidden = !dForm.hidden;
+});
+document.getElementById("dec-filter")?.addEventListener("change", renderDecisions);
+document.getElementById("dec-search")?.addEventListener("input", renderDecisions);
+document.getElementById("dec-select-all")?.addEventListener("click", () => {
+  for (const d of decAll) decSelected.add(d.id);
+  updateDecCount();
+  renderDecisions();
+});
+document.getElementById("dec-clear")?.addEventListener("click", () => {
+  decSelected.clear();
+  updateDecCount();
+  renderDecisions();
+});
+document.getElementById("dec-bulk-delete")?.addEventListener("click", async () => {
+  if (!decSelected.size) return;
+  if (!confirm(`Delete ${decSelected.size} decision(s)? This cannot be undone.`)) return;
+  for (const id of Array.from(decSelected)) {
+    await fetch(`/api/decisions/${id}`, { method: "DELETE" });
+  }
+  decSelected.clear();
+  updateDecCount();
+  await loadDecisions();
 });
 document.getElementById("cancel-log").addEventListener("click", () => {
   dForm.hidden = true;
@@ -852,12 +1045,9 @@ function updateLearnedSelCount() {
 async function loadLearned(filter) {
   const f = filter || (document.getElementById("learned-filter")?.value) || "candidate";
   try {
-    const res = await fetch("/api/learned");
+    const res = await fetch(`/api/learned?status=${encodeURIComponent(f)}`);
     const data = await res.json();
-    learnedAll = data.candidates || [];
-    if (f === "approved") learnedAll = (data.approved || []);
-    else if (f === "rejected") learnedAll = (data.rejected || []);
-    else if (f === "all") learnedAll = [...(data.candidates||[]), ...(data.approved||[]), ...(data.rejected||[])];
+    learnedAll = res.ok ? data.candidates || [] : [];
     learnedSelected.clear();
     updateLearnedSelCount();
     renderLearned();
@@ -2374,6 +2564,8 @@ async function handsFreeSubmit(text, speaker) {
 let mediaSelected = new Set();
 let decSelected = new Set();
 let decAll = [];
+let rulesSelected = new Set();
+let rulesAll = [];
 
 /* --------------------------------------------------------------- uploads */
 
@@ -2396,7 +2588,7 @@ document.getElementById("close-data")?.addEventListener("click", () => {
 });
 document.getElementById("tab-upload")?.addEventListener("click", () => showDataTab("upload"));
 document.getElementById("tab-import")?.addEventListener("click", () => { showDataTab("import"); loadWhatsAppStatus(); });
-document.getElementById("tab-media")?.addEventListener("click", () => { showDataTab("media"); loadMediaLibrary(); });
+document.getElementById("tab-media")?.addEventListener("click", () => { showDataTab("media"); loadLibrary("media-body", true); });
 
 document.getElementById("btn-upload")?.addEventListener("click", () => {
   if (dataSheet) { dataSheet.hidden = false; showDataTab("upload"); }
@@ -2504,17 +2696,65 @@ function humanSize(n) {
   return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
 }
 
-async function loadLibrary() {
-  const box = document.getElementById("upload-library");
+function syncMediaCount() {
+  document.querySelectorAll("[data-media-count]").forEach((el) => {
+    el.textContent = `${mediaSelected.size} selected`;
+  });
+}
+
+function mediaBulkBar(media, boxId) {
+  const bar = document.createElement("div");
+  bar.className = "mrow";
+  const count = document.createElement("span");
+  count.dataset.mediaCount = "1";
+  count.textContent = `${mediaSelected.size} selected`;
+  const mk = (label, fn) => {
+    const b = document.createElement("button");
+    b.className = "ghost small";
+    b.textContent = label;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  bar.appendChild(count);
+  bar.appendChild(mk("SELECT ALL", () => {
+    mediaSelected.clear();
+    for (const m of media) mediaSelected.add(m.id);
+    syncMediaCount();
+  }));
+  bar.appendChild(mk("CLEAR", () => {
+    mediaSelected.clear();
+    syncMediaCount();
+  }));
+  bar.appendChild(mk("BULK DELETE", async () => {
+    if (!mediaSelected.size) return;
+    if (!confirm(`Delete ${mediaSelected.size} file(s)? A file still used by another row is kept.`)) return;
+    const res = await fetch("/api/media/bulk/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids: Array.from(mediaSelected) }),
+    });
+    if (!res.ok) {
+      count.textContent = "could not delete";
+      return;
+    }
+    mediaSelected.clear();
+    await loadLibrary(boxId, true);
+  }));
+  return bar;
+}
+
+async function loadLibrary(boxId = "upload-library", selectable = false) {
+  const box = document.getElementById(boxId);
   if (!box) return;
   box.innerHTML = "loading...";
   try {
-    const { media = [] } = await (await fetch("/api/media?limit=50")).json();
+    const { media = [] } = await (await fetch(`/api/media?limit=${selectable ? 200 : 50}`)).json();
     box.innerHTML = "";
     if (!media.length) {
       box.textContent = "No files uploaded yet.";
       return;
     }
+    if (selectable) box.appendChild(mediaBulkBar(media, boxId));
     for (const m of media) {
       let meta = {};
       try {
@@ -2524,6 +2764,17 @@ async function loadLibrary() {
       }
       const row = document.createElement("div");
       row.className = "mrow";
+      if (selectable) {
+        const chk = document.createElement("input");
+        chk.type = "checkbox";
+        chk.checked = mediaSelected.has(m.id);
+        chk.addEventListener("change", () => {
+          if (chk.checked) mediaSelected.add(m.id);
+          else mediaSelected.delete(m.id);
+          syncMediaCount();
+        });
+        row.appendChild(chk);
+      }
       const k = document.createElement("div");
       k.className = "k";
       k.textContent = `${(m.kind || "file").toUpperCase()} · ${humanSize(meta.size)}`;
@@ -2616,6 +2867,16 @@ function ruleCard(r) {
   const row = document.createElement("div");
   row.className = "mrow";
 
+  const chk = document.createElement("input");
+  chk.type = "checkbox";
+  chk.checked = rulesSelected.has(r.id);
+  chk.addEventListener("change", () => {
+    if (chk.checked) rulesSelected.add(r.id);
+    else rulesSelected.delete(r.id);
+    updateRulesCount();
+  });
+  row.appendChild(chk);
+
   const k = document.createElement("div");
   k.className = "k";
   k.textContent = r.approved ? "ENFORCED" : "CANDIDATE";
@@ -2685,8 +2946,10 @@ function ruleCard(r) {
   rm.textContent = "REMOVE";
   rm.addEventListener("click", async () => {
     await fetch(`/api/rules/${r.id}`, { method: "DELETE" });
-    row.remove();
-    if (!rulesBody.querySelector(".mrow")) rulesBody.textContent = "No rules yet.";
+    rulesAll = rulesAll.filter((x) => x.id !== r.id);
+    rulesSelected.delete(r.id);
+    updateRulesCount();
+    renderRules();
   });
   actions.appendChild(rm);
   row.appendChild(actions);
@@ -2698,32 +2961,79 @@ async function loadRules() {
   rulesBody.textContent = "loading...";
   try {
     const { rules = [] } = await (await fetch("/api/rules")).json();
-    rulesBody.innerHTML = "";
-    if (!rules.length) {
-      rulesBody.textContent =
-        "No rules yet. Upload a plan or document, then choose MAKE STRICT PLAN.";
-      return;
-    }
-    const enforced = rules.filter((r) => r.approved);
-    const candidates = rules.filter((r) => !r.approved);
-    if (enforced.length) {
-      const h = document.createElement("div");
-      h.className = "ihead";
-      h.textContent = `ENFORCED - ${enforced.length}`;
-      rulesBody.appendChild(h);
-      for (const r of enforced) rulesBody.appendChild(ruleCard(r));
-    }
-    if (candidates.length) {
-      const h = document.createElement("div");
-      h.className = "ihead";
-      h.textContent = `CANDIDATES - ${candidates.length}`;
-      rulesBody.appendChild(h);
-      for (const r of candidates) rulesBody.appendChild(ruleCard(r));
-    }
+    rulesAll = rules;
+    renderRules();
   } catch {
     rulesBody.textContent = "Could not load rules.";
   }
 }
+
+function renderRules() {
+  if (!rulesBody) return;
+  const filter = document.getElementById("rules-filter")?.value || "all";
+  const q = (document.getElementById("rules-search")?.value || "").toLowerCase();
+
+  const matches = rulesAll.filter((r) => {
+    if (filter === "enforced" && !r.approved) return false;
+    if (filter === "candidate" && r.approved) return false;
+    if (q && !`${r.text || ""} ${r.code || ""} ${r.source || ""}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  rulesBody.innerHTML = "";
+  if (!rulesAll.length) {
+    rulesBody.textContent =
+      "No rules yet. Upload a plan or document, then choose MAKE STRICT PLAN.";
+    return;
+  }
+  if (!matches.length) {
+    rulesBody.textContent = "Nothing matches that filter.";
+    updateRulesCount();
+    return;
+  }
+  const groups = [
+    ["ENFORCED", matches.filter((r) => r.approved)],
+    ["CANDIDATES", matches.filter((r) => !r.approved)],
+  ];
+  for (const [label, list] of groups) {
+    if (!list.length) continue;
+    const h = document.createElement("div");
+    h.className = "ihead";
+    h.textContent = `${label} - ${list.length}`;
+    rulesBody.appendChild(h);
+    for (const r of list) rulesBody.appendChild(ruleCard(r));
+  }
+  updateRulesCount();
+}
+
+function updateRulesCount() {
+  const el = document.getElementById("rules-count");
+  if (el) el.textContent = String(rulesSelected.size);
+}
+
+document.getElementById("rules-filter")?.addEventListener("change", renderRules);
+document.getElementById("rules-search")?.addEventListener("input", renderRules);
+document.getElementById("rules-select-all")?.addEventListener("click", () => {
+  for (const r of rulesAll) rulesSelected.add(r.id);
+  updateRulesCount();
+  renderRules();
+});
+document.getElementById("rules-clear")?.addEventListener("click", () => {
+  rulesSelected.clear();
+  updateRulesCount();
+  renderRules();
+});
+document.getElementById("rules-bulk-delete")?.addEventListener("click", async () => {
+  if (!rulesSelected.size) return;
+  if (!confirm(`Delete ${rulesSelected.size} rule(s)? This cannot be undone.`)) return;
+  for (const id of Array.from(rulesSelected)) {
+    await fetch(`/api/rules/${id}`, { method: "DELETE" });
+    rulesAll = rulesAll.filter((x) => x.id !== id);
+  }
+  rulesSelected.clear();
+  updateRulesCount();
+  renderRules();
+});
 
 function openRules() {
   if (!rulesSheet) return;
