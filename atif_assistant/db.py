@@ -205,6 +205,17 @@ CREATE TABLE IF NOT EXISTS social_posts (
     created_at TEXT NOT NULL
 );
 
+-- A contradiction a human already looked at and told us to stop showing. The
+-- pair is stored in canonical (low, high) order so (a,b) and (b,a) are one row.
+-- This never deletes evidence; it only hides a settled pair from the feed.
+CREATE TABLE IF NOT EXISTS contradiction_reviews (
+    low_id     INTEGER NOT NULL,
+    high_id    INTEGER NOT NULL,
+    disposition TEXT NOT NULL DEFAULT 'dismissed',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (low_id, high_id)
+);
+
 -- Location. Raw GPS points land in location_points; nearby points are folded
 -- into a named place. A routine is a repeated (place, weekday, hour) visit and
 -- is only ever an observed pattern, never a claimed reason.
@@ -528,13 +539,15 @@ def find_contradictions(limit: int = 5) -> list[dict[str, Any]]:
     """Facts about the same subject whose values cannot both be true.
 
     Deliberately conservative: only same-subject pairs where one value is a
-    negation of the other. Returns candidates for review, not verdicts.
+    negation of the other. Returns candidates for review, not verdicts. Pairs a
+    human already dismissed are left out, so a settled pair stops reappearing.
     """
     conn = connect()
     try:
         rows = conn.execute(
             "SELECT fact_id, subject, value FROM claims_fts"
         ).fetchall()
+        dismissed = _dismissed_pairs(conn)
     except sqlite3.OperationalError:
         return []
 
@@ -550,6 +563,8 @@ def find_contradictions(limit: int = 5) -> list[dict[str, Any]]:
             for j in range(i + 1, len(claims)):
                 fa, va = claims[i]
                 fb, vb = claims[j]
+                if (min(fa, fb), max(fa, fb)) in dismissed:
+                    continue
                 if bool(_NEGATION.search(va)) != bool(_NEGATION.search(vb)):
                     texts = {}
                     for fid in (fa, fb):
@@ -568,6 +583,53 @@ def find_contradictions(limit: int = 5) -> list[dict[str, Any]]:
                         }
                     )
     return out[:limit]
+
+
+def _dismissed_pairs(conn: sqlite3.Connection) -> set[tuple[int, int]]:
+    """Pairs a human already settled, as (low, high) in canonical order.
+
+    A missing reviews table means nothing has been dismissed yet, so an older
+    database behaves exactly as before instead of losing every contradiction.
+    """
+    try:
+        rows = conn.execute("SELECT low_id, high_id FROM contradiction_reviews").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {(r["low_id"], r["high_id"]) for r in rows}
+
+
+def dismiss_contradiction(a_id: int, b_id: int, disposition: str = "dismissed") -> bool:
+    """Record that a person reviewed this contradiction pair and settled it.
+
+    Returns False when either side does not exist: hiding a pair made of a
+    missing fact would silently hide a real, unresolved contradiction.
+    """
+    if a_id == b_id:
+        return False
+    conn = connect()
+    n = conn.execute(
+        "SELECT COUNT(*) AS n FROM facts WHERE id IN (?,?)", (a_id, b_id)
+    ).fetchone()["n"]
+    if n != 2:
+        return False
+    conn.execute(
+        "INSERT OR REPLACE INTO contradiction_reviews(low_id, high_id, disposition, created_at)"
+        " VALUES (?,?,?,?)",
+        (min(a_id, b_id), max(a_id, b_id), disposition or "dismissed", now()),
+    )
+    conn.commit()
+    return True
+
+
+def reconsider_contradiction(a_id: int, b_id: int) -> bool:
+    """Undo a dismissal so the pair can be looked at again."""
+    conn = connect()
+    cur = conn.execute(
+        "DELETE FROM contradiction_reviews WHERE low_id=? AND high_id=?",
+        (min(a_id, b_id), max(a_id, b_id)),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def record_question(qclass: str, body: str) -> int:
@@ -622,22 +684,51 @@ def add_learned(
     return int(cur.lastrowid)
 
 
-def learned_candidates() -> list[dict[str, Any]]:
+def learned_row(learned_id: int) -> dict[str, Any] | None:
+    """One learned row by id, or None if it is not there.
+
+    Lets a caller tell "missing" from "already in that state" before it
+    performs a status change that has side effects (approving writes a fact).
+    """
     conn = connect()
-    rows = conn.execute(
-        """SELECT * FROM learned WHERE status='candidate'
-           ORDER BY created_at DESC LIMIT 50"""
-    ).fetchall()
+    row = conn.execute("SELECT * FROM learned WHERE id=?", (learned_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def learned_candidates() -> list[dict[str, Any]]:
+    return learned_by_status("candidate")
+
+
+def learned_by_status(status: str = "candidate", limit: int = 200) -> list[dict[str, Any]]:
+    """Learned rows for one status bucket, newest first.
+
+    ``status="all"`` returns every row so a manager screen can show the full
+    history; the default keeps the old queue-only behaviour.
+    """
+    conn = connect()
+    if status == "all":
+        rows = conn.execute(
+            "SELECT * FROM learned ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM learned WHERE status=? ORDER BY created_at DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
 def approve_learned(fact_id: int) -> int:
-    """Promote a learned candidate into a curated fact."""
+    """Promote a learned candidate into a curated fact.
+
+    Only a candidate can be approved, and only once: re-approving an already
+    approved row would write the same fact into memory a second time.
+    """
     conn = connect()
     row = conn.execute(
-        "SELECT text, subject, confidence FROM learned WHERE id=?", (fact_id,)
+        "SELECT text, subject, confidence, status FROM learned WHERE id=?", (fact_id,)
     ).fetchone()
-    if not row:
+    if not row or row["status"] == "approved":
         return 0
     fid = add_fact(
         text=row["text"],
@@ -660,8 +751,16 @@ def delete_learned(learned_id: int) -> bool:
 
 
 def reject_learned(learned_id: int) -> bool:
+    """Send a candidate to the rejected bucket.
+
+    Rejecting something already rejected changes nothing, so it reports False
+    instead of claiming work was done.
+    """
     conn = connect()
-    cur = conn.execute("UPDATE learned SET status='rejected' WHERE id=?", (learned_id,))
+    cur = conn.execute(
+        "UPDATE learned SET status='rejected' WHERE id=? AND status<>'rejected'",
+        (learned_id,),
+    )
     conn.execute("DELETE FROM memory_fts WHERE kind='learned' AND ref_id=?", (learned_id,))
     conn.commit()
     return cur.rowcount > 0
@@ -845,6 +944,25 @@ def open_decisions(limit: int = 50) -> list[dict[str, Any]]:
             """SELECT * FROM decisions
                WHERE resolved_at IS NULL
                ORDER BY review_date IS NULL, review_date, id DESC
+                LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    ]
+
+
+def resolved_decisions(limit: int = 50) -> list[dict[str, Any]]:
+    """Closed decisions, most recently settled first.
+
+    Kept separate from ``open_decisions`` so a ledger screen can show what was
+    actually decided later without mixing it into the work still outstanding.
+    """
+    conn = connect()
+    return [
+        dict(r)
+        for r in conn.execute(
+            """SELECT * FROM decisions
+               WHERE resolved_at IS NOT NULL
+               ORDER BY resolved_at DESC, id DESC
                LIMIT ?""",
             (limit,),
         ).fetchall()

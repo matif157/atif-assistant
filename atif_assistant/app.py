@@ -11,6 +11,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -78,7 +79,9 @@ class LearnedUpdate(BaseModel):
     kind: str | None = None
     source: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    status: str | None = None
+    # The vocabulary is fixed; anything else would create a row that no
+    # filter in the UI can ever show again.
+    status: Literal["candidate", "approved", "rejected"] | None = None
 
 
 class LearnedBulk(BaseModel):
@@ -100,7 +103,6 @@ class ContradictionMerge(BaseModel):
     keep_id: int
     remove_id: int
     reconciled_text: str = Field(..., min_length=1)
-    subject: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
@@ -432,8 +434,19 @@ def insights() -> dict:
 
 
 @app.get("/api/learned")
-def learned_candidates() -> dict:
-    return {"candidates": db.learned_candidates()}
+def learned_candidates(status: str = "candidate") -> JSONResponse:
+    """Learned rows for one bucket: candidate (default), approved, rejected, all.
+
+    Kept under the original ``candidates`` key so existing clients keep
+    working; a bad bucket is refused rather than silently returning a queue
+    the caller did not ask for.
+    """
+    if status not in {"candidate", "approved", "rejected", "all"}:
+        return JSONResponse(
+            {"error": "status must be candidate, approved, rejected or all"},
+            status_code=400,
+        )
+    return JSONResponse({"candidates": db.learned_by_status(status), "status": status})
 
 
 @app.post("/api/learned/{fact_id}/approve")
@@ -551,7 +564,16 @@ def evidence(q: str = "", limit: int = 20) -> JSONResponse:
 
 @app.get("/api/decisions")
 def decisions() -> dict:
-    return {"due": db.due_decisions(), "open": db.open_decisions()}
+    """The whole ledger: what is due, what is open, and what already closed.
+
+    ``resolved`` is additive so existing clients that only read ``due`` and
+    ``open`` keep working unchanged.
+    """
+    return {
+        "due": db.due_decisions(),
+        "open": db.open_decisions(),
+        "resolved": db.resolved_decisions(),
+    }
 
 
 @app.post("/api/decisions")
@@ -1175,30 +1197,38 @@ def update_rule(rule_id: int, payload: dict) -> JSONResponse:
     return JSONResponse({"ok": True, "id": rule_id})
 
 
-@app.delete("/api/learned/{learned_id}")
-def delete_learned(learned_id: int) -> JSONResponse:
-    if not db.delete_learned(learned_id):
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"ok": True, "id": learned_id})
-
-
-# Mounted last so the API routes above are matched before the static handler.
-if WEB_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
-
-
 @app.put("/api/learned/{learned_id}")
 def update_learned(learned_id: int, payload: LearnedUpdate) -> JSONResponse:
-    ok = db.update_learned(
+    """Edit a learned row; a status flip also performs what that status means.
+
+    Field edits are a plain update, but "approved" is not just a label: it is
+    what writes the fact into memory. Routing it through the same helper the
+    approve buttons use keeps that invariant (and its once-only guarantee)
+    true no matter which client asks.
+    """
+    row = db.learned_row(learned_id)
+    if row is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    changed = db.update_learned(
         learned_id,
         text=payload.text,
         subject=payload.subject,
         kind=payload.kind,
         source=payload.source,
         confidence=payload.confidence,
-        status=payload.status,
+        status=None if payload.status in ("approved", "rejected") else payload.status,
     )
-    if not ok:
+    if payload.status == "approved" and row["status"] != "approved":
+        if db.approve_learned(learned_id) == 0:
+            return JSONResponse({"error": "not found or no changes"}, status_code=404)
+        changed = True
+    elif payload.status == "rejected" and row["status"] != "rejected":
+        if not db.reject_learned(learned_id):
+            return JSONResponse({"error": "not found or no changes"}, status_code=404)
+        changed = True
+
+    if not changed:
         return JSONResponse({"error": "not found or no changes"}, status_code=404)
     return JSONResponse({"ok": True, "id": learned_id})
 
@@ -1212,29 +1242,22 @@ def delete_learned(learned_id: int) -> JSONResponse:
 
 @app.post("/api/learned/bulk")
 def bulk_learned(payload: LearnedBulk) -> JSONResponse:
+    """Approve/reject/delete several candidates in one call.
+
+    Each helper reports whether it did anything, so the count only includes
+    rows that actually changed; a missing or already-final id is skipped
+    rather than being reported as work done.
+    """
     ids = [i for i in payload.ids if isinstance(i, int)]
     if not ids:
         return JSONResponse({"ok": True, "processed": 0})
-    processed = 0
-    for lid in ids:
-        if payload.action == "approve":
-            try:
-                if db.approve_learned(lid) > 0:
-                    processed += 1
-            except Exception:
-                pass
-        elif payload.action == "reject":
-            try:
-                if db.reject_learned(lid):
-                    processed += 1
-            except Exception:
-                pass
-        elif payload.action == "delete":
-            try:
-                if db.delete_learned(lid):
-                    processed += 1
-            except Exception:
-                pass
+    handlers = {
+        "approve": lambda i: db.approve_learned(i) > 0,
+        "reject": lambda i: db.reject_learned(i),
+        "delete": lambda i: db.delete_learned(i),
+    }
+    act = handlers[payload.action]
+    processed = sum(1 for lid in ids if act(lid))
     return JSONResponse({"ok": True, "processed": processed})
 
 
@@ -1257,46 +1280,80 @@ def update_decision(decision_id: int, payload: DecisionUpdate) -> JSONResponse:
 
 @app.post("/api/insights/contradictions/{a_id}/{b_id}/review")
 def review_contradiction(a_id: int, b_id: int) -> JSONResponse:
-    # Minimal stub: mark by updating nothing if already exists; return ok if ids look valid
-    # Real impl can store review state in future; tests don't require persistence here
+    """Settle a contradiction pair so it stops reappearing in the feed.
+
+    Neither fact is deleted and no evidence is thrown away; the pair is only
+    marked as looked-at. Merging (which rewrites memory) stays a separate,
+    explicit act.
+    """
+    if not db.dismiss_contradiction(a_id, b_id):
+        return JSONResponse({"error": "one or both facts not found"}, status_code=404)
+    return JSONResponse({"ok": True, "reviewed": [a_id, b_id]})
+
+
+@app.delete("/api/insights/contradictions/{a_id}/{b_id}/review")
+def undo_contradiction_review(a_id: int, b_id: int) -> JSONResponse:
+    """Undo a dismissal so an unresolved pair shows up again."""
+    if not db.reconsider_contradiction(a_id, b_id):
+        return JSONResponse({"error": "not previously reviewed"}, status_code=404)
     return JSONResponse({"ok": True, "reviewed": [a_id, b_id]})
 
 
 @app.post("/api/insights/contradictions/merge")
 def merge_contradictions(payload: ContradictionMerge) -> JSONResponse:
+    """Fold two conflicting facts into one reconciled fact.
+
+    A merge always reduces two rows to one: the reconciled text is written
+    first, and only then are both originals removed. If either original is
+    already gone the merge is refused rather than silently duplicating memory.
+    """
     if payload.keep_id == payload.remove_id:
         return JSONResponse({"error": "keep_id and remove_id must differ"}, status_code=400)
-    # Create reconciled fact; delete removed fact (preserve keep? tests may expect new fact created)
+    conn = db.connect()
+    present = {
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM facts WHERE id IN (?,?)", (payload.keep_id, payload.remove_id)
+        ).fetchall()
+    }
+    if present != {payload.keep_id, payload.remove_id}:
+        return JSONResponse({"error": "one or both facts not found"}, status_code=404)
     fid = db.add_fact(
         text=payload.reconciled_text,
-        subject=payload.subject,
         source=f"reconciled:keep={payload.keep_id};remove={payload.remove_id}",
-        confidence=payload.confidence if payload.confidence is not None else 0.5,
+        confidence=0.5 if payload.confidence is None else payload.confidence,
     )
-    try:
-        db.delete_fact(payload.remove_id)
-    except Exception:
-        pass
+    db.delete_fact(payload.keep_id)
+    db.delete_fact(payload.remove_id)
     return JSONResponse({"ok": True, "fact_id": fid})
 
 
 @app.post("/api/media/bulk/delete")
 def bulk_delete_media(payload: MediaBulkDelete) -> JSONResponse:
-    from pathlib import Path
+    """Delete several media rows, unlinking only files nothing else points at.
+
+    Delegates to the same safety rules as DELETE /api/media/{id}: the file is
+    removed only when it lives under the uploads dir and no remaining row
+    references it, so a de-duplicated upload shared by another row survives.
+    """
     processed = 0
     for mid in [i for i in payload.ids if isinstance(i, int)]:
+        path = db.media_path(mid)
+        if path is None:
+            continue
+        if not db.delete_media(mid):
+            continue
+        processed += 1
         try:
-            path = db.media_path(mid)
-            if path:
-                p = Path(path)
-                uploads = Path("uploads").resolve()
-                try:
-                    if p.resolve().is_relative_to(uploads) and p.exists():
-                        p.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            if db.delete_media(mid):
-                processed += 1
-        except Exception:
+            p = Path(path).resolve()
+            if p.is_relative_to(uploads.UPLOADS_DIR.resolve()) and not db.media_path_in_use(path):
+                p.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            # A read-only or already-missing file must never fail the delete.
             pass
     return JSONResponse({"ok": True, "processed": processed})
+
+
+# Mounted last so the API routes above are matched before the static handler.
+if WEB_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
