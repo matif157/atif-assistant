@@ -1346,10 +1346,6 @@ document.getElementById("btn-import")?.addEventListener("click", () => {
   const dataSheet = document.getElementById("data-sheet");
   if (dataSheet) { dataSheet.hidden = false; showDataTab("import"); loadWhatsAppStatus(); }
 });
-document.getElementById("close-import")?.addEventListener("click", () => {
-  const dataSheet = document.getElementById("data-sheet");
-  if (dataSheet) dataSheet.hidden = true;
-});
 document.getElementById("wa-preview")?.addEventListener("click", previewWhatsApp);
 document.getElementById("wa-stage")?.addEventListener("click", stageWhatsApp);
 document.getElementById("wa-selectall")?.addEventListener("click", () => {
@@ -2592,9 +2588,6 @@ document.getElementById("tab-media")?.addEventListener("click", () => { showData
 
 document.getElementById("btn-upload")?.addEventListener("click", () => {
   if (dataSheet) { dataSheet.hidden = false; showDataTab("upload"); }
-});
-document.getElementById("close-upload")?.addEventListener("click", () => {
-  // no-op in new flow
 });
 
 function fileToBase64(file) {
