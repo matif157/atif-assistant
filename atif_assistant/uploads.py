@@ -51,7 +51,8 @@ _DIRECTIVE = re.compile(
 _FACT = re.compile(
     r"\b(?:my|our)\s+(?:name|address|city|country|job|title|boss|wife|husband|"
     r"mother|father|mom|dad|son|daughter|sister|brother|phone|email|birthday|"
-    r"home|flat|apartment|car|school|university|company|religion|language)\b"
+    r"home|flat|apartment|car|school|university|company|religion|language|"
+    r"favourite|favorite|preferred)\b"
     r"|\bi\s+(?:live|work|stay|study|speak|prefer|like|hate|need|want|am)\b",
     re.IGNORECASE,
 )

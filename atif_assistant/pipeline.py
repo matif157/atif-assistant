@@ -27,7 +27,10 @@ from .llm import ProviderError, complete, provider_enabled, provider_status
 
 # Questions the checks ask themselves. Fixed text keeps runs comparable.
 PROBE_QUESTION = "where do I live"
-FULL_ANSWER_DEFAULT = "In one short sentence: what can you help me with?"
+# A plain trivia question: the router sends unclassified asks to "challenge"
+# on purpose, but the everyday path a user hits is "ask", which is what this
+# should exercise.
+FULL_ANSWER_DEFAULT = "What is the capital of France? Answer in one short sentence."
 
 REPLY_TIMEOUT = 30.0
 FULL_TIMEOUT = 180.0
