@@ -7,6 +7,10 @@ const mic = document.getElementById("mic");
 const statusline = document.getElementById("statusline");
 const dot = document.getElementById("dot");
 
+// The server hands back a session id with the first reply; restoring it here
+// keeps a reload inside the same conversation. Accidentally removed once (by
+// the basis-sidebar commit) which broke chat, the call and hands-free at once.
+let session = localStorage.getItem("atif-assistant.session") || null;
 let lastBasis = null;
 
 function renderBasis(data) {
@@ -326,7 +330,9 @@ async function ask(question, opts = {}) {
     lastBasis = null;
     renderBasis(null);
     renderReplyOptions(null);
-    return null;
+    // Callers (the voice call and hands-free loop) need the reason, not just
+    // a null, so the failure can be shown instead of looping silently.
+    return { text: null, error: detail };
   } finally {
     sendBtn.disabled = false;
   }
@@ -2312,6 +2318,8 @@ async function callSubmit(text, speaker) {
   const data = await ask(text, { suppressSpeak: true, speaker });
   if (!callActive) return;
   if (!data || !data.text) {
+    // Never loop silently: show why the answer never came, then keep listening.
+    callTranscriptEl.textContent = data?.error || "No answer. Try again.";
     callResume();
     return;
   }
@@ -2362,6 +2370,8 @@ function setHandsFreePhase(phase) {
     hintEl.textContent = "Listening… (tap the mic to stop)";
   } else if (phase === "thinking") {
     hintEl.textContent = "Thinking…";
+  } else if (phase === "error") {
+    hintEl.textContent = "No answer. Listening again…";
   } else {
     hintEl.textContent = "Speaking… (tap the mic to stop)";
   }
@@ -2550,6 +2560,8 @@ async function handsFreeSubmit(text, speaker) {
   const data = await ask(text, { suppressSpeak: true, speaker });
   if (!handsFreeActive) return;
   if (!data || !data.text) {
+    // Same rule as the call: name the failure, then keep the loop alive.
+    setHandsFreePhase("error");
     handsFreeResume();
     return;
   }
