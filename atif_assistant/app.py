@@ -6,6 +6,7 @@ you remote access without exposing a port.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import uuid
@@ -18,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db, engine, learn, location, ollama, plan, router, stt, tts, uploads, voice_id
+from . import db, engine, learn, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
 from .llm import (
@@ -1352,6 +1353,42 @@ def bulk_delete_media(payload: MediaBulkDelete) -> JSONResponse:
             # A read-only or already-missing file must never fail the delete.
             pass
     return JSONResponse({"ok": True, "processed": processed})
+
+
+# --------------------------------------------------------------- pipeline
+
+@app.get("/api/pipeline")
+async def pipeline_report() -> dict:
+    """Run every pipeline stage for real and report pass/fail per stage.
+
+    Answers "which part is broken?" without guessing: memory retrieval, the
+    router, the model host, a real model completion, a real espeak-to-whisper
+    round trip, TTS, and the provider chain each get their own row and hint.
+    """
+    return await pipeline.run_checks()
+
+
+class PipelineFullIn(BaseModel):
+    question: str | None = None
+
+
+@app.post("/api/pipeline/full")
+async def pipeline_full(payload: PipelineFullIn | None = None) -> JSONResponse:
+    """One genuine end-to-end answer (slow: up to three model passes)."""
+    question = (payload.question if payload else None) or pipeline.FULL_ANSWER_DEFAULT
+    try:
+        return JSONResponse(await pipeline.full_answer(question))
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "the full answer timed out (3 minutes)"},
+            status_code=504,
+        )
+    except pipeline.ProviderError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the settings screen
+        return JSONResponse(
+            {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status_code=502
+        )
 
 
 # Mounted last so the API routes above are matched before the static handler.

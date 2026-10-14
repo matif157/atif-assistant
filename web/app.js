@@ -3505,6 +3505,161 @@ if (setOllamaAutostart) {
   });
 }
 
+// ------------------------------------------------------------- pipeline
+// Settings -> MODEL PIPELINE. Each row is a stage that ran for real; a
+// failing row carries its own fix so "chat is broken" stops being a mystery.
+const pipelineListEl = document.getElementById("pipeline-list");
+const pipelineStatusEl = document.getElementById("pipeline-status");
+const pipelineRunBtn = document.getElementById("pipeline-run");
+const pipelineFullBtn = document.getElementById("pipeline-full");
+
+function renderPipelineRow(stage) {
+  if (!pipelineListEl) return;
+  const card = document.createElement("div");
+  card.className = "pcard";
+  card.dataset.id = stage.id || stage.label;
+  const head = document.createElement("div");
+  head.className = "phead";
+  const title = document.createElement("strong");
+  title.textContent = stage.label;
+  const badge = document.createElement("span");
+  badge.className = "pbadge " + (stage.state === "pass" ? "pok" : stage.state === "fail" ? "pbad" : "poff");
+  badge.textContent = (stage.state || "skip").toUpperCase();
+  head.append(title, badge);
+  if (stage.ms) {
+    const ms = document.createElement("span");
+    ms.className = "hint";
+    ms.textContent = stage.ms + " ms";
+    head.appendChild(ms);
+  }
+  card.appendChild(head);
+  if (stage.detail) {
+    const detail = document.createElement("div");
+    detail.className = "hint";
+    detail.textContent = stage.detail;
+    card.appendChild(detail);
+  }
+  if (stage.hint) {
+    const fix = document.createElement("div");
+    fix.className = "hint";
+    fix.textContent = "FIX: " + stage.hint;
+    card.appendChild(fix);
+  }
+  pipelineListEl.appendChild(card);
+}
+
+function clientStages() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  return [
+    {
+      id: "session",
+      label: "Session on this device",
+      state: session ? "pass" : "skip",
+      ms: 0,
+      detail: session ? "this device holds a session id" : "no session - open the app from the server address, not a copied file",
+    },
+    {
+      id: "mic",
+      label: "Microphone",
+      state: navigator.mediaDevices ? "pass" : "fail",
+      ms: 0,
+      detail: navigator.mediaDevices
+        ? "the browser exposes a microphone"
+        : "no microphone API (needs https or localhost)",
+    },
+    {
+      id: "browser-sr",
+      label: "Browser speech-in (online)",
+      state: SR ? "pass" : "skip",
+      ms: 0,
+      detail: SR
+        ? "built-in speech recognition available (needs network)"
+        : "this browser has no built-in speech recognition",
+    },
+    {
+      id: "offline-stt",
+      label: "Offline speech-in downloaded",
+      state: localSttReady ? "pass" : "skip",
+      ms: 0,
+      detail: localSttReady
+        ? "the server's offline engine is ready"
+        : "not downloaded yet - use DOWNLOAD URDU MODEL above",
+    },
+    {
+      id: "sw",
+      label: "Service worker",
+      state: navigator.serviceWorker ? "pass" : "skip",
+      ms: 0,
+      detail: navigator.serviceWorker ? "offline page caching active" : "no service worker support",
+    },
+  ];
+}
+
+async function runPipelineChecks() {
+  if (!pipelineRunBtn || !pipelineListEl) return;
+  pipelineRunBtn.disabled = true;
+  pipelineListEl.innerHTML = "";
+  if (pipelineStatusEl) pipelineStatusEl.textContent = "Running each stage for real...";
+  try {
+    const data = await (await fetch("/api/pipeline")).json();
+    for (const stage of data.stages || []) renderPipelineRow(stage);
+  } catch (e) {
+    if (pipelineStatusEl) {
+      pipelineStatusEl.textContent = "Could not reach the server: " + e.message;
+    }
+  }
+  for (const s of clientStages()) renderPipelineRow(s);
+  const fails = pipelineListEl.querySelectorAll(".pbad").length;
+  if (pipelineStatusEl) {
+    pipelineStatusEl.textContent = fails
+      ? fails + " stage(s) need attention - the FIX line on each card says how."
+      : "Every stage passed.";
+  }
+  pipelineRunBtn.disabled = false;
+}
+
+if (pipelineRunBtn) pipelineRunBtn.addEventListener("click", runPipelineChecks);
+
+if (pipelineFullBtn) {
+  pipelineFullBtn.addEventListener("click", async () => {
+    pipelineFullBtn.disabled = true;
+    if (pipelineStatusEl) {
+      pipelineStatusEl.textContent =
+        "Asking for a full answer... a small local model can take a minute or more.";
+    }
+    try {
+      const data = await (
+        await fetch("/api/pipeline/full", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        })
+      ).json();
+      if (!data.ok) {
+        if (pipelineStatusEl) {
+          pipelineStatusEl.textContent = "Full answer failed: " + (data.error || "unknown error");
+        }
+      } else {
+        renderPipelineRow({
+          id: "full-answer",
+          label: "Full answer (" + (data.provider || "?") + ")",
+          state: "pass",
+          ms: data.ms,
+          detail: data.text,
+          hint: null,
+        });
+        if (pipelineStatusEl) {
+          pipelineStatusEl.textContent =
+            data.ms + " ms via " + data.provider + ", route '" + data.route + "'. " + (data.note || "");
+        }
+      }
+    } catch (e) {
+      if (pipelineStatusEl) pipelineStatusEl.textContent = "Full answer failed: " + e.message;
+    }
+    pipelineFullBtn.disabled = false;
+  });
+}
+
 const providersEl = document.getElementById("providers-list");
 const providersStatus = document.getElementById("providers-status");
 
