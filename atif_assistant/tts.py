@@ -188,7 +188,7 @@ def synthesize(text: str, lang: str = "en") -> dict[str, Any]:
             return result
         reason = result.get("reason")
     elif not llm.provider_enabled("gemini"):
-        reason = "server speech is turned off"
+        reason = "server speech (Gemini) is turned off"
     else:
         reason = "server speech needs a Gemini key"
 
