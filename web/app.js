@@ -1371,7 +1371,9 @@ document.getElementById("wa-clear")?.addEventListener("click", () => {
 
 /* ------------------------------------------------------------- settings */
 
-const settings = {
+// Snapshot of the built-in defaults so RESET can restore them in memory as
+// well as on the server.
+const SETTINGS_DEFAULTS = {
   lang: "en",
   replyLanguage: "auto",
   speak: "off",
@@ -1383,6 +1385,7 @@ const settings = {
   accent: "",
   theme: "dark",
 };
+const settings = { ...SETTINGS_DEFAULTS };
 
 function applyAccent(color) {
   if (color) document.documentElement.style.setProperty("--acc", color);
@@ -3161,6 +3164,22 @@ document.getElementById("save-settings").addEventListener("click", async () => {
   const status = document.getElementById("settings-status");
   const s = STRINGS[settings.lang === "ur" ? "ur" : "en"];
   if (status) status.textContent = s.saved;
+});
+
+document.getElementById("reset-settings").addEventListener("click", async () => {
+  if (!window.confirm("Reset every setting to its default? API keys are kept.")) return;
+  try {
+    await fetch("/api/settings/reset", { method: "POST" });
+  } catch {
+    /* the in-memory reset below still helps even if the server is down */
+  }
+  Object.assign(settings, SETTINGS_DEFAULTS);
+  applyLang(settings.lang);
+  applyTheme(settings.theme);
+  applyAccent(settings.accent);
+  syncSettingsForm();
+  const status = document.getElementById("settings-status");
+  if (status) status.textContent = "Settings reset to defaults.";
 });
 
 document.getElementById("test-voice").addEventListener("click", () => {

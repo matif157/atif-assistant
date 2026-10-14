@@ -645,6 +645,20 @@ def set_settings(payload: dict):
     return {"ok": True}
 
 
+@app.post("/api/settings/reset")
+def reset_settings() -> dict:
+    """Delete every stored setting except provider API keys.
+
+    Keys survive because they are expensive to re-enter and live on their own
+    screen; everything else falls back to its built-in default, which is what
+    a stuck settings screen needs as a way out.
+    """
+    conn = db.connect()
+    conn.execute("DELETE FROM settings WHERE key NOT LIKE 'provider.%'")
+    conn.commit()
+    return {"ok": True}
+
+
 # ------------------------------------------------------------ providers
 
 class ProviderIn(BaseModel):
