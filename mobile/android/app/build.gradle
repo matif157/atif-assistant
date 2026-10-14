@@ -43,14 +43,19 @@ chaquopy {
     defaultConfig {
         version "3.12"
         pip {
+            // Chaquopy's package index has no pydantic (v2 needs the native
+            // pydantic-core extension, which it cannot build), so we pin the
+            // pure-Python pydantic v1 line and a FastAPI release that supports
+            // it. Exact pins = the set proven green by the 429-test suite in a
+            // clean venv (pydantic 1.10.26 fixed Python 3.12.4+ ForwardRef).
+            // pydantic first: a later `install` never re-resolves it to v2.
+            install "pydantic==1.10.26"
+            install "fastapi==0.115.14"
             // uvicorn WITHOUT [standard]: the optional C extensions (uvloop,
             // httptools) are not needed and are the most likely build breakage.
-            install "fastapi"
-            install "uvicorn"
-            install "httpx"
-            install "pydantic"
-            install "python-dateutil"
-            install "jinja2"
+            install "uvicorn==0.54.0"
+            install "httpx==0.28.1"
+            install "pypdf==6.20.1"
         }
     }
 }

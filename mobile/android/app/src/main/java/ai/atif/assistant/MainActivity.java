@@ -18,6 +18,8 @@ import android.webkit.WebViewClient;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Locale;
 
@@ -34,12 +36,19 @@ public class MainActivity extends Activity {
     private TextToSpeech tts;
     private SpeechRecognizer recognizer;
 
+    private static final String SERVER_URL = "http://127.0.0.1:8770/";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(this));
+        }
+        // Debug builds only: chrome://inspect can attach to the WebView.
+        if ((getApplicationInfo().flags
+                & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
         }
         final String dataDir = getFilesDir().getAbsolutePath();
         new Thread(() -> {
@@ -62,7 +71,33 @@ public class MainActivity extends Activity {
         requestAudioPermission();
         tts = new TextToSpeech(this, status -> { /* locale set per utterance */ });
 
-        web.loadUrl("http://127.0.0.1:8770/");
+        // First launch boots Python + uvicorn (a couple of seconds). Wait for
+        // the port to accept connections before loading, otherwise the WebView
+        // would render a connection error and never retry.
+        new Thread(() -> {
+            if (!waitForServer(20_000)) {
+                android.util.Log.w("Atif", "server not ready after 20s, loading anyway");
+            }
+            web.post(() -> web.loadUrl(SERVER_URL));
+        }).start();
+    }
+
+    private static boolean waitForServer(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress("127.0.0.1", 8770), 250);
+                return true;
+            } catch (Exception e) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+        return false;
     }
 
     private void requestAudioPermission() {
@@ -91,6 +126,20 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void listen(String lang) {
             runOnUiThread(() -> startListening(lang));
+        }
+
+        /** Silence TTS and cancel any active recognition (end call / hands-free off). */
+        @JavascriptInterface
+        public void stop() {
+            if (tts != null) {
+                tts.stop();
+            }
+            runOnUiThread(() -> {
+                if (recognizer != null) {
+                    recognizer.destroy();
+                    recognizer = null;
+                }
+            });
         }
     }
 

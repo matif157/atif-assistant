@@ -1271,7 +1271,9 @@ def bulk_learned(payload: LearnedBulk) -> JSONResponse:
         "reject": lambda i: db.reject_learned(i),
         "delete": lambda i: db.delete_learned(i),
     }
-    act = handlers[payload.action]
+    act = handlers.get(payload.action)
+    if act is None:
+        return JSONResponse({"error": "unknown action"}, status_code=422)
     processed = sum(1 for lid in ids if act(lid))
     return JSONResponse({"ok": True, "processed": processed})
 

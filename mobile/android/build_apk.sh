@@ -19,11 +19,23 @@ log() { printf '\n== %s\n' "$*"; }
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- 1. JDK
-if ! (java -version 2>&1 | grep -q version); then
-  log "Installing a JDK (Temurin 17) with Homebrew"
-  "$BREW" install --cask temurin@17
-  export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+# A Homebrew *formula* (openjdk), never a cask: cask .pkg installers need an
+# interactive sudo, which breaks scripted/remote builds.
+find_java_home() {
+  [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ] && return 0
+  JAVA_HOME="$(/usr/libexec/java_home -v 17 2>/dev/null)" && [ -x "$JAVA_HOME/bin/java" ] && return 0
+  for c in /opt/homebrew/opt/openjdk@17 /opt/homebrew/opt/openjdk; do
+    if [ -x "$c/bin/java" ]; then JAVA_HOME="$c"; return 0; fi
+  done
+  return 1
+}
+if ! find_java_home; then
+  log "Installing a JDK (OpenJDK 17) with Homebrew"
+  HOMEBREW_NO_INSTALL_CLEANUP=1 "$BREW" install openjdk@17
+  JAVA_HOME=/opt/homebrew/opt/openjdk@17
 fi
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:$PATH"
 
 # ---------------------------------------------------------- 2. Android SDK
 if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
@@ -39,18 +51,18 @@ export ANDROID_SDK_ROOT="$SDK"
 export ANDROID_HOME="$SDK"
 export PATH="$SDK/platform-tools:$SDK/cmdline-tools/latest/bin:$PATH"
 
-log "Accepting SDK licenses and installing platform/build-tools"
+log "Accepting SDK licenses and installing platform/build-tools/NDK"
 yes | sdkmanager --licenses >/dev/null 2>&1 || true
-sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+# NDK 26.1: what AGP 8.5 defaults to; also the toolchain llama.cpp/whisper
+# will be cross-compiled with in M2/M3.
+sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" >/dev/null
 
 # ------------------------------------------------------------- 3. Gradle
-if ! need_cmd gradle; then
-  if [ -x "$ANDROID_SDK_ROOT/gradle/bin/gradle" ]; then
-    PATH="$ANDROID_SDK_ROOT/gradle/bin:$PATH"
-  else
-    log "Installing Gradle with Homebrew"
-    "$BREW" install gradle
-  fi
+# Build with the committed wrapper (pinned Gradle 8.7, what AGP 8.5.2
+# expects) so the machine's own Gradle version can never break the build.
+if [ ! -x ./gradlew ]; then
+  echo "gradlew wrapper missing — run:  gradle wrapper --gradle-version 8.7" >&2
+  exit 1
 fi
 
 # ------------------------------------------- 4. Stage Python + web assets
@@ -58,13 +70,12 @@ log "Staging atif_assistant and web/ into the app's python sources"
 PYDEST="app/src/main/python"
 rm -rf "$PYDEST/atif_assistant" "$PYDEST/web"
 cp -R "$ROOT/atif_assistant" "$PYDEST/atif_assistant"
-rm -rf "$PYDEST/atif_assistant/__pycache__"
+find "$PYDEST/atif_assistant" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 cp -R "$ROOT/web" "$PYDEST/web"
-printf 'ATIF_ASSISTANT_DATA_DIR is set at runtime to app files dir\n' > /dev/null
 
 # ------------------------------------------------------------- 5. Build
 log "Building debug APK"
-gradle --no-daemon assembleDebug
+./gradlew --no-daemon assembleDebug
 
 APK="app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "$APK" ]; then
