@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db, engine, learn, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
+from . import applog, db, engine, learn, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
 from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
 from .llm import (
@@ -263,6 +263,16 @@ def download_speech_model(payload: dict | None = None) -> JSONResponse:
 def llm_status() -> dict:
     """On-device LLM: binary, model file, server and download progress."""
     return llm_model_status()
+
+
+@app.get("/api/app-log")
+def app_log(limit: int = 50) -> dict:
+    """Recent runtime events (model downloads, provider spawns, failures).
+
+    On-device stdout vanishes into logcat; this is the readable mirror for
+    the UI and for adb-based debugging.
+    """
+    return {"events": applog.tail(limit)}
 
 
 @app.post("/api/llm/model")

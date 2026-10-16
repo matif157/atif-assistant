@@ -213,9 +213,21 @@ def ensure_llamacpp_started() -> str:
             _LLAMACPP["proc"] = proc
             _LLAMACPP["model_id"] = None
             _LLAMACPP["error"] = None
+            try:
+                from . import applog
+
+                applog.log("llamacpp.spawn", model=str(model), port=LLAMACPP_PORT)
+            except Exception:  # noqa: BLE001
+                pass
             return "starting"
         except Exception as exc:  # noqa: BLE001 - report, never crash the request
             _LLAMACPP["error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                from . import applog
+
+                applog.log("llamacpp.spawn_failed", error=_LLAMACPP["error"])
+            except Exception:  # noqa: BLE001
+                pass
             return "unavailable"
 
 
@@ -808,6 +820,12 @@ def _llm_download_worker(name: str) -> None:
             tmp.rename(dest)
             with _LLM_DL_LOCK:
                 _LLM_DL.update({"state": "ready", "reason": "installed"})
+            try:
+                from . import applog
+
+                applog.log("llm.model_ready", name=name, bytes=dest.stat().st_size)
+            except Exception:  # noqa: BLE001
+                pass
             return
         except Exception as exc:  # noqa: BLE001 - retry, then fail soft
             last_error = str(exc)[:200] or type(exc).__name__
@@ -818,3 +836,9 @@ def _llm_download_worker(name: str) -> None:
     tmp.unlink(missing_ok=True)
     with _LLM_DL_LOCK:
         _LLM_DL.update({"state": "error", "reason": last_error})
+    try:
+        from . import applog
+
+        applog.log("llm.model_failed", name=name, error=last_error)
+    except Exception:  # noqa: BLE001
+        pass

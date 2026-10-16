@@ -11,6 +11,46 @@
 </head>
 <body>
 
+<!-- First-run setup: shown once, when neither the speech nor the LLM model
+     is installed yet. Explains the offline stack and offers one-tap fetches. -->
+<div id="setup-overlay" class="setup-overlay" hidden>
+  <div class="setup-card">
+    <h2>SET UP ATIF ASSISTANT</h2>
+    <p class="setup-lead">
+      Atif runs entirely on this device: your conversations, memory and files
+      never leave it. Two optional models make it fully self-contained -
+      speech recognition and the reasoning model. Each download happens once.
+    </p>
+
+    <div class="setup-row" id="setup-speech-row">
+      <div class="setup-row-head">
+        <strong>SPEECH RECOGNITION</strong>
+        <span class="setup-state" id="setup-speech-state">not installed</span>
+      </div>
+      <div class="setup-hint">Whisper small (466 MB). Mic input works offline, Urdu included.</div>
+      <div class="form-actions">
+        <button class="ghost" id="setup-speech-dl">DOWNLOAD (466 MB)</button>
+      </div>
+    </div>
+
+    <div class="setup-row" id="setup-llm-row" hidden>
+      <div class="setup-row-head">
+        <strong>REASONING MODEL</strong>
+        <span class="setup-state" id="setup-llm-state">not installed</span>
+      </div>
+      <div class="setup-hint">Qwen 2.5 1.5B (1.1 GB). Questions are answered on-device, no key needed.</div>
+      <div class="form-actions">
+        <button class="ghost" id="setup-llm-dl">DOWNLOAD (1.1 GB)</button>
+      </div>
+    </div>
+
+    <div class="form-actions setup-actions">
+      <button class="ghost" id="setup-skip">SET UP LATER</button>
+      <button id="setup-start" disabled>START</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <div class="brand">
     <span class="dot" id="dot"></span>

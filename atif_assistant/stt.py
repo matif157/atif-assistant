@@ -250,6 +250,12 @@ def _stt_download_worker(name: str) -> None:
             tmp.replace(dest)
             with _STT_DL_LOCK:
                 _STT_DL.update({"state": "ready", "reason": "installed"})
+            try:
+                from . import applog
+
+                applog.log("stt.model_ready", name=name, bytes=dest.stat().st_size)
+            except Exception:  # noqa: BLE001
+                pass
             return
         except Exception as exc:  # noqa: BLE001 - retry, then fail soft
             last_error = str(exc)[:200] or type(exc).__name__
@@ -260,6 +266,12 @@ def _stt_download_worker(name: str) -> None:
     tmp.unlink(missing_ok=True)
     with _STT_DL_LOCK:
         _STT_DL.update({"state": "error", "reason": last_error})
+    try:
+        from . import applog
+
+        applog.log("stt.model_failed", name=name, error=last_error)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def transcribe(raw: bytes, lang: str = "auto") -> dict[str, Any]:
@@ -320,6 +332,12 @@ def transcribe(raw: bytes, lang: str = "auto") -> dict[str, Any]:
             "seconds": round(time.monotonic() - started, 1),
             "returncode": proc.returncode,
         }
+        try:
+            from . import applog
+
+            applog.log("stt.transcribe", ok=bool(text), **meta)
+        except Exception:  # noqa: BLE001
+            pass
         if not text:
             return {"text": None, "reason": "no speech recognised", "meta": meta}
         return {"text": text, "reason": None, "meta": meta}

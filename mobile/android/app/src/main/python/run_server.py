@@ -50,5 +50,13 @@ def start(files_dir, llama_bin="", whisper_bin="", host="127.0.0.1", port=8770):
     import uvicorn
 
     from atif_assistant.app import app
+    from atif_assistant.applog import log
+
+    log(
+        "server.boot",
+        data_dir=files_dir,
+        llama_bin=bool(llama_bin),
+        whisper_bin=bool(whisper_bin),
+    )
 
     uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)

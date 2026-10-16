@@ -1,20 +1,47 @@
 # Running Atif Assistant offline on Android
 
-Atif Assistant is a local-first web app (FastAPI + SQLite + a PWA front end).
-There is **no signed APK** yet: building one needs the Android SDK, Java,
-Gradle and an internet connection to fetch dependencies, none of which are
-available on the build machine. This document gives the honest, working paths
-instead.
+Atif Assistant is a local-first web app (FastAPI + SQLite + a local front
+end). The **Android APK** in [`mobile/android/`](../mobile/android/) runs the
+whole stack on the phone: embedded Python, on-device speech recognition
+(whisper.cpp) and an on-device reasoning model (llama.cpp), all without a
+network.
 
 ## What "offline" means here
 
 | Layer | Offline? | Notes |
 |---|---|---|
-| UI shell (PWA) | yes | `web/sw.js` caches the shell; `/api/*` is never cached. |
-| Data (memory, evidence, uploads) | yes | SQLite + `data/uploads/` on the device. |
-| Reasoning | only with a local model | Needs Ollama (or a compatible local endpoint). Without it the app answers with the labelled offline fallback. |
+| UI shell | yes | Served from the APK; no CDN, no fonts, no analytics. |
+| Data (memory, evidence, uploads) | yes | SQLite + `files/` inside the app sandbox. |
+| Speech in | yes | whisper.cpp + GGML small model, recorded and transcribed on-device. |
+| Speech out | yes | Android system TTS through the JS bridge. |
+| Reasoning | yes, with the bundled model | llama.cpp + Qwen2.5-1.5B (downloaded once from Settings or the first-run screen). Without it the app answers with the labelled offline fallback. |
 
-## Option A — Termux (fully offline on the phone)
+## The APK (recommended path)
+
+Build once with the toolchain in [`mobile/android/README.md`](../mobile/android/README.md),
+then install the debug APK (sideload, or `adb install`). On first launch the
+app offers a setup screen: download the speech model (466 MB) and the
+reasoning model (1.1 GB). Both fetches happen once, resume after a dropped
+connection, and never leave the device.
+
+Everything is local afterwards: the mic records at 16 kHz, whisper
+transcribes it, the pipeline routes the question, Qwen answers, and the
+reply is spoken with the system voice. Cloud providers (Groq, Gemini,
+OpenRouter) still work when a network and a key exist, but nothing needs
+them.
+
+Two Android platform facts shaped the design:
+
+- **W^X**: since Android 10 the app cannot `execve()` files in its own
+  writable data dir. The native binaries (`llama-server`, `whisper-cli`)
+  ship as JNI libs so the installer extracts them to `nativeLibraryDir`,
+  which is executable.
+- **WebView has no Web Speech API**, so voice goes through a small
+  `window.AndroidVoice` bridge to the native engines.
+
+## Other options
+
+### Termux
 
 1. Install [Termux](https://f-droid.org/packages/com.termux/) from F-Droid.
 2. In Termux:
@@ -27,42 +54,15 @@ instead.
    ./run.sh
    ```
 3. Open `http://127.0.0.1:8770` in Chrome and choose **Add to Home screen**.
-   After the first load the shell opens offline; the local server keeps the
-   data on the device.
 
-### Local model (no cloud, no key)
+A local model still needs Ollama (`ollama serve &`, `ollama pull llama3.2`)
+and `ATIF_ASSISTANT_OLLAMA_URL=http://127.0.0.1:11434`.
 
-```sh
-# in another Termux session
-pkg install -y ollama
-ollama serve &
-ollama pull llama3.2
-export ATIF_ASSISTANT_OLLAMA_URL=http://127.0.0.1:11434
-export ATIF_ASSISTANT_OLLAMA_MODEL=llama3.2
-```
-Ollama on a phone is heavy; a small model (e.g. `llama3.2:1b`) is realistic.
-
-## Option B — server on a computer, phone as the client
+### Server on a computer, phone as the client
 
 Run `./run.sh` on a computer on the same network (or Tailscale) and open the
 address on the phone. The PWA installs to the home screen; reasoning uses
-whatever provider/Ollama the computer has.
-
-## Option C — build the offline APK (Chaquopy)
-
-A ready-to-build Android project lives in [`mobile/android/`](../mobile/android/).
-It embeds Python 3.12 with Chaquopy, runs the server on `127.0.0.1:8770`, and
-hosts the web UI in a `WebView`, so the app works with no network. Build it:
-
-```sh
-cd mobile/android
-./build_apk.sh          # -> app/build/outputs/apk/debug/app-debug.apk
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-Voice in the app uses the native Android TTS/recognizer through a JS bridge,
-because WebView does not implement the Web Speech API. The one build risk is
-`pydantic-core` (a native extension); see `mobile/android/README.md`.
+whatever provider the computer has.
 
 ## Packaging a zip by hand
 

@@ -3315,6 +3315,139 @@ function scheduleSpeechPoll(ms) {
   speechPollTimer = setTimeout(loadSpeechStatus, ms);
 }
 
+/* ------------------------------------------------------- first-run setup */
+// One overlay, shown once, when the offline models are still missing. It
+// offers the same background downloads as Settings but without assuming the
+// user knows where Settings is.
+
+const setupOverlay = document.getElementById("setup-overlay");
+const setupSpeechState = document.getElementById("setup-speech-state");
+const setupLlmState = document.getElementById("setup-llm-state");
+const setupLlmRow = document.getElementById("setup-llm-row");
+const setupStartBtn = document.getElementById("setup-start");
+let setupPollTimer = 0;
+
+function markSetupDone() {
+  try { localStorage.setItem("atif_setup_done", "1"); } catch { /* private mode */ }
+  if (setupOverlay) setupOverlay.hidden = true;
+  clearTimeout(setupPollTimer);
+}
+
+function setupState(el, text, cls) {
+  if (!el) return;
+  el.textContent = text;
+  el.className = "setup-state" + (cls ? " " + cls : "");
+}
+
+async function refreshSetup() {
+  if (!setupOverlay || setupOverlay.hidden) return;
+  let speech = null;
+  let llm = null;
+  try { speech = await (await fetch("/api/speech")).json(); } catch { /* next poll */ }
+  try { llm = await (await fetch("/api/llm")).json(); } catch { /* desktop: none */ }
+  const s = (speech && speech.stt) || {};
+  const d = (s.download) || {};
+  const lm = (llm && llm.model) || {};
+
+  let speechReady = Boolean(s.small_present);
+  const speechDlBtn = document.getElementById("setup-speech-dl");
+  if (speechDlBtn) speechDlBtn.hidden = speechReady || d.state === "downloading";
+  if (d.state === "downloading") {
+    const got = Math.round((d.bytes || 0) / 1048576);
+    const want = Math.round((d.total || 0) / 1048576);
+    setupState(setupSpeechState, want ? `downloading ${got}/${want} MB` : "downloading...");
+  } else if (d.state === "error") {
+    setupState(setupSpeechState, "failed: " + (d.reason || "network"), "err");
+  } else if (speechReady) {
+    setupState(setupSpeechState, "ready", "ok");
+  } else {
+    setupState(setupSpeechState, "not installed");
+  }
+
+  const hasLlm = Boolean(llm && llm.binary);
+  if (setupLlmRow) setupLlmRow.hidden = !hasLlm;
+  const ldl = (llm && llm.download) || {};
+  let llmReady = !hasLlm || Boolean(lm.present);
+  const llmDlBtn = document.getElementById("setup-llm-dl");
+  if (llmDlBtn) llmDlBtn.hidden = llmReady || ldl.state === "downloading";
+  if (ldl.state === "downloading") {
+    const got = Math.round((ldl.bytes || 0) / 1048576);
+    const want = Math.round((ldl.total || 0) / 1048576);
+    setupState(setupLlmState, want ? `downloading ${got}/${want} MB` : "downloading...");
+  } else if (ldl.state === "error") {
+    setupState(setupLlmState, "failed: " + (ldl.reason || "network"), "err");
+  } else if (llmReady && hasLlm) {
+    setupState(setupLlmState, "ready", "ok");
+  } else {
+    setupState(setupLlmState, "not installed");
+  }
+
+  if (setupStartBtn) setupStartBtn.disabled = !(speechReady && llmReady);
+  if (d.state === "downloading" || ldl.state === "downloading") {
+    setupPollTimer = setTimeout(refreshSetup, 1500);
+  }
+}
+
+async function maybeShowSetup() {
+  if (!setupOverlay) return;
+  try { if (localStorage.getItem("atif_setup_done")) return; } catch { /* show it */ }
+  let need = false;
+  try {
+    const speech = await (await fetch("/api/speech")).json();
+    need = !speech?.stt?.small_present;
+    if (!need && speech?.stt?.available === false) need = true;
+  } catch { return; /* server unreachable: never block the app */ }
+  if (!need) {
+    try {
+      const llm = await (await fetch("/api/llm")).json();
+      if (llm.binary && !llm.model.present) need = true;
+    } catch { /* no llm endpoints: desktop without the binary */ }
+  }
+  if (!need) {
+    markSetupDone(); // nothing to set up; never nag again
+    return;
+  }
+  setupOverlay.hidden = false;
+  refreshSetup();
+}
+
+if (document.getElementById("setup-speech-dl")) {
+  document.getElementById("setup-speech-dl").addEventListener("click", async () => {
+    try {
+      await fetch("/api/speech/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "ggml-small.bin", background: true }),
+      });
+    } catch { /* refreshSetup shows the failure */ }
+    refreshSetup();
+  });
+}
+if (document.getElementById("setup-llm-dl")) {
+  document.getElementById("setup-llm-dl").addEventListener("click", async () => {
+    try {
+      await fetch("/api/llm/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch { /* refreshSetup shows the failure */ }
+    refreshSetup();
+  });
+}
+if (document.getElementById("setup-skip")) {
+  document.getElementById("setup-skip").addEventListener("click", markSetupDone);
+}
+if (setupStartBtn) {
+  setupStartBtn.addEventListener("click", () => {
+    markSetupDone();
+    localSttReady = true;
+    loadSpeechStatus();
+    refreshLlmStatus();
+  });
+}
+maybeShowSetup();
+
 if (dlModelBtn) {
   dlModelBtn.addEventListener("click", async () => {
     dlModelBtn.disabled = true;
