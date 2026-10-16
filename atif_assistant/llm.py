@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import threading
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .config import (
+    DATA_DIR,
     MODEL_DEFAULTS,
     PROVIDER_ENV_KEYS,
     PROVIDER_LABELS,
@@ -98,6 +102,11 @@ def provider_enabled(name: str) -> bool:
     """
     override = _override(name, "enabled")
     if override is None:
+        if name == "llamacpp":
+            # On a desktop there is no llama-server binary, so this provider
+            # stays out of the way entirely; on-device (binaries shipped in
+            # the APK) it becomes the first choice automatically.
+            return llamacpp_bin() is not None
         return True
     return str(override).strip().lower() not in {"0", "false", "off", "no"}
 
@@ -108,6 +117,159 @@ def ollama_url() -> str:
     if override is not None:
         return override
     return os.environ.get("ATIF_ASSISTANT_OLLAMA_URL", "http://127.0.0.1:11434")
+
+
+# ------------------------------------------------- on-device llama.cpp
+#
+# The Android APK ships a llama-server executable per ABI (extracted to
+# DATA_DIR/native/) and the model is downloaded into DATA_DIR/models/. The
+# server is started from here, loopback-only, and used as a normal OpenAI
+# compatible provider. On a machine without those files nothing here runs.
+
+LLAMACPP_PORT = int(os.environ.get("ATIF_ASSISTANT_LLAMACPP_PORT", "8765"))
+
+
+def llamacpp_url() -> str:
+    """llama-server URL: database override, else environment, else loopback."""
+    override = _override("llamacpp", "url")
+    if override is not None:
+        return override
+    env = os.environ.get("ATIF_ASSISTANT_LLAMACPP_URL")
+    if env:
+        return env
+    return f"http://127.0.0.1:{LLAMACPP_PORT}"
+
+
+def llamacpp_bin() -> Path | None:
+    """The llama-server executable, or None when not available.
+
+    On-device the Java shell passes the extracted JNI-lib path via
+    ``ATIF_ASSISTANT_LLAMACPP_BIN`` (nativeLibraryDir is executable; filesDir
+    is not, since Android 10). Desktop looks for a locally built binary under
+    DATA_DIR/native for development.
+    """
+    override = os.environ.get("ATIF_ASSISTANT_LLAMACPP_BIN", "")
+    if override:
+        path = Path(override)
+        return path if path.is_file() else None
+    path = DATA_DIR / "native" / "llama-server"
+    return path if path.is_file() else None
+
+
+def llamacpp_model_file() -> Path | None:
+    """The downloaded GGUF, or None when no complete model is on disk.
+
+    Only size-validated files count: an interrupted download must never be
+    handed to llama-server.
+    """
+    models = DATA_DIR / "models"
+    if not models.is_dir():
+        return None
+    for path in sorted(models.glob("*.gguf")):
+        if llm_model_ok(path):
+            return path
+    return None
+
+
+_LLAMACPP_LOCK = threading.Lock()
+_LLAMACPP: dict[str, Any] = {"proc": None, "model_id": None, "error": None}
+
+
+def _llamacpp_log_path() -> Path:
+    return DATA_DIR / "llama-server.log"
+
+
+def ensure_llamacpp_started() -> str:
+    """Start llama-server once in the background. Returns running|starting|unavailable."""
+    with _LLAMACPP_LOCK:
+        proc = _LLAMACPP.get("proc")
+        if proc is not None and proc.poll() is None:
+            return "running"
+        binary = llamacpp_bin()
+        model = llamacpp_model_file()
+        if binary is None or model is None:
+            _LLAMACPP["error"] = (
+                "llama-server binary missing" if binary is None else "model not downloaded"
+            )
+            return "unavailable"
+        try:
+            log = open(_llamacpp_log_path(), "ab", buffering=0)
+            env = os.environ.copy()
+            libdir = str(binary.parent)
+            env["LD_LIBRARY_PATH"] = (
+                libdir + ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else libdir
+            )
+            env["GGML_BACKEND_PATH"] = libdir
+            proc = subprocess.Popen(
+                [
+                    str(binary), "-m", str(model),
+                    "--host", "127.0.0.1", "--port", str(LLAMACPP_PORT),
+                    "-c", "4096",
+                ],
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            _LLAMACPP["proc"] = proc
+            _LLAMACPP["model_id"] = None
+            _LLAMACPP["error"] = None
+            return "starting"
+        except Exception as exc:  # noqa: BLE001 - report, never crash the request
+            _LLAMACPP["error"] = f"{type(exc).__name__}: {exc}"
+            return "unavailable"
+
+
+async def llamacpp_is_up(timeout: float = 1.5) -> bool:
+    """Probe llama-server's OpenAI endpoint."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(f"{llamacpp_url()}/v1/models")
+        if r.status_code != 200:
+            return False
+        data = r.json().get("data") or []
+        if data and not _LLAMACPP.get("model_id"):
+            _LLAMACPP["model_id"] = data[0].get("id") or "local"
+        return True
+    except Exception:
+        return False
+
+
+async def _wait_llamacpp(timeout: float) -> bool:
+    """Wait for a freshly spawned server to accept requests (model load)."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        proc = _LLAMACPP.get("proc")
+        if proc is None or proc.poll() is not None:
+            return False
+        if await llamacpp_is_up():
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def _llamacpp(model: str, messages: list[dict], **kw: Any) -> str:
+    state = ensure_llamacpp_started()
+    if state == "unavailable":
+        raise ProviderError(_LLAMACPP.get("error") or "on-device model not available")
+    # A cold start loads the whole GGUF into RAM; give it room, but a dead
+    # process fails fast instead of burning the whole budget.
+    wait = kw.get("timeout") if kw.get("timeout") else 90.0
+    if not await llamacpp_is_up(timeout=0.5) and not await _wait_llamacpp(wait):
+        raise ProviderError(_LLAMACPP.get("error") or "llama-server did not start")
+    base = llamacpp_url()
+    model_id = _LLAMACPP.get("model_id") or model or "local"
+    async with httpx.AsyncClient(timeout=kw.get("timeout") or 300.0) as client:
+        r = await client.post(
+            f"{base}/v1/chat/completions",
+            json={
+                "model": model_id,
+                "messages": messages,
+                "temperature": kw.get("temperature", 0.4),
+                "max_tokens": kw.get("max_tokens", 1800),
+            },
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
 
 
 def mask_key(key: str) -> str:
@@ -236,6 +398,7 @@ async def _ollama(model: str, messages: list[dict], **kw: Any) -> str:
 
 
 HANDLERS = {
+    "llamacpp": _llamacpp,
     "groq": _groq,
     "gemini": _gemini,
     "openrouter": _openrouter,
@@ -296,7 +459,7 @@ def invalidate_probe_cache() -> None:
 def provider_status(name: str) -> dict[str, Any]:
     """Configuration (not readiness) for one provider, with a masked key."""
     key = provider_key(name)
-    configured = name == "ollama" or bool(key)
+    configured = name in ("ollama", "llamacpp") or bool(key)
     out = {
         "name": name,
         "label": PROVIDER_LABELS.get(name, name),
@@ -310,6 +473,12 @@ def provider_status(name: str) -> dict[str, Any]:
     }
     if name == "ollama":
         out["url"] = ollama_url()
+    if name == "llamacpp":
+        out["url"] = llamacpp_url()
+        out["binary"] = llamacpp_bin() is not None
+        out["model_file"] = (
+            llamacpp_model_file().name if llamacpp_model_file() else None
+        )
     return out
 
 
@@ -322,14 +491,41 @@ def available_providers() -> list[dict[str, Any]]:
     "configured" and would be reported ready by a presence check alone. Use
     ``probe_providers()`` for the live answer.
     """
-    return [provider_status(name) for name in PROVIDER_ORDER]
+    return [provider_status(name) for name in visible_providers()]
+
+
+def visible_providers() -> list[str]:
+    """Providers worth showing. The on-device LLM only exists where it shipped.
+
+    Desktop keeps its original four rows; on a phone the binary is always
+    extracted, so llamacpp appears there as soon as the app installs.
+    """
+    return [
+        name
+        for name in PROVIDER_ORDER
+        if not (name == "llamacpp" and llamacpp_bin() is None)
+    ]
 
 
 async def _probe_one(name: str) -> dict[str, Any]:
     """Make the smallest possible real call to one provider."""
     if not provider_enabled(name):
-        configured = name == "ollama" or bool(provider_key(name))
+        configured = name == "llamacpp" or name == "ollama" or bool(provider_key(name))
         return {"ready": False, "configured": configured, "error": "disabled"}
+    if name == "llamacpp":
+        if llamacpp_model_file() is None:
+            return {
+                "ready": False,
+                "configured": True,
+                "error": "model not downloaded",
+            }
+        ensure_llamacpp_started()
+        ok = await llamacpp_is_up(timeout=2.0)
+        return {
+            "ready": ok,
+            "configured": True,
+            "error": None if ok else "starting",
+        }
     if name == "ollama":
         ok = await ollama_is_up()
         return {
@@ -376,7 +572,8 @@ async def probe_providers(force: bool = False) -> list[dict[str, Any]]:
 
     import asyncio
 
-    probes = await asyncio.gather(*(_probe_one(n) for n in PROVIDER_ORDER))
+    names = visible_providers()
+    probes = await asyncio.gather(*(_probe_one(n) for n in names))
     out = [
         {
             "name": name,
@@ -387,7 +584,7 @@ async def probe_providers(force: bool = False) -> list[dict[str, Any]]:
             "note": provider_model(name),
             "error": probe["error"],
         }
-        for name, probe in zip(PROVIDER_ORDER, probes)
+        for name, probe in zip(names, probes)
     ]
     _PROBE_CACHE["at"] = now
     _PROBE_CACHE["result"] = out
@@ -467,3 +664,157 @@ async def test_provider(
             "error": f"{type(exc).__name__}: {str(exc)[:120]}",
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
+
+# ------------------------------------------------------- model download
+#
+# One tap fetches the small quantised model into DATA_DIR/models/ so the
+# phone can answer with no internet from then on. The download runs on a
+# background thread and reports progress here; the UI only polls.
+
+LLM_MODEL_DEFAULT = "qwen2.5-1.5b"
+
+# Public (ungated) GGUF. Meta's Llama 3.2 mirrors are all license-gated with
+# HTTP 401, so a phone-side one-tap download must use an open repo; Qwen2.5
+# is the strongest small instruct model that is genuinely fetchable without
+# an account. Q4_K_M = ~1.1 GB on disk, ~1.7 GB RAM while running.
+LLM_MODEL_URLS = {
+    "qwen2.5-1.5b": (
+        "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+        "/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    ),
+}
+
+# Exact byte length from the source repo. A model file is only trusted when
+# it reaches this size (99% tolerance) - a dropped connection used to leave a
+# half-written file that looked installed.
+LLM_MODEL_EXPECTED = {"qwen2.5-1.5b": 1_117_320_736}
+
+
+def llm_model_ok(path: Path | None, name: str | None = None) -> bool:
+    """True only for a model file that reached its expected size."""
+    if path is None or not path.is_file():
+        return False
+    expected = LLM_MODEL_EXPECTED.get(name or path.stem, 0)
+    if not expected:
+        return path.stat().st_size >= 100_000_000
+    return path.stat().st_size >= int(expected * 0.99)
+
+_LLM_DL_LOCK = threading.Lock()
+_LLM_DL: dict[str, Any] = {
+    "state": "idle",  # idle | downloading | ready | error
+    "name": None,
+    "bytes": 0,
+    "total": 0,
+    "reason": None,
+}
+
+
+def llm_model_status() -> dict[str, Any]:
+    """Binary, model file, server and download state for the UI."""
+    with _LLM_DL_LOCK:
+        download = dict(_LLM_DL)
+    proc = _LLAMACPP.get("proc")
+    model = llamacpp_model_file()
+    return {
+        "binary": llamacpp_bin() is not None,
+        "model": {
+            "present": model is not None,
+            "file": model.name if model else None,
+            "size": model.stat().st_size if model else None,
+        },
+        "server": (
+            "running"
+            if proc is not None and proc.poll() is None
+            else ("stopped" if proc is not None else "never")
+        ),
+        "error": _LLAMACPP.get("error"),
+        "download": download,
+        "options": sorted(LLM_MODEL_URLS),
+        "default": LLM_MODEL_DEFAULT,
+    }
+
+
+def llm_download_start(name: str | None = None) -> dict[str, Any]:
+    """Start the model download in the background; never blocks the caller."""
+    name = name or LLM_MODEL_DEFAULT
+    if name not in LLM_MODEL_URLS:
+        return {"ok": False, "reason": f"unknown model {name!r}"}
+    dest = DATA_DIR / "models" / f"{name}.gguf"
+    if llm_model_ok(dest, name):
+        return {"ok": True, "reason": "already installed"}
+    with _LLM_DL_LOCK:
+        if _LLM_DL["state"] == "downloading":
+            return {"ok": True, "reason": "already running"}
+        _LLM_DL.update(
+            {"state": "downloading", "name": name, "bytes": 0, "total": 0, "reason": None}
+        )
+    threading.Thread(
+        target=_llm_download_worker, args=(name,), daemon=True
+    ).start()
+    return {"ok": True, "started": True}
+
+
+def _llm_download_worker(name: str) -> None:
+    """Fetch the GGUF with resume: a dropped connection retries from where it
+    stopped instead of starting (or worse, finishing) over."""
+    url = LLM_MODEL_URLS[name]
+    expected = LLM_MODEL_EXPECTED.get(name, 0)
+    dest = DATA_DIR / "models" / f"{name}.gguf"
+    tmp = dest.with_suffix(".gguf.part")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    import time
+    import urllib.error
+    import urllib.request
+
+    last_error = "download failed"
+    for attempt in range(6):
+        try:
+            have = tmp.stat().st_size if tmp.is_file() else 0
+            if expected and have >= expected * 0.99:
+                tmp.rename(dest)  # a prior attempt finished; nothing to fetch
+                with _LLM_DL_LOCK:
+                    _LLM_DL.update({"state": "ready", "reason": "installed"})
+                return
+            headers = {"User-Agent": "atif-assistant"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                resuming = have > 0 and getattr(resp, "status", 200) == 206
+                clen = int(resp.headers.get("Content-Length") or 0)
+                if have and not resuming:
+                    have = 0  # server ignored Range: restart clean
+                total = expected or (clen + (have if resuming else 0))
+                with _LLM_DL_LOCK:
+                    _LLM_DL["total"] = total
+                done = have
+                mode = "ab" if have else "wb"
+                with open(tmp, mode) as fh:
+                    while True:
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        done += len(chunk)
+                        with _LLM_DL_LOCK:
+                            _LLM_DL["bytes"] = done
+                got = tmp.stat().st_size if tmp.is_file() else 0
+                if expected and got < expected * 0.99:
+                    raise OSError(
+                        f"connection ended early ({got} of {expected} bytes)"
+                    )
+                if not expected and total and got < total * 0.99:
+                    raise OSError(f"connection ended early ({got} of {total} bytes)")
+            tmp.rename(dest)
+            with _LLM_DL_LOCK:
+                _LLM_DL.update({"state": "ready", "reason": "installed"})
+            return
+        except Exception as exc:  # noqa: BLE001 - retry, then fail soft
+            last_error = str(exc)[:200] or type(exc).__name__
+            if attempt < 5:
+                time.sleep(1.5)
+                continue
+        break
+    tmp.unlink(missing_ok=True)
+    with _LLM_DL_LOCK:
+        _LLM_DL.update({"state": "error", "reason": last_error})

@@ -73,6 +73,11 @@ cp -R "$ROOT/atif_assistant" "$PYDEST/atif_assistant"
 find "$PYDEST/atif_assistant" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 cp -R "$ROOT/web" "$PYDEST/web"
 
+if [ ! -f app/src/main/assets/native/arm64-v8a/llama-server ]; then
+  echo "NOTE: no llama-server staged (on-device model will be unavailable)." >&2
+  echo "      Build it with:  ./build_native.sh" >&2
+fi
+
 # ------------------------------------------------------------- 5. Build
 log "Building debug APK"
 ./gradlew --no-daemon assembleDebug

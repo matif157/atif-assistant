@@ -36,7 +36,10 @@ TAILSCALE_HOST = os.environ.get("ATIF_ASSISTANT_TAILSCALE_HOST", "")
 def _provider_order() -> list[str]:
     raw = os.environ.get(
         "ATIF_ASSISTANT_PROVIDERS",
-        "groq,gemini,openrouter,ollama",
+        # llamacpp first: it is the only provider that needs no key and no
+        # internet, and on a phone it is the intended default. It disables
+        # itself on machines without the shipped binary (see llm.py).
+        "llamacpp,groq,gemini,openrouter,ollama",
     )
     return [p.strip().lower() for p in raw.split(",") if p.strip()]
 
@@ -53,6 +56,7 @@ PROVIDER_ENV_KEYS = {
 }
 
 MODEL_DEFAULTS = {
+    "llamacpp": os.environ.get("ATIF_ASSISTANT_LLAMACPP_MODEL", "local"),
     "groq": os.environ.get("ATIF_ASSISTANT_GROQ_MODEL", "openai/gpt-oss-120b"),
     "gemini": os.environ.get("ATIF_ASSISTANT_GEMINI_MODEL", "gemini-3.8-flash"),
     "openrouter": os.environ.get(
@@ -62,6 +66,7 @@ MODEL_DEFAULTS = {
 }
 
 PROVIDER_LABELS = {
+    "llamacpp": "On-device LLM",
     "groq": "Groq",
     "gemini": "Gemini",
     "openrouter": "OpenRouter",

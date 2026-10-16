@@ -18,6 +18,7 @@ import android.webkit.WebViewClient;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
+import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -50,10 +51,16 @@ public class MainActivity extends Activity {
                 & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
+        // llama-server ships as a JNI lib (jniLibs/arm64-v8a/libllama-server.so)
+        // so the installer extracts it into nativeLibraryDir, which is one of
+        // the few app-owned locations Android still allows execve() from.
+        // Writing it into filesDir instead would hit the API 29+ W^X block
+        // (Permission denied from the app, even though run-as can exec it).
         final String dataDir = getFilesDir().getAbsolutePath();
+        final String llamaBin = resolveLlamaServer();
         new Thread(() -> {
             try {
-                Python.getInstance().getModule("run_server").callAttr("start", dataDir);
+                Python.getInstance().getModule("run_server").callAttr("start", dataDir, llamaBin);
             } catch (Throwable t) {
                 t.printStackTrace();
             }
@@ -98,6 +105,23 @@ public class MainActivity extends Activity {
             }
         }
         return false;
+    }
+
+    /**
+     * Absolute path of the extracted llama-server JNI lib, or "" when this
+     * build/ABI does not ship one. nativeLibraryDir is installer-managed and
+     * executable, unlike the app's own files dir.
+     */
+    private String resolveLlamaServer() {
+        File lib = new File(getApplicationInfo().nativeLibraryDir, "libllama-server.so");
+        if (!lib.isFile()) {
+            android.util.Log.w("Atif", "no llama-server lib at " + lib.getAbsolutePath());
+            return "";
+        }
+        if (!lib.setExecutable(true, false)) {
+            android.util.Log.w("Atif", "could not chmod +x " + lib.getAbsolutePath());
+        }
+        return lib.getAbsolutePath();
     }
 
     private void requestAudioPermission() {

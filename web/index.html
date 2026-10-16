@@ -325,6 +325,17 @@
       <button class="ghost" id="ollama-pull">DOWNLOAD MODEL</button>
     </div>
 
+    <div id="llm-section" hidden>
+      <label>ON-DEVICE LLM (FULLY OFFLINE)</label>
+      <p class="hint">llama.cpp runs inside the app. Download the small model once and every answer stays on the
+      phone - no internet, no keys, no cloud.</p>
+      <div class="form-actions">
+        <button class="ghost" id="download-llm-model">DOWNLOAD MODEL (~1.1 GB)</button>
+      </div>
+      <progress id="llm-progress" max="100" value="0" hidden style="width:100%"></progress>
+      <div id="llm-status" class="hint"></div>
+    </div>
+
     <label>MODEL PIPELINE</label>
     <p class="hint">When chat or the voice call fails, run the checks to see which part broke:
     memory, routing, the model itself, or speech in/out. Each check runs for real and suggests a fix.

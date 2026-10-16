@@ -3193,6 +3193,76 @@ document.getElementById("test-voice").addEventListener("click", () => {
   settings.speak = was;
 });
 
+/* ------------------------------------------------ on-device LLM (llama.cpp) */
+// The APK ships llama-server; this fetches the model once and then reports
+// progress/health. Downloads run on the server thread, so the UI only polls.
+const dlLlmBtn = document.getElementById("download-llm-model");
+const llmStatusEl = document.getElementById("llm-status");
+const llmProgressEl = document.getElementById("llm-progress");
+const llmSectionEl = document.getElementById("llm-section");
+let llmPollTimer = null;
+const llmMb = (b) => (b / 1048576).toFixed(0);
+
+function scheduleLlmPoll(ms) {
+  clearTimeout(llmPollTimer);
+  llmPollTimer = setTimeout(refreshLlmStatus, ms);
+}
+
+async function refreshLlmStatus() {
+  if (!llmStatusEl) return;
+  let s;
+  try {
+    s = await (await fetch("/api/llm")).json();
+  } catch {
+    scheduleLlmPoll(3000);
+    return;
+  }
+  const d = s.download || {};
+  // The section only exists on builds that ship llama-server (Android).
+  if (llmSectionEl) llmSectionEl.hidden = !s.binary && d.state !== "downloading";
+  if (d.state === "downloading") {
+    const pct = d.total ? Math.floor((d.bytes / d.total) * 100) : 0;
+    llmStatusEl.textContent = `Downloading model... ${pct}% (${llmMb(d.bytes)} of ${llmMb(d.total)} MB)`;
+    if (llmProgressEl) {
+      llmProgressEl.hidden = false;
+      llmProgressEl.value = pct;
+    }
+    if (dlLlmBtn) dlLlmBtn.disabled = true;
+    scheduleLlmPoll(1500);
+    return;
+  }
+  if (llmProgressEl) llmProgressEl.hidden = true;
+  if (dlLlmBtn) dlLlmBtn.disabled = false;
+  if (d.state === "error") {
+    llmStatusEl.textContent = "Download failed: " + (d.reason || "unknown error");
+  } else if (s.model && s.model.present) {
+    llmStatusEl.textContent = `Model ready (${s.model.file}, ${llmMb(s.model.size)} MB). Server: ${s.server}.`;
+    if (dlLlmBtn) dlLlmBtn.hidden = true;
+  } else if (s.binary) {
+    llmStatusEl.textContent = "llama-server is ready. Download the model to answer fully offline.";
+  } else {
+    llmStatusEl.textContent = "On-device model is not part of this build.";
+    if (dlLlmBtn) dlLlmBtn.hidden = true;
+  }
+}
+
+if (dlLlmBtn) {
+  dlLlmBtn.addEventListener("click", async () => {
+    dlLlmBtn.disabled = true;
+    try {
+      await fetch("/api/llm/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch {
+      /* status poll reports the failure */
+    }
+    refreshLlmStatus();
+  });
+}
+refreshLlmStatus();
+
 /* ------------------------------------------------ offline speech model */
 // The base Whisper model is weak for Urdu. This lets the user fetch the more
 // accurate "small" model in one tap; the server reports what it already has.

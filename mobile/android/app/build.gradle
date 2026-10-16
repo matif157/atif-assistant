@@ -31,6 +31,20 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    buildFeatures {
+        // MainActivity passes VERSION_CODE-backed state to the Python side.
+        buildConfig true
+    }
+
+    packaging {
+        jniLibs {
+            // Extract jniLibs (libllama-server.so) into nativeLibraryDir so
+            // the app can execve() them. Uncompressed in-APK libs (the AGP 8
+            // default) cannot be executed, and filesDir is W^X-blocked.
+            useLegacyPackaging true
+        }
+    }
+
     sourceSets {
         main {
             // build_apk.sh stages the Python package and the web/ assets here first.

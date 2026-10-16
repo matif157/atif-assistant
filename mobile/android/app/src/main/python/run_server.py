@@ -15,8 +15,14 @@ _started = False
 _lock = threading.Lock()
 
 
-def start(files_dir, host="127.0.0.1", port=8770):
-    """Start the server once. Safe to call more than once."""
+def start(files_dir, llama_bin="", host="127.0.0.1", port=8770):
+    """Start the server once. Safe to call more than once.
+
+    ``llama_bin`` is the absolute path of the extracted llama-server JNI lib
+    (empty on desktop or on ABIs without the binary). It has to be exported
+    before ``atif_assistant.llm`` is imported so the on-device provider can
+    find it.
+    """
     global _started
     with _lock:
         if _started:
@@ -25,6 +31,18 @@ def start(files_dir, host="127.0.0.1", port=8770):
 
     os.makedirs(files_dir, exist_ok=True)
     os.environ.setdefault("ATIF_ASSISTANT_DATA_DIR", files_dir)
+    if llama_bin:
+        os.environ["ATIF_ASSISTANT_LLAMACPP_BIN"] = llama_bin
+
+    # Warm the on-device llama-server (binary + model present) so the first
+    # question does not pay the model-load cost. Purely best effort: no
+    # model yet, no problem - the provider starts lazily on first use.
+    try:
+        from atif_assistant import llm as _llm
+
+        _llm.ensure_llamacpp_started()
+    except Exception:  # noqa: BLE001 - never block the server boot
+        pass
 
     import uvicorn
 

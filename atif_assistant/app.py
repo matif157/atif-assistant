@@ -24,9 +24,12 @@ from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
 from .llm import (
     invalidate_probe_cache,
+    llm_download_start,
+    llm_model_status,
     probe_providers,
     provider_status,
     test_provider,
+    visible_providers,
 )
 
 app = FastAPI(title="Atif Assistant", version="0.1.0")
@@ -242,6 +245,22 @@ def download_speech_model(payload: dict | None = None) -> JSONResponse:
     result = stt.download_model(name)
     if not result.get("ok"):
         return JSONResponse(result, status_code=503)
+    return JSONResponse(result)
+
+
+@app.get("/api/llm")
+def llm_status() -> dict:
+    """On-device LLM: binary, model file, server and download progress."""
+    return llm_model_status()
+
+
+@app.post("/api/llm/model")
+def llm_model_download(payload: dict | None = None) -> JSONResponse:
+    """Start fetching the offline model in the background; poll GET /api/llm."""
+    name = (payload or {}).get("name")
+    result = llm_download_start(name)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
     return JSONResponse(result)
 
 
@@ -674,12 +693,12 @@ async def list_providers(probe: bool = False) -> dict:
     """Provider config with masked keys, plus a live readiness flag."""
     live = {p["name"]: p for p in await probe_providers(force=probe)}
     providers = []
-    for name in PROVIDER_ORDER:
+    for name in visible_providers():
         status = provider_status(name)
         status["ready"] = live.get(name, {}).get("ready", False)
         status["error"] = live.get(name, {}).get("error")
         providers.append(status)
-    return {"providers": providers, "order": PROVIDER_ORDER}
+    return {"providers": providers, "order": visible_providers()}
 
 
 @app.post("/api/providers/test")
@@ -691,7 +710,7 @@ async def test_all_providers() -> dict:
     """
     import asyncio
 
-    results = await asyncio.gather(*(test_provider(n) for n in PROVIDER_ORDER))
+    results = await asyncio.gather(*(test_provider(n) for n in visible_providers()))
     return {"results": results}
 
 
