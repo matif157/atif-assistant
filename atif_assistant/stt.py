@@ -112,6 +112,7 @@ def status() -> dict[str, Any]:
         "small_present": (_MODEL_DIR / "ggml-small.bin").is_file(),
         "models_present": [n for n in MODEL_CANDIDATES if (_MODEL_DIR / n).is_file()],
         "model_dir": str(_MODEL_DIR),
+        "download": stt_download_status(),
     }
 
 
@@ -165,6 +166,100 @@ def download_model(name: str = "ggml-small.bin") -> dict[str, Any]:
         "path": str(dest),
         "bytes": dest.stat().st_size,
     }
+
+
+# ------------------------------------------- background model download
+#
+# A phone-side fetch of the 466 MB small model must not hold an HTTP request
+# open for minutes, and a dropped connection must not start over. This mirrors
+# the on-device LLM downloader: a daemon thread, Range-resume, and a state
+# dict the settings screen can poll.
+
+import threading  # noqa: E402 - sits next to the download it serves
+
+_STT_DL_LOCK = threading.Lock()
+_STT_DL: dict[str, Any] = {
+    "state": "idle", "name": None, "bytes": 0, "total": 0, "reason": None,
+}
+
+
+def stt_download_status() -> dict[str, Any]:
+    with _STT_DL_LOCK:
+        return dict(_STT_DL)
+
+
+def stt_download_start(name: str | None = None) -> dict[str, Any]:
+    """Start the model download in the background; never blocks the caller."""
+    name = name or PREFERRED_MODEL
+    if name not in MODEL_URLS:
+        return {"ok": False, "reason": f"unknown model {name!r}"}
+    dest = _MODEL_DIR / name
+    if dest.is_file() and dest.stat().st_size > 1_000_000:
+        return {"ok": True, "reason": "already installed"}
+    with _STT_DL_LOCK:
+        if _STT_DL["state"] == "downloading":
+            return {"ok": True, "reason": "already running"}
+        _STT_DL.update(
+            {"state": "downloading", "name": name, "bytes": 0, "total": 0, "reason": None}
+        )
+    threading.Thread(target=_stt_download_worker, args=(name,), daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def _stt_download_worker(name: str) -> None:
+    """Fetch a GGML model with resume and a real completion check."""
+    import time
+    import urllib.request
+
+    url = MODEL_URLS[name]
+    dest = _MODEL_DIR / name
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    _MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    last_error = "download failed"
+    for attempt in range(6):
+        try:
+            have = tmp.stat().st_size if tmp.is_file() else 0
+            headers = {"User-Agent": "atif-assistant"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                resuming = have > 0 and getattr(resp, "status", 200) == 206
+                clen = int(resp.headers.get("Content-Length") or 0)
+                if have and not resuming:
+                    have = 0
+                total = clen + (have if resuming else 0)
+                with _STT_DL_LOCK:
+                    _STT_DL["total"] = total
+                done = have
+                mode = "ab" if have else "wb"
+                with open(tmp, mode) as fh:
+                    while True:
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        done += len(chunk)
+                        with _STT_DL_LOCK:
+                            _STT_DL["bytes"] = done
+            got = tmp.stat().st_size if tmp.is_file() else 0
+            if total and got < total * 0.99:
+                raise OSError(f"connection ended early ({got} of {total} bytes)")
+            if got < 1_000_000:
+                raise OSError("download too small; check the connection")
+            tmp.replace(dest)
+            with _STT_DL_LOCK:
+                _STT_DL.update({"state": "ready", "reason": "installed"})
+            return
+        except Exception as exc:  # noqa: BLE001 - retry, then fail soft
+            last_error = str(exc)[:200] or type(exc).__name__
+            if attempt < 5:
+                time.sleep(1.5)
+                continue
+        break
+    tmp.unlink(missing_ok=True)
+    with _STT_DL_LOCK:
+        _STT_DL.update({"state": "error", "reason": last_error})
 
 
 def transcribe(raw: bytes, lang: str = "auto") -> dict[str, Any]:

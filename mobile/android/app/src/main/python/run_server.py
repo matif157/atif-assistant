@@ -15,13 +15,13 @@ _started = False
 _lock = threading.Lock()
 
 
-def start(files_dir, llama_bin="", host="127.0.0.1", port=8770):
+def start(files_dir, llama_bin="", whisper_bin="", host="127.0.0.1", port=8770):
     """Start the server once. Safe to call more than once.
 
-    ``llama_bin`` is the absolute path of the extracted llama-server JNI lib
-    (empty on desktop or on ABIs without the binary). It has to be exported
-    before ``atif_assistant.llm`` is imported so the on-device provider can
-    find it.
+    ``llama_bin`` / ``whisper_bin`` are absolute paths of the extracted JNI
+    libs (empty on desktop or on ABIs without the binaries). They have to be
+    exported before ``atif_assistant`` is imported so the on-device providers
+    can find them. Models live in files_dir/models for both stacks.
     """
     global _started
     with _lock:
@@ -31,8 +31,11 @@ def start(files_dir, llama_bin="", host="127.0.0.1", port=8770):
 
     os.makedirs(files_dir, exist_ok=True)
     os.environ.setdefault("ATIF_ASSISTANT_DATA_DIR", files_dir)
+    os.environ.setdefault("ATIF_ASSISTANT_MODEL_DIR", os.path.join(files_dir, "models"))
     if llama_bin:
         os.environ["ATIF_ASSISTANT_LLAMACPP_BIN"] = llama_bin
+    if whisper_bin:
+        os.environ["ATIF_ASSISTANT_WHISPER_BIN"] = whisper_bin
 
     # Warm the on-device llama-server (binary + model present) so the first
     # question does not pay the model-load cost. Purely best effort: no

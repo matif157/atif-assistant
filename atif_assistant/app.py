@@ -238,10 +238,21 @@ def speech_status() -> dict:
 
 @app.post("/api/speech/model")
 def download_speech_model(payload: dict | None = None) -> JSONResponse:
-    """Download a better offline Whisper model (default: small, best for Urdu)."""
-    name = (payload or {}).get("name") or stt.PREFERRED_MODEL
+    """Download a better offline Whisper model (default: small, best for Urdu).
+
+    ``{"background": true}`` returns immediately and lets the client poll
+    GET /api/speech for progress - a phone-side fetch of the 466 MB model must
+    not hold one HTTP request open for minutes.
+    """
+    body = payload or {}
+    name = body.get("name") or stt.PREFERRED_MODEL
     if name not in stt.MODEL_URLS:
         return JSONResponse({"error": f"unknown model {name!r}"}, status_code=400)
+    if body.get("background"):
+        result = stt.stt_download_start(name)
+        if not result.get("ok"):
+            return JSONResponse(result, status_code=400)
+        return JSONResponse(result)
     result = stt.download_model(name)
     if not result.get("ok"):
         return JSONResponse(result, status_code=503)

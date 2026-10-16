@@ -71,3 +71,34 @@ if [ -f "$STRIP" ]; then
 fi
 ls -lh "$OUT"
 log "Done: llama-server staged for $ABI"
+
+# --------------------------------------------------------------- whisper.cpp
+WSRC=".native/whisper.cpp"
+if [ ! -d "$WSRC" ]; then
+  log "Cloning whisper.cpp (shallow)"
+  git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$WSRC"
+fi
+
+log "Building whisper-cli for $ABI"
+cmake -S "$WSRC" -B "$WSRC/build-$ABI" \
+  -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI="$ABI" \
+  -DANDROID_PLATFORM=android-24 \
+  -DANDROID_STL=c++_static \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DGGML_NATIVE=OFF \
+  -DGGML_OPENMP=OFF \
+  -DGGML_CCACHE=OFF \
+  -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16 \
+  -DWHISPER_SDL2=OFF \
+  -DBUILD_SHARED_LIBS=OFF
+cmake --build "$WSRC/build-$ABI" --target whisper-cli -j "$JOBS"
+
+log "Staging whisper-cli into $OUT"
+cp "$WSRC/build-$ABI/bin/whisper-cli" "$OUT/libwhisper-cli.so"
+if [ -f "$STRIP" ]; then
+  "$STRIP" "$OUT/libwhisper-cli.so" 2>/dev/null || true
+fi
+ls -lh "$OUT"
+log "Done: whisper-cli staged for $ABI"

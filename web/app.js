@@ -3274,44 +3274,72 @@ async function loadSpeechStatus() {
   try {
     const { stt: s } = await (await fetch("/api/speech")).json();
     const hasSmall = Boolean(s && s.small_present);
-    if (dlModelBtn) dlModelBtn.hidden = hasSmall;
+    const dl = (s && s.download) || {};
+    if (dl.state === "downloading") {
+      // Mid-fetch: report progress instead of the static note.
+      if (dlModelBtn) dlModelBtn.disabled = true;
+      if (dlModelNote) {
+        const got = Math.round((dl.bytes || 0) / 1048576);
+        const want = Math.round((dl.total || 0) / 1048576);
+        dlModelNote.textContent = want
+          ? `Fetching the speech model: ${got} / ${want} MB...`
+          : "Fetching the speech model...";
+      }
+      scheduleSpeechPoll(1500);
+      return;
+    }
+    if (dlModelBtn) {
+      dlModelBtn.disabled = false;
+      dlModelBtn.hidden = hasSmall || dl.state === "ready";
+    }
     if (dlModelNote) {
-      dlModelNote.textContent = s && s.available
-        ? hasSmall
-          ? `On-device speech ready (${s.model}).`
-          : `On-device speech ready (${s.model}). A more accurate Urdu model is available.`
-        : "On-device speech is not set up yet (needs whisper.cpp).";
+      if (dl.state === "error") {
+        dlModelNote.textContent = "Download failed: " + (dl.reason || "unknown error");
+      } else if (hasSmall) {
+        dlModelNote.textContent = `On-device speech ready (${s.model}).`;
+      } else if (s && s.available) {
+        dlModelNote.textContent =
+          `On-device speech ready (${s.model}). A more accurate Urdu model is available.`;
+      } else {
+        dlModelNote.textContent = "On-device speech is not set up yet (needs whisper.cpp).";
+      }
     }
   } catch {
     /* leave the default note */
   }
 }
 
+let speechPollTimer = 0;
+function scheduleSpeechPoll(ms) {
+  clearTimeout(speechPollTimer);
+  speechPollTimer = setTimeout(loadSpeechStatus, ms);
+}
+
 if (dlModelBtn) {
   dlModelBtn.addEventListener("click", async () => {
     dlModelBtn.disabled = true;
-    const original = dlModelBtn.textContent;
-    dlModelBtn.textContent = "DOWNLOADING...";
-    if (dlModelNote) dlModelNote.textContent = "Fetching the Urdu model (~466 MB). This can take a few minutes.";
+    if (dlModelNote) {
+      dlModelNote.textContent = "Fetching the speech model (~466 MB). Progress shows here.";
+    }
     try {
       const res = await fetch("/api/speech/model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "ggml-small.bin" }),
+        body: JSON.stringify({ name: "ggml-small.bin", background: true }),
       });
       const data = await res.json();
-      if (data.ok) {
-        if (dlModelNote) dlModelNote.textContent = "Urdu model installed. On-device speech is more accurate now.";
-        dlModelBtn.hidden = true;
-        localSttReady = true;
-      } else if (dlModelNote) {
-        dlModelNote.textContent = "Download failed: " + (data.reason || data.error || "unknown error");
+      if (!data.ok && !data.started) {
+        if (dlModelNote) {
+          dlModelNote.textContent = "Download failed: " + (data.reason || data.error || "unknown error");
+        }
+        dlModelBtn.disabled = false;
+        return;
       }
+      localSttReady = false;
+      scheduleSpeechPoll(1200);
     } catch (e) {
       if (dlModelNote) dlModelNote.textContent = "Download failed: " + e.message;
-    } finally {
       dlModelBtn.disabled = false;
-      dlModelBtn.textContent = original;
     }
   });
 }
