@@ -10,14 +10,42 @@ screen and then live in the app's private storage.
 ## Build
 
 ```sh
-./build_apk.sh          # -> app/build/outputs/apk/debug/app-debug.apk
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+./build_apk.sh           # debug   -> app/build/outputs/apk/debug/app-debug.apk
+./build_apk.sh --release # release -> app/build/outputs/apk/release/app-release.apk
+adb install -r <apk>
 ```
 
 The script installs a JDK (Homebrew `openjdk@17`, no sudo), the Android SDK
 command-line tools and the NDK if missing, stages the Python package and the
 `web/` assets, prunes nested `__pycache__`, and builds with the committed
 Gradle wrapper (8.7 — newer Gradle breaks the pinned AGP).
+
+### Release builds
+
+The release variant is signed, minified (R8) and resource-shrunk, and ships
+arm64 only (~22 MB vs 29 MB debug). Signing reads two gitignored files in
+this directory; generate the keystore once:
+
+```sh
+keytool -genkeypair -keystore release.keystore -alias atif \
+  -keyalg RSA -keysize 4096 -validity 10950 \
+  -storepass <password> -keypass <password> \
+  -dname "CN=Atif Assistant, O=matif157, C=PK"
+# then write storeFile/storePassword/keyAlias/keyPassword into
+# keystore.properties (see the comments inside the example values)
+```
+
+**Back up `release.keystore` + `keystore.properties`.** Android only accepts
+an update if it is signed with the same key; losing the keystore means the
+installed app can never be updated and must be uninstalled (wiping its data
+and models). A debug-signed APK cannot replace a release install or vice
+versa — same `applicationId`, different signature → `INSTALL_FAILED_...
+UPDATE_INCOMPATIBLE`; uninstall first.
+
+R8 keeps (`app/proguard-rules.pro`) protect the Chaquopy bridge, the
+`@JavascriptInterface` methods and `MainActivity`; the full stack (llama
+spawn, whisper exec, downloads, setup overlay) was re-verified on an arm64
+emulator running the minified release.
 
 Native binaries are built separately (long; needs the NDK):
 

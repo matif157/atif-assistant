@@ -1,2 +1,4 @@
 .native/
 app/src/main/jniLibs/
+release.keystore
+keystore.properties

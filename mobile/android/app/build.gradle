@@ -3,26 +3,52 @@ plugins {
     id "com.chaquo.python"
 }
 
+// Release signing: ../keystore.properties + ../release.keystore (both
+// gitignored). Without them the release build is simply unsigned.
+def ksProps = new Properties()
+def ksFile = file("../keystore.properties")
+if (ksFile.exists()) {
+    ksFile.withInputStream { ksProps.load(it) }
+}
+
 android {
     namespace "ai.atif.assistant"
     compileSdk 34
+
+    signingConfigs {
+        if (ksFile.exists()) {
+            release {
+                storeFile file("../" + ksProps["storeFile"])
+                storePassword ksProps["storePassword"]
+                keyAlias ksProps["keyAlias"]
+                keyPassword ksProps["keyPassword"]
+            }
+        }
+    }
 
     defaultConfig {
         applicationId "ai.atif.assistant"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "0.1.0"
-        // arm64 for phones; x86_64 for the emulator. Add "armeabi-v7a" for old devices.
+        versionCode 2
+        versionName "1.0.0"
+        // arm64 only: every phone that can run a 1.5B model, plus the arm64
+        // emulator. Chaquopy insists these live in defaultConfig (buildType
+        // filters are ignored), so x86_64 images are not supported - use an
+        // arm64 system image for the AVD.
         ndk {
-            abiFilters "arm64-v8a", "x86_64"
+            abiFilters "arm64-v8a"
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (ksFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

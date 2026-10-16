@@ -5,7 +5,8 @@
 # the server runs on the phone and no network is needed. This script:
 #   1. makes sure a real JDK, the Android SDK and Gradle are available,
 #   2. stages the Python package + web assets next to run_server.py,
-#   3. builds a debug APK.
+#   3. builds a debug APK (default) or a signed, minified release APK
+#      (--release; needs ../release.keystore + ../keystore.properties).
 #
 # Everything here is idempotent; re-running only does the missing steps.
 set -euo pipefail
@@ -13,6 +14,8 @@ cd "$(dirname "$0")"
 ROOT="$(cd ../.. && pwd)"          # repo root (…/atif-assistant)
 SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 BREW="$(command -v brew || echo /opt/homebrew/bin/brew)"
+RELEASE=0
+[ "${1:-}" = "--release" ] && RELEASE=1
 
 log() { printf '\n== %s\n' "$*"; }
 
@@ -73,18 +76,29 @@ cp -R "$ROOT/atif_assistant" "$PYDEST/atif_assistant"
 find "$PYDEST/atif_assistant" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 cp -R "$ROOT/web" "$PYDEST/web"
 
-if [ ! -f app/src/main/assets/native/arm64-v8a/llama-server ]; then
+if [ ! -f app/src/main/jniLibs/arm64-v8a/libllama-server.so ]; then
   echo "NOTE: no llama-server staged (on-device model will be unavailable)." >&2
   echo "      Build it with:  ./build_native.sh" >&2
 fi
 
 # ------------------------------------------------------------- 5. Build
-log "Building debug APK"
-./gradlew --no-daemon assembleDebug
+if [ "$RELEASE" = "1" ]; then
+  if [ ! -f release.keystore ] || [ ! -f keystore.properties ]; then
+    echo "Release build needs release.keystore + keystore.properties (gitignored)." >&2
+    echo "Generate them once with keytool; see mobile/android/README.md." >&2
+    exit 1
+  fi
+  log "Building signed release APK (arm64, minified)"
+  ./gradlew --no-daemon assembleRelease
+  APK="app/build/outputs/apk/release/app-release.apk"
+else
+  log "Building debug APK"
+  ./gradlew --no-daemon assembleDebug
+  APK="app/build/outputs/apk/debug/app-debug.apk"
+fi
 
-APK="app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "$APK" ]; then
-  log "Done: $APK"
+  log "Done: $APK ($(du -h "$APK" | cut -f1))"
   echo "Install with:  adb install -r $APK"
 else
   echo "Build finished but no APK found at $APK" >&2
