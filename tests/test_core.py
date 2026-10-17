@@ -1844,6 +1844,10 @@ def test_stt() -> None:
     finally:
         stt._BIN = orig_bin
 
+    # Any real executable gets us past the "tool missing" branch so this
+    # check exercises the model branch on machines without whisper installed
+    # (e.g. CI runners) as well as developer Macs.
+    stt._BIN = "/bin/ls"
     stt._MODEL_OVERRIDE = "/nonexistent/ggml.bin"
     try:
         r = stt.transcribe(b"RIFF....")
@@ -1853,6 +1857,7 @@ def test_stt() -> None:
         )
         check("offline status is honest", stt.status()["available"] is False)
     finally:
+        stt._BIN = orig_bin
         stt._MODEL_OVERRIDE = orig_model
 
     with tempfile.TemporaryDirectory() as tmp:
