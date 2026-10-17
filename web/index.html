@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="theme-color" content="#0b0e14">
 <title>Atif Assistant</title>
 <link rel="manifest" href="/static/manifest.json">
@@ -62,16 +62,18 @@
     <strong>ATIF ASSISTANT</strong>
     <span class="sub" id="statusline">personal intelligence</span>
   </div>
-  <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
-  <button class="ghost" id="btn-learned" title="Learned candidates">LEARNED</button>
-  <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
-  <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
-  <button class="ghost" id="btn-rules" title="Rules and plans">RULES</button>
-  <button class="ghost" id="btn-data" title="Data hub">DATA</button>
-  <button class="ghost" id="btn-upload" title="Upload a file" style="display:none">UPLOAD</button>
-  <button class="ghost" id="btn-import" title="Import local data" style="display:none">IMPORT</button>
-  <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
-  <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
+  <nav class="hdr-nav">
+    <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
+    <button class="ghost" id="btn-learned" title="Learned candidates">LEARNED</button>
+    <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
+    <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
+    <button class="ghost" id="btn-rules" title="Rules and plans">RULES</button>
+    <button class="ghost" id="btn-data" title="Data hub">DATA</button>
+    <button class="ghost" id="btn-upload" title="Upload a file" style="display:none">UPLOAD</button>
+    <button class="ghost" id="btn-import" title="Import local data" style="display:none">IMPORT</button>
+    <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
+    <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
+  </nav>
 </header>
 
 <div class="chat-wrap">
@@ -124,7 +126,7 @@
     <strong>RULES &amp; PLANS</strong>
     <button class="ghost" id="close-rules">CLOSE</button>
   </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)">
     <select id="rules-filter">
       <option value="all" selected>All</option>
       <option value="enforced">Enforced</option>
@@ -144,7 +146,7 @@
     <strong>LEARNED</strong>
     <button class="ghost" id="close-learned">CLOSE</button>
   </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)">
     <select id="learned-filter">
       <option value="candidate" selected>Candidate</option>
       <option value="all">All</option>
@@ -170,7 +172,7 @@
     <button class="ghost" id="toggle-log">LOG A DECISION</button>
     <button class="ghost" id="close-decisions">CLOSE</button>
   </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)">
     <select id="dec-filter">
       <option value="all">All</option>
       <option value="due">Due</option>
@@ -204,7 +206,7 @@
     <strong>DATA</strong>
     <button class="ghost" id="close-data">CLOSE</button>
   </div>
-  <div style="display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border)">
+  <div style="display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)">
     <button class="ghost small" id="tab-upload">UPLOAD</button>
     <button class="ghost small" id="tab-import">IMPORT</button>
     <button class="ghost small" id="tab-media">LIBRARY</button>
@@ -231,7 +233,7 @@
 
   <div id="data-import" hidden>
     <div id="wa-status" class="card" style="margin:.5rem .75rem .5rem .75rem; padding:.75rem"></div>
-    <div id="wa-chats" style="margin:.5rem .75rem .5rem .75rem; max-height:220px; overflow:auto; padding:.25rem; border:1px solid var(--border); border-radius:8px"></div>
+    <div id="wa-chats" style="margin:.5rem .75rem .5rem .75rem; max-height:220px; overflow:auto; padding:.25rem; border:1px solid var(--line); border-radius:8px"></div>
     <div id="wa-controls" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.5rem .75rem">
       <label style="display:flex; align-items:center; gap:.25rem"><input type="checkbox" id="wa-fromme"> From me only</label>
       <button id="wa-preview" class="btn">Preview</button>

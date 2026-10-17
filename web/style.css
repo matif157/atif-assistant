@@ -39,11 +39,21 @@ html, body {
   background: var(--bg);
   color: var(--txt);
   font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Android otherwise "auto-sizes" text and blows up the dense chip/label
+     layout; overscroll-none kills the pull-to-refresh mid-conversation. */
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
 }
 
 body {
   display: flex;
   flex-direction: column;
+  /* App shell: the chat pane scrolls internally and the composer stays
+     pinned. Without a definite height the whole page scrolled instead and
+     the input wandered off-screen on long chats / with the keyboard open.
+     dvh follows the mobile URL bar / keyboard; 100% is the fallback. */
+  height: 100%;
+  height: 100dvh;
   max-width: 860px;
   margin: 0 auto;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -64,13 +74,14 @@ header {
   z-index: 10;
 }
 header .ghost { flex: 0 0 auto; }
+.hdr-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 8px; letter-spacing: .12em; font-size: 13px; flex: 1 1 auto; min-width: 0; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .dot.on { background: var(--acc); box-shadow: 0 0 8px var(--acc); }
 .dot.off { background: var(--warn); }
 .sub { color: var(--dim); letter-spacing: 0; text-transform: none; font-size: 11px; }
 
-button { font-family: inherit; cursor: pointer; }
+button { font-family: inherit; cursor: pointer; /* no 300ms tap delay */ touch-action: manipulation; }
 .ghost {
   background: transparent;
   border: 1px solid var(--line);
@@ -224,6 +235,25 @@ textarea:focus { outline: none; border-color: var(--acc); }
   font: inherit;
 }
 #mem-results { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+/* Rules list: without this the fixed sheet grew past the screen with no
+   way to scroll - long rule sets were unreachable on a phone. */
+#rules-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+/* Scroll panes must not chain to the page (or the WebView's pull gesture). */
+#chat,
+.sheet,
+.basis-sidebar,
+#rules-body,
+#mem-results,
+.setup-overlay { overscroll-behavior: contain; }
 .mrow { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .mrow .k { font-size: 10px; color: var(--acc); letter-spacing: .08em; margin-bottom: 4px; }
 .mrow .t { font-size: 13px; }
@@ -436,9 +466,51 @@ textarea:focus { outline: none; border-color: var(--acc); }
 @media (max-width: 560px) {
   .msg { max-width: 96%; }
   .sub { display: none; }
-  header { padding: 10px 10px; }
-  header .ghost { padding: 4px 7px; font-size: 10px; letter-spacing: .06em; }
+
+  /* Two tight rows: brand on top, then a thumb-sized horizontally
+     scrollable button strip - the old wrapping header took 3-4 rows of a
+     phone screen and left 20px tap targets. */
+  header {
+    flex-wrap: nowrap;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
   .brand { font-size: 12px; }
+  .hdr-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .hdr-nav::-webkit-scrollbar { display: none; }
+  .hdr-nav .ghost {
+    min-height: 44px;          /* a real thumb target */
+    padding: 10px 13px;
+    font-size: 11px;
+    letter-spacing: .06em;
+    white-space: nowrap;
+  }
+
+  /* 16px inputs: anything smaller makes mobile browsers zoom the page on
+     focus and hides the composer behind the zoom. */
+  textarea,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  select { font-size: 16px; }
+  textarea { padding: 12px; }
+
+  #send, #mic { width: 46px; height: 46px; }
+  footer { padding: 10px 12px; }
+
+  .sheet-head { flex-wrap: wrap; row-gap: 8px; }
+  .sheet-head input { flex: 1 1 100%; order: 3; }
+
+  .setup-card { padding: 18px 16px; }
+  .setup-overlay { padding: 12px; }
+  .setup-sets { grid-template-columns: 1fr; }
 }
 
 /* two-column chat + basis sidebar */
@@ -561,6 +633,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
   align-items: center;
   justify-content: center;
   padding: 16px;
+  overflow-y: auto;
 }
 .setup-card {
   width: min(480px, 100%);
@@ -568,6 +641,9 @@ textarea:focus { outline: none; border-color: var(--acc); }
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 22px 22px 18px;
+  /* centres when there is room, scrolls from the top when there is not
+     (short phone screens) */
+  margin: auto;
 }
 .setup-card h2 { margin: 0 0 10px; font-size: 15px; letter-spacing: 0.06em; }
 .setup-lead { margin: 0 0 16px; color: var(--dim); font-size: 13px; line-height: 1.5; }
