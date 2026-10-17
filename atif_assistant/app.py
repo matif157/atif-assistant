@@ -1596,6 +1596,25 @@ def service_worker() -> FileResponse:
     return FileResponse(WEB_DIR / "sw.js", media_type="application/javascript")
 
 
+# Phase 8 install channel: the release APK served from the machine that built
+# it, so the phone can fetch it over the always-on tunnel when the GitHub CDN
+# truncates a large file on a slow link. Fixed allowlist, never a general
+# file server; ../ cannot appear inside a single path segment anyway.
+_DL_DIR = Path(__file__).resolve().parent.parent / "downloads"
+_DL_FILES = {
+    "app-release.apk": "application/vnd.android.package-archive",
+    "app-release.aab": "application/octet-stream",
+}
+
+
+@app.get("/dl/{name}")
+def download(name: str) -> Response:
+    media = _DL_FILES.get(name)
+    if media is None or not (_DL_DIR / name).is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(_DL_DIR / name, media_type=media, filename=name)
+
+
 @app.get("/api/settings")
 def get_settings():
     conn = db.connect()

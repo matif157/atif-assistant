@@ -28,3 +28,5 @@ mobile/android/.idea/
 
 # OS
 .DS_Store
+# release artifacts served via /dl (build outputs, never committed)
+downloads/

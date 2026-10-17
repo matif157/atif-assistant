@@ -875,6 +875,37 @@ def test_web_sync() -> None:
         print("       missing: " + ", ".join(missing_m))
 
 
+def test_downloads() -> None:
+    """Phase 8 install channel: /dl serves only allowlisted build artifacts
+    and 404s everything else - never becomes a general file server."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\ndownloads (release artifact channel)")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "dl.db")
+        db.init_db()
+        client = TestClient(app)
+        try:
+            evil = client.get("/dl/../../etc/passwd", follow_redirects=False)
+            check("traversal rejected", evil.status_code in (400, 404, 307, 308))
+            bad = client.get("/dl/evil.apk")
+            check("non-allowlisted name 404", bad.status_code == 404)
+            aab = client.get("/dl/app-release.aab")
+            check("aab present only after a bundle build", aab.status_code in (200, 404))
+            apk = client.get("/dl/app-release.apk")
+            check("apk serves when built, else 404", apk.status_code in (200, 404))
+            if apk.status_code == 200:
+                check("apk starts with zip magic", apk.content[:2] == b"PK")
+                check("apk not truncated", len(apk.content) > 10_000_000)
+        finally:
+            db.reset_db_path()
+
+
 def test_sessions_feedback() -> None:
     """Conversations browsing and per-message feedback plumbing (Phase 1).
 
@@ -4106,6 +4137,7 @@ def main() -> int:
     test_isolation()
     test_remote_web()
     test_web_sync()
+    test_downloads()
     test_sessions_feedback()
     test_soul()
     test_soul_ask()
