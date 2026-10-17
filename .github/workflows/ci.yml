@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies (the proven lock set)
         run: pip install -r requirements.lock
 
-      - name: Run the 429-check suite
+      - name: Run the core suite
         run: python tests/test_core.py
 
       - uses: actions/setup-node@v4
@@ -30,7 +30,9 @@ jobs:
           node-version: "20"
 
       - name: Check the front end
-        run: node --check web/app.js
+        run: |
+          node --check web/app.js
+          node --check web/sw.js
 
       - name: Report build commit
         run: echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_ENV"

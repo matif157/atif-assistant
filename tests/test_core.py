@@ -779,6 +779,78 @@ def test_remote_web() -> None:
     check("health reports counts", "counts" in health.json())
 
 
+def test_web_sync() -> None:
+    """The three front ends must not drift apart.
+
+    app.js talks to index.html by element id (a renamed element becomes a
+    silent null), to FastAPI by literal path (a renamed route becomes a 404
+    that only appears when that screen opens), and to the APK by AndroidVoice
+    bridge method (a renamed method is skipped by its typeof guard). CI is
+    the only place all three files are checked together, because the APK
+    itself cannot be built on GitHub runners (arm64-only native libs).
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    java = (
+        root / "mobile" / "android" / "app" / "src" / "main" / "java"
+        / "ai" / "atif" / "assistant" / "MainActivity.java"
+    ).read_text(encoding="utf-8")
+
+    # 1. Every literal id app.js looks up exists in index.html or is created
+    #    by app.js itself; otherwise the guarded branch simply never runs.
+    js_ids = set(re.findall(r'getElementById\("([^"]+)"\)', js))
+    html_ids = set(re.findall(r'id="([^"]+)"', html))
+    made_by_js = set(re.findall(r'\.id\s*=\s*"([^"]+)"', js))
+    missing_ids = sorted(js_ids - html_ids - made_by_js)
+    check("every getElementById target exists", not missing_ids)
+    if missing_ids:
+        print("       missing: " + ", ".join(missing_ids))
+
+    # 2. Wiring that carries whole features: each id must be in BOTH files.
+    #    (setup-sets is deliberately absent: JS reaches those buttons by
+    #    class, and its id is only a CSS/anchor hook.)
+    critical = (
+        "setup-dl", "setup-pause", "setup-start", "setup-skip",
+        "setup-lock-row", "setup-lock-btn",
+        "lock-setting-row", "set-applock", "dot", "statusline",
+    )
+    for el in critical:
+        check(
+            f"{el} wired in html and js",
+            f'id="{el}"' in html and f'getElementById("{el}")' in js,
+        )
+
+    # 3. Literal fetches must match a FastAPI route, or the UI breaks with a
+    #    404 only at runtime, and only when that screen opens.
+    routes = set()
+    for py in (root / "atif_assistant").glob("*.py"):
+        routes |= set(
+            re.findall(
+                r'@app\.(?:get|post|put|delete)\("([^"]+)"',
+                py.read_text(encoding="utf-8"),
+            )
+        )
+    fetches = {f.split("?")[0] for f in re.findall(r'fetch\("(/[^"`]+)"', js)}
+    unrouted = sorted(fetches - routes)
+    check("every literal fetch hits a real route", not unrouted)
+    if unrouted:
+        print("       unrouted: " + ", ".join(unrouted))
+
+    # 4. Bridge methods the page calls must exist on the Java side.
+    js_methods = set(re.findall(r"AndroidVoice\.(\w+)\s*\(", js))
+    js_methods |= set(re.findall(r"\bbridge\.(\w+)\s*\(", js))
+    at = java.find("class VoiceBridge")
+    bridge_src = java[at:] if at != -1 else ""
+    java_methods = set(re.findall(r"public\s+\w+\s+(\w+)\s*\(", bridge_src))
+    missing_m = sorted(js_methods - java_methods)
+    check("every bridge call exists in MainActivity", not missing_m)
+    if missing_m:
+        print("       missing: " + ", ".join(missing_m))
+
+
 def test_extended_api() -> None:
     """Settings, notes, works, media and social endpoints persist correctly.
 
@@ -2709,6 +2781,7 @@ def main() -> int:
     test_critique_parsing()
     test_isolation()
     test_remote_web()
+    test_web_sync()
     test_extended_api()
     test_location()
     test_uploads()
