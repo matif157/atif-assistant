@@ -1763,6 +1763,116 @@ async function stageWhatsApp() {
   }
 }
 
+/* WhatsApp chat-export (.txt): phone-side history import (Phase 8) */
+let wtxtMsgs = [];
+
+async function wtxtFilePicked(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  const status = document.getElementById("wtxt-status");
+  const preview = document.getElementById("wtxt-preview");
+  const stageBtn = document.getElementById("wtxt-stage");
+  const meta = document.getElementById("wtxt-stage-meta");
+  if (!file || !status) return;
+  wtxtMsgs = [];
+  preview.hidden = true;
+  stageBtn.hidden = true;
+  if (meta) meta.textContent = "";
+  status.textContent = `Reading ${file.name}...`;
+  try {
+    const content = await file.text();
+    const recent = !!document.getElementById("wtxt-recent")?.checked;
+    const res = await fetch("/api/import/whatsapp-txt/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: file.name,
+        content,
+        recent_first: recent,
+        limit: 500,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      status.textContent = data.error || "Could not parse that file.";
+      return;
+    }
+    wtxtMsgs = data.messages || [];
+    if (!wtxtMsgs.length) {
+      status.textContent = "No messages found.";
+      return;
+    }
+    status.textContent = `${data.chat}: showing ${data.shown} of ${data.total}`;
+    preview.innerHTML = "";
+    for (const m of wtxtMsgs) {
+      const row = document.createElement("label");
+      row.style.cssText =
+        "display:flex;gap:.4rem;align-items:flex-start;font-size:12px;margin:.18rem 0";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = true;
+      cb.className = "wtxt-cb";
+      const span = document.createElement("span");
+      const who = m.from_me ? "You" : m.from;
+      span.textContent = `${m.when}  ${who}: ${String(m.text || "").slice(0, 200)}`;
+      row.append(cb, span);
+      preview.append(row);
+    }
+    preview.hidden = false;
+    stageBtn.hidden = false;
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+  }
+}
+document.getElementById("wtxt-file")?.addEventListener("change", wtxtFilePicked);
+
+async function stageTxtItems() {
+  const btn = document.getElementById("wtxt-stage");
+  const meta = document.getElementById("wtxt-stage-meta");
+  const preview = document.getElementById("wtxt-preview");
+  if (!btn || !preview) return;
+  const boxes = Array.from(preview.querySelectorAll(".wtxt-cb"));
+  const items = boxes
+    .map((b, i) => (b.checked ? wtxtMsgs[i] : null))
+    .filter(Boolean)
+    .map((m) => ({ text: m.text, from: m.from, when: m.when }));
+  if (!items.length) {
+    if (meta) meta.textContent = "Nothing selected.";
+    return;
+  }
+  btn.disabled = true;
+  if (meta) meta.textContent = "Staging...";
+  try {
+    const res = await fetch("/api/import/whatsapp-txt/stage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat: wtxtMsgs[0]?.chat || "chat", items }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      if (meta) meta.textContent = data.error || "Staging failed.";
+      return;
+    }
+    if (meta) {
+      meta.textContent = `Staged ${data.staged}, skipped ${
+        (data.skipped || []).length} already there`;
+    }
+    if (typeof refreshLearnedIfAny === "function") refreshLearnedIfAny();
+    const lSheet = document.getElementById("learned-sheet");
+    if (lSheet) {
+      lSheet.hidden = false;
+      if (typeof refreshLearned === "function") refreshLearned();
+    }
+    preview.hidden = true;
+    btn.hidden = true;
+    wtxtMsgs = [];
+  } catch (e) {
+    if (meta) meta.textContent = `Error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById("wtxt-stage")?.addEventListener("click", stageTxtItems);
+
 document.getElementById("btn-import")?.addEventListener("click", () => {
   const dataSheet = document.getElementById("data-sheet");
   if (dataSheet) { dataSheet.hidden = false; showDataTab("import"); loadWhatsAppStatus(); }

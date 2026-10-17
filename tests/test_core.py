@@ -1466,6 +1466,101 @@ def test_home() -> None:
             db.reset_db_path()
 
 
+def test_whatsapp_txt() -> None:
+    """Phase 8: WhatsApp .txt chat exports - both official formats parse,
+    stage as LEARNED candidates with content-key dedupe, and land in the
+    memory index so past talks become answerable."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+    from atif_assistant.importers import whatsapp_txt
+
+    print("\nwhatsapp txt export importer")
+    android = (
+        "[12/08/2024, 3:44:00 PM] Messages and calls are end-to-end encrypted\n"
+        "[12/08/2024, 3:45:21 PM] Ali: Salaam, kya haal hai?\n"
+        "[12/08/2024, 3:46:02 PM] You: Theek hoon bhai\n"
+        "[12/08/2024, 3:47:10 PM] Ali: Chalo milte hain\nkal shaam\n"
+    )
+    res = whatsapp_txt.parse_export(android, "Ali Ahmed (2).txt")
+    check("android export parses 3 messages", len(res["messages"]) == 3)
+    check("chat name from filename", res["chat"] == "Ali Ahmed (2)")
+    first = res["messages"][0]
+    check("system line skipped", first["from"] == "Ali" and "encrypted" not in first["text"])
+    check("12h clock converts to 24h iso", first["ts"] == "2024-08-12T15:45:21")
+    me = res["messages"][1]
+    check("You marks from_me", me["from_me"] and me["from"] == "You")
+    multi = res["messages"][2]
+    check("continuation lines join", "\nkal shaam" in multi["text"])
+    check("content key stable", len(multi["key"]) == 16)
+    ios = (
+        "8/17/25, 10:32 PM - Sara: Dekho main aa rahi hoon\n"
+        "8/17/25, 10:33 PM - You: Theek hai\n"
+    )
+    ires = whatsapp_txt.parse_export(ios, "sara.txt")
+    check("ios export parses", len(ires["messages"]) == 2)
+    check("ios month-first when unambiguous", ires["messages"][0]["ts"] == "2025-08-17T22:32:00")
+    try:
+        whatsapp_txt.parse_export("random notes", "x.txt")
+        check("garbage rejected", False)
+    except ValueError:
+        check("garbage rejected", True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "wtxt.db")
+        db.init_db()
+        client = TestClient(app)
+        try:
+            bad = client.post(
+                "/api/import/whatsapp-txt/preview",
+                json={"content": "nope", "filename": "x.txt"},
+            )
+            check("preview rejects non-export", bad.status_code == 400)
+            miss = client.post("/api/import/whatsapp-txt/preview", json={"filename": "x.txt"})
+            check("preview requires content", miss.status_code == 400)
+            prev = client.post(
+                "/api/import/whatsapp-txt/preview",
+                json={"filename": "Ali Ahmed (2).txt", "content": android, "recent_first": True},
+            )
+            check("preview returns messages", prev.status_code == 200 and prev.json()["total"] == 3)
+            check(
+                "recent_first shows last message first",
+                prev.json()["messages"][0]["text"].startswith("Chalo"),
+            )
+            items = [
+                {"text": m["text"], "from": m["from"], "when": m["when"]}
+                for m in prev.json()["messages"]
+            ]
+            st = client.post(
+                "/api/import/whatsapp-txt/stage",
+                json={"chat": "Ali Ahmed (2)", "items": items},
+            )
+            check("stage stores all", st.status_code == 200 and st.json()["staged"] == 3)
+            again = client.post(
+                "/api/import/whatsapp-txt/stage",
+                json={"chat": "Ali Ahmed (2)", "items": items},
+            )
+            check(
+                "re-stage dedupes by content key",
+                again.json()["staged"] == 0 and len(again.json()["skipped"]) == 3,
+            )
+            rows = client.get("/api/learned", params={"status": "candidate"})
+            check(
+                "staged rows are learned candidates",
+                rows.status_code == 200 and len(rows.json()["candidates"]) == 3,
+            )
+            found = db.search_memory("Salaam haal")
+            check(
+                "staged message is memory-searchable",
+                any(f["kind"] == "learned" for f in found),
+            )
+        finally:
+            db.reset_db_path()
+
+
 def test_importers() -> None:
     """Phase 6: the five light importers parse real-shaped fixtures,
     stage as LEARNED candidates (propose-then-approve), and never explode
@@ -3888,6 +3983,7 @@ def main() -> int:
     test_ask_stop_disconnect()
     test_home()
     test_importers()
+    test_whatsapp_txt()
     test_todos_reminders()
     test_extended_api()
     test_location()

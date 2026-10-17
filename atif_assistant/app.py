@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -30,6 +31,7 @@ from . import (
 )
 from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
+from .importers import whatsapp_txt
 from .importers import calendar as importer_calendar
 from .importers import contacts as importer_contacts
 from .importers import mail as importer_mail
@@ -957,6 +959,95 @@ def wa_stage(payload: dict) -> JSONResponse:
             when = it.get("when") if isinstance(it.get("when"), str) else ""
             src = f"whatsapp:desktop|chat_id={chat_id}|chat_name={chat_name}|msg_id={msg_id}|from_me={1 if from_me else 0}|when={when}"
             db.add_learned(text=text, kind="whatsapp", source=src, confidence=0.7, subject=None)
+            staged += 1
+        return JSONResponse({"staged": staged, "skipped": skipped, "total": len(items)})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
+@app.post("/api/import/whatsapp-txt/preview")
+def wtxt_preview(payload: dict) -> JSONResponse:
+    """Parse an exported WhatsApp .txt chat and return selectable messages.
+
+    The phone-side path: WhatsApp exports a chat to plain text, the WebView
+    reads the file, and only the parse result comes here - so this endpoint
+    never touches the filesystem and works identically in the APK.
+    """
+    try:
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid payload"}, status_code=400)
+        content = payload.get("content")
+        filename = payload.get("filename")
+        if not isinstance(content, str) or not isinstance(filename, str):
+            return JSONResponse({"error": "content and filename required"}, status_code=400)
+        try:
+            limit = int(payload.get("limit", 500))
+            offset = int(payload.get("offset", 0))
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"error": "invalid params"}, status_code=400)
+        limit = max(1, min(limit, 2000))
+        offset = max(0, offset)
+        recent_first = bool(payload.get("recent_first", False))
+        try:
+            res = whatsapp_txt.parse_export(content, filename)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        msgs = res["messages"]
+        total = len(msgs)
+        if recent_first:
+            view = list(reversed(msgs))[offset:offset + limit]
+        else:
+            view = msgs[offset:offset + limit]
+        return JSONResponse({
+            "chat": res["chat"],
+            "total": total,
+            "shown": len(view),
+            "offset": offset,
+            "recent_first": recent_first,
+            "messages": view,
+        })
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
+@app.post("/api/import/whatsapp-txt/stage")
+def wtxt_stage(payload: dict) -> JSONResponse:
+    """Stage selected exported messages as LEARNED candidates.
+
+    Dedupe is by content key (chat|sender|timestamp|text), so re-importing
+    the same or a re-exported file never duplicates a message - unlike the
+    desktop importer, this does not rely on row ids surviving an export.
+    """
+    try:
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid payload"}, status_code=400)
+        chat = str(payload.get("chat") or "").strip() or "chat"
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            return JSONResponse({"error": "no items"}, status_code=400)
+        staged = 0
+        skipped: list[dict[str, Any]] = []
+        conn = db.connect()
+        existing = conn.execute(
+            "SELECT source FROM learned WHERE kind='whatsapp'"
+        ).fetchall()
+        have = {ex["source"] or "" for ex in existing}
+        for it in items:
+            text = str((it or {}).get("text") or "").strip()
+            sender = str((it or {}).get("from") or "").strip()
+            when = str((it or {}).get("when") or "").strip()
+            if not text:
+                skipped.append({"reason": "empty text"})
+                continue
+            key = hashlib.sha1(
+                f"{chat}|{sender}|{when}|{text}".encode("utf-8")
+            ).hexdigest()[:16]
+            marker = f"h={key}"
+            if any(marker in s for s in have):
+                skipped.append({"reason": "already staged", "key": key})
+                continue
+            src = f"whatsapp:txt|chat={chat}|{marker}|when={when}|from={sender or '?'}"
+            db.add_learned(text=text, kind="whatsapp", source=src, confidence=0.7)
             staged += 1
         return JSONResponse({"staged": staged, "skipped": skipped, "total": len(items)})
     except Exception as e:  # noqa: BLE001

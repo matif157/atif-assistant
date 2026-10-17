@@ -280,6 +280,20 @@
       <span id="wa-stage-meta" class="muted"></span>
     </div>
     <p class="hint" style="margin:0 .75rem .75rem .75rem">Staged messages become LEARNED candidates for approval. Nothing is auto-promoted to facts.</p>
+    <div style="margin:.6rem .75rem .25rem .75rem; display:flex; gap:.5rem; align-items:baseline; flex-wrap:wrap">
+      <strong style="font-size:12px; letter-spacing:.06em">CHAT EXPORT (.txt)</strong>
+      <span class="hint" style="margin:0">on the phone: chat → ⋮ → More → Export chat → Without media</span>
+    </div>
+    <div id="wtxt-controls" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:0 .75rem .5rem .75rem">
+      <input type="file" id="wtxt-file" accept=".txt,text/plain">
+      <label style="display:flex; align-items:center; gap:.25rem"><input type="checkbox" id="wtxt-recent" checked> Recent first</label>
+      <span id="wtxt-status" class="muted"></span>
+    </div>
+    <div id="wtxt-preview" style="margin:0 .75rem .5rem .75rem; max-height:360px; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:.25rem" hidden></div>
+    <div style="margin:0 .75rem .75rem .75rem">
+      <button id="wtxt-stage" class="btn primary" hidden>Stage selected as candidates</button>
+      <span id="wtxt-stage-meta" class="muted"></span>
+    </div>
     <div id="src-pick" style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem .75rem .25rem .75rem">
       <button class="ghost small src-btn" data-src="contacts">CONTACTS</button>
       <button class="ghost small src-btn" data-src="calendar">CALENDAR</button>
