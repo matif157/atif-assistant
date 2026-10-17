@@ -243,6 +243,9 @@ function addBot(res) {
   if (res.asked_count > 1) {
     meta.appendChild(chip("repeat", `ASKED ${res.asked_count}x`));
   }
+  if (res.mood && res.mood.mood && res.mood.mood !== "neutral") {
+    meta.appendChild(chip("mood", `MOOD: ${String(res.mood.mood).toUpperCase()}`));
+  }
   if (res.memories_used) meta.appendChild(chip("", `MEMORY: ${res.memories_used}`));
   if (res.provider) meta.appendChild(chip("", res.provider.toUpperCase()));
 
@@ -560,6 +563,29 @@ async function loadInsights() {
         iBody.appendChild(r);
       }
     }
+
+    // Soul layer: inferred mood moments across turns - a timeline, never a
+    // diagnosis. Optional, so a missing endpoint cannot break Insights.
+    try {
+      const md = await (await fetch("/api/mood")).json();
+      if (md.mood?.length) {
+        const h = document.createElement("div");
+        h.className = "ihead";
+        h.textContent = "MOOD TIMELINE (inferred, not a diagnosis)";
+        iBody.appendChild(h);
+        for (const m of md.mood.slice(0, 12)) {
+          const r = document.createElement("div");
+          r.className = "mrow";
+          const t = document.createElement("div");
+          t.className = "t";
+          const when = (m.created_at || "").slice(5, 16).replace("T", " ");
+          t.textContent =
+            `${m.mood} — ${m.trajectory ? m.trajectory + " · " : ""}${when}`;
+          r.appendChild(t);
+          iBody.appendChild(r);
+        }
+      }
+    } catch { /* timeline is optional */ }
 
     if (d.contradictions?.length) {
       const h = document.createElement("div");

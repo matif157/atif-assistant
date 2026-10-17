@@ -282,6 +282,18 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at TEXT NOT NULL
 );
 
+-- Detected mood per turn (Soul layer). Keyword INFERENCE only - never a fact
+-- about the user, never used by retrieval, never exported as a diagnosis.
+CREATE TABLE IF NOT EXISTS mood_history (
+    id         INTEGER PRIMARY KEY,
+    mood       TEXT NOT NULL,
+    score      REAL NOT NULL DEFAULT 0,
+    cues       TEXT NOT NULL DEFAULT '[]',
+    trajectory TEXT,
+    session    TEXT,
+    created_at TEXT NOT NULL
+);
+
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
 -- the message it came from instead of only carrying a confidence number.
 CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
@@ -1149,6 +1161,41 @@ def mark_feedback_applied(feedback_id: int) -> None:
     conn.commit()
 
 
+def log_mood(
+    mood: str,
+    score: float = 0.0,
+    cues: list[str] | None = None,
+    trajectory: str | None = None,
+    session: str | None = None,
+) -> int:
+    """Persist one non-neutral mood detection for the timeline UI."""
+    conn = connect()
+    cur = conn.execute(
+        """INSERT INTO mood_history(mood, score, cues, trajectory, session,
+                                    created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (mood, score, json.dumps(cues or []), trajectory, session, now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def mood_timeline(limit: int = 50) -> list[dict[str, Any]]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM mood_history ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    out = []
+    for r in rows:
+        row = dict(r)
+        try:
+            row["cues"] = json.loads(row.get("cues") or "[]")
+        except (TypeError, ValueError):
+            row["cues"] = []
+        out.append(row)
+    return out
+
+
 COUNTED_TABLES = (
     "facts",
     "episodes",
@@ -1170,6 +1217,7 @@ COUNTED_TABLES = (
     "location_points",
     "routines",
     "feedback",
+    "mood_history",
 )
 
 

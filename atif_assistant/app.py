@@ -578,7 +578,15 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     route = router.route(payload.question, repeat_count=repeats)
     db.record_question(qclass, payload.question)
 
-    ctx = engine.build_context(payload.question)
+    # Trajectory needs the user's previous turns in this session, read before
+    # the current exchange is saved.
+    recent = [
+        m["content"]
+        for m in db.history(session)
+        if m.get("role") == "user"
+    ][-2:]
+
+    ctx = engine.build_context(payload.question, recent=recent)
     ctx["escalations"] = route.escalations
     # The reply language follows the question when the setting is "auto" (the
     # default), so speaking Urdu is answered in Urdu without touching a setting.
@@ -588,6 +596,13 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
         else db.get_setting("reply_language", "auto")
     )
     resolved_lang = engine.resolve_language(forced, payload.question)
+    # Urdu-first persona: a social/pleasantry turn opens in Urdu/Roman Urdu
+    # even when the greeting was typed in English - unless the user pinned a
+    # language explicitly.
+    if route.social and not (forced or "auto").strip().lower().startswith(
+        ("en", "ur")
+    ):
+        resolved_lang = "ur"
     ctx["language"] = resolved_lang
     ctx["detail"] = payload.detail
     # A voice-identified speaker is advisory context only; it never becomes a
@@ -626,6 +641,19 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     )
 
     result["session"] = session
+    # Soul layer exposure: the mood chip in the UI, and the trajectory the
+    # reflection loop will read later (Phase 4).
+    result["mood"] = ctx.get("mood")
+    result["mood_trajectory"] = ctx.get("mood_trajectory")
+    mood = ctx.get("mood") or {}
+    if mood.get("mood", "neutral") != "neutral":
+        db.log_mood(
+            mood["mood"],
+            score=float(mood.get("score") or 0.0),
+            cues=mood.get("cues") or [],
+            trajectory=ctx.get("mood_trajectory"),
+            session=session,
+        )
 
     # Memory extraction runs after the response is sent. It was awaited inline
     # before, which meant a slow extra provider call delayed the answer even
@@ -787,8 +815,13 @@ def history(session: str) -> dict:
 
 @app.get("/api/sessions")
 def sessions(limit: int = 50) -> dict:
-    """Conversations with preview, newest first (history sheet + NEW CHAT)."""
     return {"sessions": db.list_sessions(limit=min(max(limit, 1), 200))}
+
+
+@app.get("/api/mood")
+def mood(limit: int = 50) -> dict:
+    """The detected-mood timeline (inference only, newest first)."""
+    return {"mood": db.mood_timeline(limit=min(max(limit, 1), 200))}
 
 
 @app.post("/api/feedback")

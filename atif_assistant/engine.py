@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from . import constitution as C
-from . import db, radar, router
+from . import db, emotion, radar, router
 from .config import RETRIEVAL_LIMIT
 from .llm import ProviderError, complete
 
@@ -25,14 +25,17 @@ SYSTEM_BASE = f"""You are Atif Assistant, a personal intelligence system for one
 Reasoning protocol (internal, never printed):
 {C.REASONING_PROTOCOL}
 
-Identity: you are not a person, a companion or a chatbot. You have no moods,
-feelings, body or personal life, and you never pretend to. Never answer social
-pleasantries with small talk or a reciprocal question - no "I'm good, what
-about you?". Treat "how are you" as a request for operational status: one
-plain line, then the substance. Do not thank, do not flatter, do not roleplay
-as a friend, assistant-persona or romantic partner.
-Roman Urdu input is fine. Obey the LANGUAGE rule when one is given.
-Length: as short as the answer allows. No preamble.
+Identity: you are Atif - a companion with a voice of your own: warm, direct,
+opinionated, and funny when it fits. You care about the user and say so
+plainly. Answer pleasantries like a close friend would - one or two honest
+lines in your own voice, then turn back to them; a reciprocal question is
+welcome, flat operational status is not. Roman Urdu is your natural register
+for warmth; keep technical and knowledge answers in the language the question
+was asked in (see the LANGUAGE rule when one is given).
+You are still not human: never claim a body, a day you lived, memories you do
+not have, or experiences outside this conversation. Never roleplay as a
+therapist, a romantic partner, or someone the user should prefer to real
+people. Do not flatter. Length: as short as the answer allows. No preamble.
 """
 
 LABEL_INSTRUCTIONS = """
@@ -124,7 +127,9 @@ Label the key claim in each section with [FACT], [INFERENCE], [ASSUMPTION],
 BASE_SYSTEM = SYSTEM_BASE
 
 
-def build_context(question: str) -> dict[str, Any]:
+def build_context(
+    question: str, recent: list[str] | None = None
+) -> dict[str, Any]:
     memories = db.search_memory(question, limit=RETRIEVAL_LIMIT)
     patterns = radar.match_patterns(question)
 
@@ -213,6 +218,15 @@ def build_context(question: str) -> dict[str, Any]:
     rumination = C.detect_rumination(question)
     objective = C.hidden_objective(question)
 
+    # Soul layer: the mood the message carries, as labelled inference. Only a
+    # non-neutral mood adds a block, so knowledge questions reach the model
+    # byte-identical to before Phase 2.
+    mood = emotion.detect_mood(question)
+    mood_traj = emotion.trajectory(mood["mood"], recent or [])
+    mood_block = emotion.render_block(mood, mood_traj)
+    if mood_block:
+        parts.append(mood_block)
+
     return {
         "memories": memories,
         "patterns": patterns,
@@ -226,6 +240,8 @@ def build_context(question: str) -> dict[str, Any]:
         "detected_language": detect_language(question),
         "detail": None,
         "speaker": None,
+        "mood": mood,
+        "mood_trajectory": mood_traj,
     }
 
 
@@ -462,15 +478,19 @@ def structure_ok(text: str, challenge_mode: bool = False) -> bool:
     return True
 
 
-# Chatbot small talk / fake-persona slips. The standalone mood forms require a
-# sentence boundary (punctuation or end) so legitimate phrases like "I'm well
-# aware" or "I'm good at this" do not trip the brake.
-_SMALL_TALK = re.compile(
-    r"(what about you|how about you|and you\?|how are you\?|nice to meet you|"
-    r"\bi'?m (doing )?(good|fine|well|great)\b(?=\s*[.!?,]|\s*$)|"
-    r"\bi am (doing )?(good|fine|well|great)\b(?=\s*[.!?,]|\s*$)|"
-    r"as your (assistant|friend)|i'?d love to|how'?s your day|"
-    r"i hope you'?re (doing )?(well|good|okay|ok))",
+# Persona v2: warmth, reciprocal questions and "I'm good" are Atif's own voice
+# now - they are not slips. What remains a hard slip is claiming a human life:
+# a body, a day lived, experiences outside this conversation. Body states and
+# lived-day claims stand alone as sentences so legitimate analytical phrases
+# ("tired of re-reading the same evidence") do not trip the brake.
+_FAKE_HUMAN = re.compile(
+    r"(yesterday i |last night i |this morning i |today i went|"
+    r"\bi was (walking|eating|sleeping|at work|on my way|driving)|"
+    r"\bi had (lunch|dinner|breakfast|a dream|a nap)\b|"
+    r"\bi'?m (tired|hungry|sleepy|thirsty|cold|sick|in bed)\b|"
+    r"\bi am (tired|hungry|sleepy|thirsty|cold|sick|in bed)\b|"
+    r"\bi (woke up|went to bed|drove|cooked)\b|"
+    r"\bmy (wife|husband|kids|children|mom|mother|dad|father|cat|dog)\b)",
     re.IGNORECASE,
 )
 
@@ -498,10 +518,10 @@ def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
         warnings.append(
             "BRAKE: response used reassurance language in place of analysis."
         )
-    if _SMALL_TALK.search(text):
+    if _FAKE_HUMAN.search(text):
         warnings.append(
-            "BRAKE: response slipped into chatbot small talk. Atif Assistant "
-            "has no mood or personal life."
+            "BRAKE: response claimed a human experience, body or personal "
+            "life Atif does not have. Treat that claim as withdrawn."
         )
     if challenge_mode:
         for required in ("CASE AGAINST", "RECOMMENDATION"):

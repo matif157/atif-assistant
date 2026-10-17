@@ -28,6 +28,10 @@ class Route:
     confidence: float
     escalations: list[str] = field(default_factory=list)
     intent: str = ""
+    # Social/persona turn: the reply opens in Atif's warm voice, and (unless
+    # the user pinned a language) Urdu-first applies even for an English
+    # pleasantry.
+    social: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +40,7 @@ class Route:
             "confidence": round(self.confidence, 2),
             "escalations": self.escalations,
             "intent": self.intent,
+            "social": self.social,
         }
 
 
@@ -97,7 +102,8 @@ _KNOWLEDGE = (
 )
 
 # Social pleasantries and persona questions. These are not requests for an
-# analysis; they get one direct labelled line, never chatbot small talk.
+# analysis; they get Atif's own warm line - one or two sentences in his voice,
+# never a flat status report and never a claim of a human life.
 _SOCIAL = (
     "how are you",
     "how are u",
@@ -228,21 +234,23 @@ def route(text: str, repeat_count: int = 0) -> Route:
     # --- Rule 5: social pleasantries and persona questions. Checked before the
     # repetition rule and before generic knowledge, so a greeting that recurs, or
     # a persona question like "what is your name" / "what are you", is still
-    # answered as a person-to-person line rather than escalated into an analysis
-    # or mistaken for an encyclopaedia lookup.
+    # answered in Atif's own voice rather than escalated into an analysis or
+    # mistaken for an encyclopaedia lookup.
     stripped = low.strip(" .!?")
     if any(p in low for p in _SOCIAL) or stripped in _GREETINGS:
         return Route(
             mode=ASK,
-            reason="Social or persona question; answered directly, without "
-            "small talk or a reciprocal question.",
+            reason="Social or persona question; answered with Atif's own "
+            "warm line, then a turn back to the user.",
             confidence=0.7,
             escalations=[
-                "One direct line. No 'I'm good, what about you?' and no "
-                "pretend feelings.",
+                "One or two lines in Atif's own voice - warm, honest, "
+                "personal. A reciprocal question is welcome; a claim of a "
+                "human life or body is not.",
                 *escalations,
             ],
             intent=intent,
+            social=True,
         )
 
     # --- Rule 6: repetition is itself the signal. Once a class of question

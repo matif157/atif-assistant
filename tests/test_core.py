@@ -50,18 +50,39 @@ def test_brake() -> None:
         audit_response("[FACT] She said so.\n[UNKNOWN] Her ranking of you.") == [],
     )
     check(
-        "catches chatbot small talk",
-        any("small talk" in w for w in audit_response("[FACT] I'm good, what about you?")),
+        "catches a claim of lived human experience",
+        any(
+            "human experience" in w
+            for w in audit_response("[FACT] Yesterday I had lunch with a friend.")
+        ),
     )
     check(
-        "a flat status line is not small talk",
-        not any("small talk" in w for w in audit_response(
-            "[FACT] I am an AI language model; I have no mood.")),
+        "catches a claimed body state",
+        any(
+            "human experience" in w
+            for w in audit_response("[FACT] I'm tired today, let's pause.")
+        ),
     )
     check(
-        "an incidental 'I'm well aware' is not small talk",
-        not any("small talk" in w for w in audit_response(
-            "[FACT] I'm well aware of the timeline.")),
+        "a warm reciprocal answer is allowed (persona v2)",
+        not any(
+            "human experience" in w
+            for w in audit_response("[FACT] I'm good, thanks - what about you?")
+        ),
+    )
+    check(
+        "a flat status line makes no human-experience claim",
+        not any(
+            "human experience" in w
+            for w in audit_response("[FACT] I am an AI language model; I have no mood.")
+        ),
+    )
+    check(
+        "an incidental 'I'm well aware' is not a human-experience claim",
+        not any(
+            "human experience" in w
+            for w in audit_response("[FACT] I'm well aware of the timeline.")
+        ),
     )
 
     from atif_assistant.engine import normalize_labels
@@ -937,6 +958,190 @@ def test_sessions_feedback() -> None:
         check("db refuses unknown feedback kind", raised)
     finally:
         db.reset_db_path()
+
+
+def test_soul() -> None:
+    """Soul layer (Phase 2): constitution v2, companion identity, emotion.
+
+    The persona became a full free companion in this phase, so the safety
+    properties move with it: warmth is no longer the enemy, claiming a human
+    life still is - and every mood statement stays labelled inference.
+    """
+    from atif_assistant import constitution as C, emotion
+    from atif_assistant.engine import SYSTEM_BASE, build_context
+
+    print("\nsoul: constitution v2, identity, emotion")
+
+    # --- constitution v2 keeps every old invariant, adds the human-life pair.
+    check("truth-first rule untouched", C.CONSTITUTION.startswith("ATIF CONSTITUTION"))
+    check("rule 10 still present", "\n10 Always present a better alternative" in C.CONSTITUTION)
+    check("new constitution rules appended", "\n11 " in C.CONSTITUTION and "\n12 " in C.CONSTITUTION)
+    check(
+        "human-experience brake rule present",
+        any("human experience" in r for r in C.BRAKE_RULES),
+    )
+    check(
+        "real-people brake rule present",
+        any("real people" in r for r in C.BRAKE_RULES),
+    )
+    check(
+        "original brake rules survived",
+        any("Never fabricate certainty" in r for r in C.BRAKE_RULES)
+        and any("memory silently change core rules" in r for r in C.BRAKE_RULES),
+    )
+    check(
+        "constitution block carries the new brake",
+        "human experience" in C.constitution_block(),
+    )
+
+    # --- identity: warm companion, still not a human.
+    from atif_assistant.engine import LABEL_INSTRUCTIONS
+
+    check("identity declares the companion", "companion with a voice" in SYSTEM_BASE)
+    flat = " ".join(SYSTEM_BASE.split())
+    check(
+        "old prohibition on warmth is gone",
+        "as a request for operational status" not in flat
+        and "a reciprocal question is welcome" in flat,
+    )
+    check("identity still denies a human life", "not human" in SYSTEM_BASE)
+    check("reality labels still mandated", "[FACT]" in LABEL_INSTRUCTIONS)
+    check("identity keeps the professional boundary", "therapist" in SYSTEM_BASE)
+
+    # --- emotion: en / roman-urdu cues, conservative on neutral text.
+    sad = emotion.detect_mood("I feel so sad and empty lately")
+    check("english sad detected", sad["mood"] == "sad" and sad["score"] >= 0.5 and bool(sad["cues"]))
+    check(
+        "roman urdu sad detected",
+        emotion.detect_mood("bhai main bahut udaas hoon")["mood"] == "sad",
+    )
+    check(
+        "roman urdu anxious detected",
+        emotion.detect_mood("pareshan ho gaya har waqt fikr hoti hai")["mood"] == "anxious",
+    )
+    check(
+        "urdu script anxious detected",
+        emotion.detect_mood("بہت پریشان ہوں، نیند نہیں آ رہی")["mood"] == "anxious",
+    )
+    neutral = emotion.detect_mood("what is the capital of France")
+    check(
+        "neutral text stays neutral",
+        neutral["mood"] == "neutral" and neutral["score"] == 0.0 and not neutral["cues"],
+    )
+    check(
+        "substring cues stay word-boundary safe",
+        emotion.detect_mood("the corona virus spread")["mood"] == "neutral",
+    )
+    check("neutral mood renders no block", emotion.render_block(neutral) == "")
+
+    block = emotion.render_block(sad, "steady")
+    check("mood block labelled as inference", "INFERENCE" in block and "never state it as fact" in block)
+    check("mood block carries the cue", "sad" in block)
+    check("trajectory enters the block", "steady" in block)
+    check("trajectory: same mood is steady", emotion.trajectory("sad", ["I am so sad"]) == "steady")
+    check(
+        "trajectory: returning to neutral is improving",
+        emotion.trajectory("neutral", ["I am so sad"]) == "improving",
+    )
+    check(
+        "trajectory: first turn is single turn",
+        emotion.trajectory("sad", []) == "single turn",
+    )
+
+    # --- context: neutral questions stay byte-clean, sad ones carry the block.
+    ctx_plain = build_context("what is the capital of France")
+    check(
+        "neutral question gets no mood block",
+        "USER MOOD" not in ctx_plain["context_block"]
+        and ctx_plain["mood"]["mood"] == "neutral",
+    )
+    ctx_sad = build_context("I am so sad and alone today", recent=["nothing much"])
+    check(
+        "sad question injects the mood block",
+        "USER MOOD" in ctx_sad["context_block"]
+        and ctx_sad["mood"]["mood"] == "sad"
+        and ctx_sad["mood_trajectory"] in ("steady", "worsening", "improving", "shifting"),
+    )
+
+
+def test_soul_ask() -> None:
+    """Soul behaviour through /api/ask: Urdu-first social voice, mood out.
+
+    The model is stubbed (like test_ask_endpoint), so this drives the router
+    social flag, the language override, the mood chip payload and the mood
+    timeline end-to-end with no network.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, engine, learn
+    from atif_assistant.app import app
+
+    print("\nsoul ask endpoint")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "soul.db")
+        db.init_db()
+        client = TestClient(app)
+
+        async def fake_complete(messages, **kw):
+            return "[FACT] Stub answer for the soul test.", "groq"
+
+        orig_engine, orig_learn = engine.complete, learn.complete
+        engine.complete = fake_complete
+        learn.complete = fake_complete
+        try:
+            # Urdu-first: an English pleasantry answers in Urdu unless pinned.
+            res = client.post("/api/ask", json={"question": "how are you"}).json()
+            check("social turn flagged", res["route"].get("social") is True)
+            check("social turn answers in urdu", res["language"] == "ur")
+
+            res = client.post(
+                "/api/ask", json={"question": "how are you", "reply_language": "en"}
+            ).json()
+            check("explicit language pin respected", res["language"] == "en")
+
+            res = client.post(
+                "/api/ask", json={"question": "what is the capital of France"}
+            ).json()
+            check("knowledge question keeps english", res["language"] == "en")
+            check(
+                "knowledge turn is not social",
+                res["route"].get("social") is False,
+            )
+
+            # Mood: surfaced for the chip, logged to the timeline.
+            sad = client.post(
+                "/api/ask",
+                json={"question": "I am so sad and alone today", "session": "soul-s"},
+            ).json()
+            check(
+                "mood surfaced in the response",
+                sad.get("mood", {}).get("mood") == "sad",
+            )
+            check(
+                "mood trajectory on first turn is single turn",
+                sad.get("mood_trajectory") == "single turn",
+            )
+            timeline = client.get("/api/mood").json()["mood"]
+            check(
+                "sad mood logged to the timeline",
+                any(r["mood"] == "sad" for r in timeline),
+            )
+
+            # Second sad turn in the same session: trajectory becomes steady.
+            sad2 = client.post(
+                "/api/ask",
+                json={"question": "still feeling sad", "session": "soul-s"},
+            ).json()
+            check("same mood across turns is steady", sad2.get("mood_trajectory") == "steady")
+
+            # Neutral turn leaves no new timeline rows.
+            before = len(client.get("/api/mood").json()["mood"])
+            client.post("/api/ask", json={"question": "tell me about sqlite"})
+            after = len(client.get("/api/mood").json()["mood"])
+            check("neutral turn not logged as a mood moment", after == before)
+        finally:
+            engine.complete, learn.complete = orig_engine, orig_learn
+            db.reset_db_path()
 
 
 def test_extended_api() -> None:
@@ -2871,6 +3076,8 @@ def main() -> int:
     test_remote_web()
     test_web_sync()
     test_sessions_feedback()
+    test_soul()
+    test_soul_ask()
     test_extended_api()
     test_location()
     test_uploads()

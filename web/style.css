@@ -135,6 +135,7 @@ button { font-family: inherit; cursor: pointer; /* no 300ms tap delay */ touch-a
 .chip.rum { color: var(--danger); border-color: rgba(248,113,113,.4); }
 .chip.prof { color: var(--danger); border-color: rgba(248,113,113,.4); }
 .chip.int { color: var(--acc); border-color: rgba(94,234,212,.3); }
+.chip.mood { color: #c4b5fd; border-color: rgba(196,181,253,.4); }
 .brake { margin-top: 7px; font-size: 11px; color: var(--danger); border-left: 2px solid var(--danger); padding-left: 8px; }
 
 /* composer */
