@@ -20,17 +20,20 @@
   <nav class="hdr-nav">
     <button class="ghost" id="btn-home" title="Home dashboard">HOME</button>
     <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
-    <button class="ghost" id="btn-learned" title="Learned candidates">LEARNED</button>
     <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
-    <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
-    <button class="ghost" id="btn-rules" title="Rules and plans">RULES</button>
-    <button class="ghost" id="btn-data" title="Data hub">DATA</button>
-    <button class="ghost" id="btn-upload" title="Upload a file" style="display:none">UPLOAD</button>
-    <button class="ghost" id="btn-import" title="Import local data" style="display:none">IMPORT</button>
     <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
-    <button class="ghost" id="btn-new-chat" title="Start a new conversation">NEW</button>
-    <button class="ghost" id="btn-history" title="Past conversations">HISTORY</button>
-    <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
+    <div class="hdr-more" id="hdr-more">
+      <button class="ghost" id="btn-learned" title="Learned candidates">LEARNED</button>
+      <button class="ghost" id="btn-decisions" title="Decision ledger">LEDGER</button>
+      <button class="ghost" id="btn-rules" title="Rules and plans">RULES</button>
+      <button class="ghost" id="btn-data" title="Data hub">DATA</button>
+      <button class="ghost" id="btn-upload" title="Upload a file" style="display:none">UPLOAD</button>
+      <button class="ghost" id="btn-import" title="Import local data" style="display:none">IMPORT</button>
+      <button class="ghost" id="btn-new-chat" title="Start a new conversation">NEW</button>
+      <button class="ghost" id="btn-history" title="Past conversations">HISTORY</button>
+      <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
+    </div>
+    <button class="ghost" id="btn-more" title="More" aria-expanded="false" aria-controls="hdr-more">MORE</button>
   </nav>
 </header>
 
@@ -258,7 +261,7 @@
   </div>
 
   <div id="data-media" hidden>
-    <div id="media-body" style="padding:.5rem .75rem; max-height:420px; overflow:auto"></div>
+    <div id="media-body" style="padding:.5rem .75rem"></div>
   </div>
 </div>
 
@@ -268,6 +271,9 @@
     <button class="ghost" id="close-settings">CLOSE</button>
   </div>
   <div class="settings-body">
+    <section class="set-card">
+      <div class="set-title">LANGUAGE &amp; VOICE</div>
+      <div class="set-grid">
     <label>LANGUAGE / زبان
       <select id="set-lang">
         <option value="en">English</option>
@@ -318,9 +324,12 @@
         <input type="checkbox" id="set-applock"> Require fingerprint to open Atif
       </span>
       <small class="hint">Keeps other people out of the app; it does not encrypt your data.</small>
-    </label>
-    <label>DEVICE PERMISSIONS
-      <div id="perm-rows" style="display:flex;flex-direction:column;gap:.45rem;letter-spacing:normal;text-transform:none;font-size:12px;color:var(--txt);margin-top:.35rem">
+      </label>
+      </div>
+      </section>
+      <section class="set-card">
+        <div class="set-title">DEVICE PERMISSIONS</div>
+        <div id="perm-rows" class="perm-rows">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
           <span>Microphone - voice input</span>
           <span style="display:flex;align-items:center;gap:.4rem">
@@ -351,11 +360,10 @@
         </div>
       </div>
       <small class="hint">Each grant is yours to give or revoke in Android settings. The live reader only ever sees what WhatsApp puts in a notification, and drafts are suggestions you copy - Atif never sends anything on your behalf.</small>
-    </label>
-    <div class="form-actions">
-      <button class="ghost" id="download-urdu-model" hidden>DOWNLOAD URDU MODEL</button>
-    </div>
-    <div id="urdu-model-status" class="hint"></div>
+      </section>
+      <section class="set-card">
+        <div class="set-title">ANSWERS &amp; APPEARANCE</div>
+        <div class="set-grid">
     <label>ANSWER DETAIL
       <select id="set-detail">
         <option value="normal">Normal</option>
@@ -385,9 +393,16 @@
       <button class="ghost" id="reset-settings">RESET</button>
     </div>
     <div id="settings-status" class="hint"></div>
+      </div>
+      </section>
 
-    <label>OFFLINE MODELS (FULLY OFFLINE SETUP)
-      <div class="setup-sets" id="setup-sets" style="letter-spacing:normal;text-transform:none;margin-top:.4rem">
+      <section class="set-card">
+        <div class="set-title">OFFLINE MODELS (FULLY OFFLINE SETUP)</div>
+    <div class="form-actions">
+      <button class="ghost" id="download-urdu-model" hidden>DOWNLOAD URDU MODEL</button>
+    </div>
+    <div id="urdu-model-status" class="hint"></div>
+      <div class="setup-sets" id="setup-sets">
         <button type="button" class="setup-set" data-set="quick" id="setup-set-quick">
           <strong>QUICK SET</strong>
           <span>610 MB · lighter · good on slow connections</span>
@@ -410,16 +425,17 @@
         <div class="setup-eta" id="setup-eta" hidden></div>
       </div>
       <small class="hint">Atif works without them (platform speech + cloud answers); the offline set keeps chat, memory and Urdu voice entirely on this device. You are never stopped at launch - download here whenever you want.</small>
-    </label>
+      </section>
 
-    <label>MODELS &amp; API KEYS</label>
-    <div id="providers-list" class="providers"></div>
+      <section class="set-card">
+        <div class="set-title">MODELS &amp; API KEYS</div>
+        <div id="providers-list" class="providers"></div>
     <div class="form-actions">
       <button class="ghost" id="test-all-providers">TEST ALL</button>
     </div>
     <div id="providers-status" class="hint"></div>
 
-    <label>VOICE PROFILES</label>
+        <div class="set-title">VOICE PROFILES</div>
     <p class="hint">Save a few seconds of someone's voice so the assistant can tell who is speaking. Identification is a labelled guess - it never changes memory on its own.</p>
     <div id="voiceprints-list" class="providers"></div>
     <div class="form-actions">
@@ -431,7 +447,10 @@
     </div>
     <div id="voice-status" class="hint"></div>
 
-    <label>LOCAL OFFLINE MODEL (OLLAMA)</label>
+      </section>
+
+      <section class="set-card">
+        <div class="set-title">LOCAL OFFLINE MODEL (OLLAMA)</div>
     <p class="hint">Run the assistant's own language model on this Mac so chat keeps working with no internet. The app starts it for you when it can.</p>
     <label>START WITH THE APP
       <select id="set-ollama-autostart">
@@ -445,8 +464,8 @@
       <button class="ghost" id="ollama-pull">DOWNLOAD MODEL</button>
     </div>
 
-    <div id="llm-section" hidden>
-      <label>ON-DEVICE LLM (FULLY OFFLINE)</label>
+    <div id="llm-section" class="setup-row" hidden>
+      <div class="set-title">ON-DEVICE LLM (FULLY OFFLINE)</div>
       <p class="hint">llama.cpp runs inside the app. Download the small model once and every answer stays on the
       phone - no internet, no keys, no cloud.</p>
       <div class="form-actions">
@@ -456,7 +475,10 @@
       <div id="llm-status" class="hint"></div>
     </div>
 
-    <label>MODEL PIPELINE</label>
+      </section>
+
+      <section class="set-card">
+        <div class="set-title">MODEL PIPELINE</div>
     <p class="hint">When chat or the voice call fails, run the checks to see which part broke:
     memory, routing, the model itself, or speech in/out. Each check runs for real and suggests a fix.
     The full answer test is slower - it does what a real question does, including the self-critique passes.</p>
@@ -467,7 +489,10 @@
     <div id="pipeline-list" class="providers"></div>
     <div id="pipeline-status" class="hint"></div>
 
-    <label>BACKUP</label>
+      </section>
+
+      <section class="set-card">
+        <div class="set-title">BACKUP</div>
     <div class="form-actions">
       <button class="ghost" id="export-backup">EXPORT DATA</button>
       <button class="ghost" id="import-backup-btn">IMPORT DATA</button>
@@ -477,9 +502,10 @@
 
     <button class="ghost" id="install-app" hidden>INSTALL APP</button>
 
-    <p class="hint">Settings are stored on your machine and applied on every device
-    that opens this address. Nothing here is sent to a third party. Import only
-    ever adds memory; it never deletes or overwrites what is already there.</p>
+      <p class="hint">Settings are stored on your machine and applied on every device
+      that opens this address. Nothing here is sent to a third party. Import only
+      ever adds memory; it never deletes or overwrites what is already there.</p>
+      </section>
   </div>
 </div>
 

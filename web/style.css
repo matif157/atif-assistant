@@ -82,6 +82,11 @@ header {
 }
 header .ghost { flex: 0 0 auto; }
 .hdr-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+/* Secondary screens: plain nav items on wide screens, one MORE menu on the
+   phone. display:contents keeps a single copy of every button in the DOM
+   (handlers, ids and tests unchanged). */
+.hdr-more { display: contents; }
+#btn-more { display: none; }
 .brand { display: flex; align-items: center; gap: 8px; letter-spacing: .12em; font-size: 13px; flex: 1 1 auto; min-width: 0; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .dot.on { background: var(--acc); box-shadow: 0 0 8px var(--acc); }
@@ -99,16 +104,8 @@ button { font-family: inherit; cursor: pointer; /* no 300ms tap delay */ touch-a
   letter-spacing: .1em;
 }
 
-/* chat - styles moved to .chat-wrap #chat when using two-column layout; keep base for fallback? but we use wrap */
-#chat {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px 16px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
+/* chat lives inside .chat-wrap - one rule (.chat-wrap #chat) owns scrolling,
+   padding and flex so the two-column layout cannot fight a second copy. */
 .msg { max-width: 92%; }
 .msg.user { align-self: flex-end; }
 .msg.bot { align-self: flex-start; }
@@ -257,7 +254,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
   padding: 8px 10px;
   font: inherit;
 }
-#mem-results { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+#mem-results { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 /* Conversations sheet: thumb-friendly rows with a one-line preview. */
 .history-list {
   flex: 1;
@@ -313,12 +310,48 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .sheet,
 .basis-sidebar,
 #rules-body,
-#mem-results { overscroll-behavior: contain; }
+#mem-results,
+#decisions-body,
+#insights-body,
+#learned-body,
+#home-body,
+#data-import,
+#data-media,
+.settings-body,
+.upload-body { overscroll-behavior: contain; }
+
+/* Home dashboard: one scroll region for the whole sheet body. */
+#home-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Data sheet tabs scroll once, here - the old bare div spilled past the
+   fixed sheet with no way to reach the bottom on a phone. */
+#data-import,
+#data-media {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Composer hint: long voice/status lines clamp to two rows instead of
+   pushing the composer off a short screen. */
+#hint,
+#voice-who {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .mrow { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .mrow .k { font-size: 10px; color: var(--acc); letter-spacing: .08em; margin-bottom: 4px; }
 .mrow .t { font-size: 13px; }
 /* profile card (mirror layer): learned style + editable overrides */
-.pcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .prow {
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; font-size: 11px; color: var(--dim); margin-top: 8px;
@@ -375,7 +408,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
   letter-spacing: .1em;
   font-weight: 600;
 }
-#decisions-body { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+#decisions-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 #insights-body,
 #learned-body {
   flex: 1;
@@ -426,6 +459,39 @@ textarea:focus { outline: none; border-color: var(--acc); }
   text-transform: none;
 }
 .settings-body select { appearance: none; }
+/* Sectioned settings: bordered cards, two columns on wide sheets. A label
+   must never be display:flex while hidden - author styles beat the UA
+   [hidden] rule, which kept the app-lock row visible outside Android. */
+.settings-body label[hidden] { display: none; }
+.set-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.set-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  color: var(--acc);
+}
+.set-grid { display: grid; gap: 10px; }
+.perm-rows {
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+  font-size: 12px;
+  color: var(--txt);
+}
+@media (min-width: 600px) {
+  .set-grid { grid-template-columns: 1fr 1fr; column-gap: 14px; }
+  .set-grid > .wide,
+  .set-grid > .form-actions,
+  .set-grid > .hint { grid-column: 1 / -1; }
+}
 .upload-body p.hint { margin: 0; line-height: 1.5; }
 #settings-status:not(:empty),
 #upload-status:not(:empty) { color: var(--acc); }
@@ -539,9 +605,9 @@ textarea:focus { outline: none; border-color: var(--acc); }
   .msg { max-width: 96%; }
   .sub { display: none; }
 
-  /* Two tight rows: brand on top, then a thumb-sized horizontally
-     scrollable button strip - the old wrapping header took 3-4 rows of a
-     phone screen and left 20px tap targets. */
+  /* One tight row of primary actions: HOME MEM INSIGHTS CALL MORE. The
+     secondary screens hide behind MORE instead of the old 11-button
+     horizontal strip that needed a scroll to reach. */
   header {
     flex-wrap: nowrap;
     flex-direction: column;
@@ -552,13 +618,9 @@ textarea:focus { outline: none; border-color: var(--acc); }
   .brand { font-size: 12px; }
   .hdr-nav {
     flex-wrap: nowrap;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    padding-bottom: 2px;
+    gap: 4px;
+    min-width: 0;
   }
-  .hdr-nav::-webkit-scrollbar { display: none; }
   .hdr-nav .ghost {
     min-height: 44px;          /* a real thumb target */
     padding: 10px 13px;
@@ -566,6 +628,25 @@ textarea:focus { outline: none; border-color: var(--acc); }
     letter-spacing: .06em;
     white-space: nowrap;
   }
+  .hdr-more {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    min-width: 180px;
+    padding: 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 14px 34px rgba(0,0,0,.5);
+    z-index: 40;
+  }
+  .hdr-more.open { display: flex; }
+  .hdr-more .ghost { text-align: left; min-height: 40px; }
+  #btn-more { display: inline-block; }
 
   /* 16px inputs: anything smaller makes mobile browsers zoom the page on
      focus and hides the composer behind the zoom. */

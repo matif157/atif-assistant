@@ -962,6 +962,103 @@ def test_natural_reply_surface() -> None:
     check("new hint promises a tap to details", "one tap away" in html)
 
 
+def test_layout_navigation() -> None:
+    """Phone layout pass (v1.3.3): primary row + MORE, sectioned settings,
+    one scroll pane per surface.
+
+    Every secondary screen stays a single copy of its button inside the
+    MORE wrapper (display:contents on wide screens) so ids, handlers and
+    tests never fork. Settings stop being one 200-line label wall: cards
+    with titles, two columns at >=600px, and no <label> wrapping a <div>
+    (labels swallow clicks of the buttons inside them). Each sheet body
+    owns exactly one scroll region - bare divs used to spill past the fixed
+    sheet with no way to reach the bottom of a phone screen.
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    css = (root / "web" / "style.css").read_text(encoding="utf-8")
+
+    print("\nlayout: nav, settings cards, scroll hygiene")
+
+    # --- MORE menu: one copy of every button, ids intact on both sides.
+    check("more button in markup and js", 'id="btn-more"' in html and '"btn-more"' in js)
+    check("more wrapper in markup and js", 'id="hdr-more"' in html and '"hdr-more"' in js)
+    more = html.split('<div class="hdr-more"', 1)[-1].split("</div>", 1)[0]
+    for bid in (
+        "btn-learned", "btn-decisions", "btn-rules", "btn-data",
+        "btn-new-chat", "btn-history", "btn-settings",
+    ):
+        check(f"{bid} behind MORE", f'id="{bid}"' in more)
+    primary = html.split('<div class="hdr-more"', 1)[0]
+    for bid in ("btn-home", "btn-memory", "btn-insights", "btn-call"):
+        check(f"{bid} in the primary row", f'id="{bid}"' in primary)
+    check("wide screens keep the full nav", ".hdr-more { display: contents; }" in css)
+    check("more hidden on wide screens", "#btn-more { display: none; }" in css)
+    check(
+        "phone opens the more menu",
+        ".hdr-more.open" in css and "#btn-more { display: inline-block; }" in css,
+    )
+    check("old scroll strip removed", "overflow-x" not in css)
+    check("menu closes on choice", "classList.remove(\"open\")" in js)
+
+    # --- Settings: cards, grid, no label-wraps-div, hidden stays hidden.
+    check("settings sectioned into cards", html.count('<section class="set-card">') >= 6)
+    check("section tags balanced", html.count("<section") == html.count("</section>"))
+    check("titles for every card", html.count('class="set-title"') >= 7)
+    check(
+        "two-column grid at >=600px",
+        'class="set-grid"' in html and "grid-template-columns: 1fr 1fr" in css,
+    )
+    wrapped = re.findall(
+        r"<label\b[^>]*>(?:(?!</label>).)*<div", html, re.S
+    )
+    check("no label wraps a div", not wrapped)
+    check(
+        "hidden labels stay hidden",
+        ".settings-body label[hidden] { display: none; }" in css,
+    )
+
+    # --- One scroll pane per sheet.
+    check(
+        "memory results has min-height",
+        re.search(r"#mem-results\s*\{[^}]*min-height:\s*0", css) is not None,
+    )
+    check(
+        "decisions body has min-height",
+        re.search(r"#decisions-body\s*\{[^}]*min-height:\s*0", css) is not None,
+    )
+    check(
+        "home body scrolls",
+        re.search(r"#home-body\s*\{[^}]*overflow-y:\s*auto", css) is not None,
+    )
+    check(
+        "data tabs scroll in place",
+        re.search(
+            r"#data-import,\s*#data-media\s*\{[^}]*overflow-y:\s*auto", css
+        )
+        is not None,
+    )
+    check("library inner scroller gone", "max-height:420px" not in html)
+    contain = re.search(r"([^{]*?)\{[^}]*overscroll-behavior:\s*contain", css)
+    sels = contain.group(1) if contain else ""
+    for sel in (
+        "#chat", ".sheet", "#mem-results", "#decisions-body",
+        "#home-body", "#data-import", ".settings-body",
+    ):
+        check(f"overscroll contained: {sel}", sel in sels)
+
+    # --- Duplicated rules merged, composer hint clamped.
+    check(
+        "single chat scroll rule",
+        css.count("#chat {") == 1 and ".chat-wrap #chat {" in css,
+    )
+    check("single pcard rule", css.count(".pcard {") == 1)
+    check("composer hint clamped", "-webkit-line-clamp: 2" in css)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4422,6 +4519,7 @@ def main() -> int:
     test_remote_web()
     test_web_sync()
     test_natural_reply_surface()
+    test_layout_navigation()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

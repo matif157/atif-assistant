@@ -3977,6 +3977,33 @@ document.getElementById("inbox-open-access")?.addEventListener("click", () => {
   } catch { /* no bridge (browser/PWA) */ }
 });
 
+/* MORE menu (phones only): secondary screens live behind one button at
+   <=560px. The wrapper is display:contents on wider screens, so the same
+   buttons remain plain nav items - one copy, one set of handlers. */
+{
+  const moreBtn = document.getElementById("btn-more");
+  const moreWrap = document.getElementById("hdr-more");
+  if (moreBtn && moreWrap) {
+    const closeMore = () => {
+      moreWrap.classList.remove("open");
+      moreBtn.setAttribute("aria-expanded", "false");
+    };
+    moreBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const open = moreWrap.classList.toggle("open");
+      moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    moreWrap.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t && typeof t.closest === "function" && t.closest("button")) closeMore();
+    });
+    document.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t && !moreWrap.contains(t) && t !== moreBtn) closeMore();
+    });
+  }
+}
+
 document.getElementById("btn-settings").addEventListener("click", () => {
   // Open the sheet FIRST: nothing below may ever block it. A dead refresh
   // used to throw synchronously and the button looked broken for releases.
