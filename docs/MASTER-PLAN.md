@@ -78,7 +78,8 @@ never push dependence over real people or professional help.
 | 4 | **Evolution — self-update loop** | thumbs/edit/regenerate signals → `reflection.py` → propose-then-approve updates; Growth tab in Insights; self-critique fed by mood+style context | zero silent rule changes |
 | 5 | **Pro UI — advanced layout & interactions** | token streaming + stop/regenerate; message actions; skeletons/toasts/micro-animations (reduced-motion safe); Home dashboard; design tokens; aria-live + focus rings; Android haptics | sync tests + node check |
 | 6 | **Human Life Data** | 5 stub importers completed (propose-then-approve); auto task extraction → todos; reminders + Android notification channel; routines/notes/places on Home | importer tests green |
-| 7 | **Release (Phase F)** | targetSdk 36; 16 KB rebuild of llama+whisper (currently verified 4 KB); AAB; foreground service; **install on the real phone + user verification** | Play checklist |
+| 7 | **Release (Phase F)** | targetSdk 36; 16 KB rebuild of llama+whisper (verified 16 KB in APK and AAB); AAB; foreground service; **install on the real phone + user verification** | Play checklist |
+| 8 | **Live WhatsApp assistant** | chat-export `.txt` importer (Android/iOS); live reader via official notification access → INBOX; per-chat auto-draft (humor/warm/brief) surfaced as suggest-then-copy drafts — **never auto-send**; draft notifier polled by the foreground service | 705 tests · CI · v1.2.0 APK |
 
 ## Execution rules
 
