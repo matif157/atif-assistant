@@ -361,8 +361,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .sheet,
 .basis-sidebar,
 #rules-body,
-#mem-results,
-.setup-overlay { overscroll-behavior: contain; }
+#mem-results { overscroll-behavior: contain; }
 .mrow { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .mrow .k { font-size: 10px; color: var(--acc); letter-spacing: .08em; margin-bottom: 4px; }
 .mrow .t { font-size: 13px; }
@@ -629,8 +628,6 @@ textarea:focus { outline: none; border-color: var(--acc); }
   .sheet-head { flex-wrap: wrap; row-gap: 8px; }
   .sheet-head input { flex: 1 1 100%; order: 3; }
 
-  .setup-card { padding: 18px 16px; }
-  .setup-overlay { padding: 12px; }
   .setup-sets { grid-template-columns: 1fr; }
 }
 
@@ -744,30 +741,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
     max-height: 40vh;
   }
 }
-/* ------------------------------------------------------- first-run setup */
-.setup-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  background: rgba(5, 8, 14, 0.94);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  overflow-y: auto;
-}
-.setup-card {
-  width: min(480px, 100%);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 22px 22px 18px;
-  /* centres when there is room, scrolls from the top when there is not
-     (short phone screens) */
-  margin: auto;
-}
-.setup-card h2 { margin: 0 0 10px; font-size: 15px; letter-spacing: 0.06em; }
-.setup-lead { margin: 0 0 16px; color: var(--dim); font-size: 13px; line-height: 1.5; }
+/* ------------------------------------------- offline model setup (Settings) */
 .setup-row {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -781,8 +755,6 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .setup-state.ok { color: var(--acc); }
 .setup-state.err { color: var(--danger); }
 .setup-hint { color: var(--dim); font-size: 12px; margin: 6px 0 8px; line-height: 1.45; }
-.setup-actions { margin-top: 6px; display: flex; gap: 10px; justify-content: flex-end; }
-.setup-actions button { min-width: 110px; }
 .setup-sets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
 .setup-set {
   display: flex;

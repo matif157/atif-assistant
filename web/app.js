@@ -3865,9 +3865,11 @@ document.getElementById("btn-settings").addEventListener("click", () => {
   syncAppLockToggle();
   loadProviders();
   loadSpeechStatus();
+  refreshLlmStatus();
   loadVoiceprints();
   loadOllama();
   refreshPermissions();
+  openModelSetup();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
 });
@@ -3879,6 +3881,7 @@ document.addEventListener("visibilitychange", () => {
 });
 document.getElementById("close-settings").addEventListener("click", () => {
   document.getElementById("settings-sheet").hidden = true;
+  clearTimeout(setupPollTimer); // a running download keeps going server-side
 });
 
 if (setLang) {
@@ -4152,18 +4155,16 @@ function scheduleSpeechPoll(ms) {
   speechPollTimer = setTimeout(loadSpeechStatus, ms);
 }
 
-/* ------------------------------------------------------- first-run setup */
-// Shown once, when the offline models are missing. START is never blocked by
-// a download: the set below is a one-tap fetch of both models that pauses,
-// resumes where it stopped, and never throws away progress.
+/* ------------------------------------------ offline model setup (Settings)
+   The download controls deliberately live in Settings: opening the app must
+   never park the user on a setup screen. Downloads run server-side in the
+   background, so closing Settings never cancels one - only PAUSE does. */
 
-const setupOverlay = document.getElementById("setup-overlay");
 const setupModelsState = document.getElementById("setup-models-state");
 const setupHint = document.getElementById("setup-hint");
 const setupEta = document.getElementById("setup-eta");
 const setupDlBtn = document.getElementById("setup-dl");
 const setupPauseBtn = document.getElementById("setup-pause");
-const setupStartBtn = document.getElementById("setup-start");
 const setupSetBtns = Array.from(document.querySelectorAll(".setup-set"));
 let setupPollTimer = 0;
 let setupInfo = null;    // GET /api/setup: sets, recommendation, free space
@@ -4177,12 +4178,6 @@ const SETUP_SETS_FALLBACK = {
   quick: { llm: "qwen2.5-0.5b", stt: "ggml-base.bin", total_mib: 610 },
   full: { llm: "qwen2.5-1.5b", stt: "ggml-small.bin", total_mib: 1531 },
 };
-
-function markSetupDone() {
-  try { localStorage.setItem("atif_setup_done", "1"); } catch { /* private mode */ }
-  if (setupOverlay) setupOverlay.hidden = true;
-  clearTimeout(setupPollTimer);
-}
 
 function setupState(el, text, cls) {
   if (!el) return;
@@ -4230,21 +4225,6 @@ function appLockBridge() {
     : null;
 }
 
-function renderSetupLock() {
-  const row = document.getElementById("setup-lock-row");
-  if (!row) return;
-  const bridge = appLockBridge();
-  if (!bridge) return; // browser/desktop: the row stays hidden
-  row.hidden = false;
-  const on = Boolean(bridge.appLockEnabled());
-  setupState(document.getElementById("setup-lock-state"),
-    on ? "on" : "off", on ? "ok" : "");
-  const btn = document.getElementById("setup-lock-btn");
-  if (btn) {
-    btn.textContent = on ? "TURN OFF FINGERPRINT LOCK" : "TURN ON FINGERPRINT LOCK";
-  }
-}
-
 // Speed from the previous poll, so a phone on a flaky link sees an honest
 // countdown instead of a fake one.
 function setupEtaText(want, got, downloading) {
@@ -4269,7 +4249,11 @@ function setupEtaText(want, got, downloading) {
 }
 
 async function refreshSetup() {
-  if (!setupOverlay || setupOverlay.hidden) return;
+  const sheet = document.getElementById("settings-sheet");
+  if (sheet && sheet.hidden) {
+    clearTimeout(setupPollTimer); // downloads keep running server-side
+    return;
+  }
   let speech = null;
   let llm = null;
   try { speech = await (await fetch("/api/speech")).json(); } catch { /* next poll */ }
@@ -4336,30 +4320,10 @@ async function refreshSetup() {
   if (phase === "downloading") setupPollTimer = setTimeout(refreshSetup, 1500);
 }
 
-async function maybeShowSetup() {
-  if (!setupOverlay) return;
-  try { if (localStorage.getItem("atif_setup_done")) return; } catch { /* show it */ }
-  let need = false;
-  try {
-    const speech = await (await fetch("/api/speech")).json();
-    need = (speech?.stt?.models_present || []).length === 0;
-    if (!need && speech?.stt?.available === false) need = true;
-  } catch { return; /* server unreachable: never block the app */ }
-  if (!need) {
-    try {
-      const llm = await (await fetch("/api/llm")).json();
-      if (llm.binary && !llm.model.present) need = true;
-    } catch { /* no llm endpoints: desktop without the binary */ }
-  }
-  if (!need) {
-    markSetupDone(); // nothing to set up; never nag again
-    return;
-  }
-  try { setupInfo = await (await fetch("/api/setup")).json(); } catch { /* fallback */ }
+async function openModelSetup() {
+  try { setupInfo = await (await fetch("/api/setup")).json(); } catch { /* fallback sizes */ }
   if (setupInfo && setupInfo.recommended) setupSet = setupInfo.recommended;
-  setupOverlay.hidden = false;
   renderSetupSet();
-  renderSetupLock();
   refreshSetup();
 }
 
@@ -4375,35 +4339,44 @@ setupSetBtns.forEach((btn) => {
 if (setupDlBtn) {
   setupDlBtn.addEventListener("click", async () => {
     // Two taps on mobile data: an accidental 1.5 GB over a metered link is
-    // worse than one extra tap. Wi-Fi starts immediately.
-    if (setupOnCellular() && Date.now() - setupDlArmedAt > 5000) {
+    // worse than one extra tap. The armed label stays until the second tap
+    // or another action rewrites it - it must never silently revert and look
+    // like a dead button. Wi-Fi starts on the first tap.
+    if (setupOnCellular() && Date.now() - setupDlArmedAt > 60000) {
       setupDlArmedAt = Date.now();
       setupDlBtn.textContent = "TAP AGAIN TO USE MOBILE DATA";
-      setTimeout(() => {
-        if (Date.now() - setupDlArmedAt >= 4900) refreshSetup();
-      }, 5000);
       return;
     }
     setupDlArmedAt = 0;
     const set = setupActiveSet();
+    setupDlBtn.disabled = true;
+    setupState(setupModelsState, "starting download...");
     try {
-      await fetch("/api/speech/model", {
+      const r1 = await fetch("/api/speech/model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: set.stt, background: true }),
       });
+      if (!r1.ok) throw new Error("speech download: HTTP " + r1.status);
       let llmBin = false;
       try {
         llmBin = Boolean((await (await fetch("/api/llm")).json()).binary);
       } catch { /* no llm endpoints */ }
       if (llmBin) {
-        await fetch("/api/llm/model", {
+        const r2 = await fetch("/api/llm/model", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: set.llm }),
         });
+        if (!r2.ok) throw new Error("model download: HTTP " + r2.status);
       }
-    } catch { /* refreshSetup shows the failure */ }
+    } catch (e) {
+      setupState(setupModelsState,
+        "failed to start: " + ((e && e.message) || "network error"), "err");
+      setupDlBtn.disabled = false;
+      return;
+    }
+    setupDlBtn.disabled = false;
     refreshSetup();
   });
 }
@@ -4428,30 +4401,6 @@ if (setupPauseBtn) {
     refreshSetup();
   });
 }
-
-if (document.getElementById("setup-lock-btn")) {
-  document.getElementById("setup-lock-btn").addEventListener("click", () => {
-    const bridge = appLockBridge();
-    if (!bridge) return;
-    bridge.setAppLock(!bridge.appLockEnabled());
-    renderSetupLock();
-  });
-}
-
-if (document.getElementById("setup-skip")) {
-  document.getElementById("setup-skip").addEventListener("click", markSetupDone);
-}
-if (setupStartBtn) {
-  // START is deliberately never disabled: a failed or slow download must not
-  // stop the user from reaching the app.
-  setupStartBtn.addEventListener("click", () => {
-    markSetupDone();
-    localSttReady = true;
-    loadSpeechStatus();
-    refreshLlmStatus();
-  });
-}
-maybeShowSetup();
 
 if (dlModelBtn) {
   dlModelBtn.addEventListener("click", async () => {

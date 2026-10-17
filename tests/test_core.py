@@ -834,8 +834,7 @@ def test_web_sync() -> None:
     #    (setup-sets is deliberately absent: JS reaches those buttons by
     #    class, and its id is only a CSS/anchor hook.)
     critical = (
-        "setup-dl", "setup-pause", "setup-start", "setup-skip",
-        "setup-lock-row", "setup-lock-btn",
+        "setup-dl", "setup-pause",
         "lock-setting-row", "set-applock", "dot", "statusline",
         "btn-new-chat", "btn-history", "history-sheet", "history-list",
         "btn-home", "home-sheet", "home-body",
