@@ -3704,6 +3704,32 @@ function syncSettingsForm() {
   }
 }
 
+/* Phase 8: live reader - status + the system-owned grant flow */
+function refreshInboxAccess() {
+  const state = document.getElementById("inbox-access-state");
+  if (!state) return;
+  let granted = false;
+  try {
+    granted = !!(
+      window.AndroidVoice && typeof window.AndroidVoice.notificationAccess === "function" && window.AndroidVoice.notificationAccess()
+    );
+  } catch { granted = false; }
+  if (granted) {
+    state.textContent = "granted - live reader on";
+  } else if (window.AndroidVoice && typeof window.AndroidVoice.openNotificationAccess === "function") {
+    state.textContent = "not granted yet - tap the button";
+  } else {
+    state.textContent = "live reader is Android-only (works in the APK)";
+  }
+}
+document.getElementById("inbox-open-access")?.addEventListener("click", () => {
+  try {
+    if (window.AndroidVoice && typeof window.AndroidVoice.openNotificationAccess === "function") {
+      window.AndroidVoice.openNotificationAccess();
+    }
+  } catch { /* no bridge (browser/PWA) */ }
+});
+
 document.getElementById("btn-settings").addEventListener("click", () => {
   syncSettingsForm();
   syncAppLockToggle();
@@ -3711,6 +3737,7 @@ document.getElementById("btn-settings").addEventListener("click", () => {
   loadSpeechStatus();
   loadVoiceprints();
   loadOllama();
+  refreshInboxAccess();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
 });

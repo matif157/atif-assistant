@@ -856,6 +856,45 @@ public class MainActivity extends Activity {
                     .build();
             nm.notify((int) SystemClock.uptimeMillis(), n);
         }
+
+        /** Phase 8: has the user granted notification access (the official
+         *  way an app may read other apps' notifications)? */
+        @JavascriptInterface
+        public boolean notificationAccess() {
+            try {
+                String enabled = android.provider.Settings.Secure.getString(
+                        getContentResolver(), "enabled_notification_listeners");
+                String pkg = getPackageName();
+                if (enabled == null || pkg == null) {
+                    return false;
+                }
+                for (String part : enabled.split(":")) {
+                    if (pkg.equals(part.split("/")[0])) {
+                        return true;
+                    }
+                }
+            } catch (Throwable t) {
+                android.util.Log.w("Atif", "listener state check failed", t);
+            }
+            return false;
+        }
+
+        /** Opens the system screen where notification access is granted -
+         *  the OS owns that flow; we can never self-grant it. */
+        @JavascriptInterface
+        public void openNotificationAccess() {
+            try {
+                startActivity(new Intent(
+                        android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            } catch (Throwable t) {
+                try {
+                    startActivity(new Intent(
+                            "android.settings.ACTION_NOTIFICATION_ACCESS_SETTINGS"));
+                } catch (Throwable t2) {
+                    android.util.Log.w("Atif", "no notification access screen", t2);
+                }
+            }
+        }
     }
 
     /**

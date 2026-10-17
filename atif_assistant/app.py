@@ -1054,6 +1054,51 @@ def wtxt_stage(payload: dict) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=503)
 
 
+@app.post("/api/inbox/whatsapp")
+def inbox_whatsapp(payload: dict) -> JSONResponse:
+    """Push endpoint for the Android notification listener (Phase 8).
+
+    Called by MessageListenerService inside the app process whenever WhatsApp
+    posts/updates a notification. Loopback-only server; duplicates (the same
+    notification re-firing) collapse on the content key.
+    """
+    try:
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid payload"}, status_code=400)
+        package = str(payload.get("package") or "com.whatsapp")
+        if package not in {"com.whatsapp", "com.whatsapp.w4b"}:
+            return JSONResponse({"error": "unsupported package"}, status_code=400)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return JSONResponse({"error": "empty text"}, status_code=400)
+        text = text[:4000]
+        chat = str(payload.get("chat") or "").strip() or "unknown"
+        chat = chat[:200]
+        sender = payload.get("sender")
+        sender = str(sender)[:200] if isinstance(sender, str) and sender.strip() else None
+        post_time = payload.get("post_time")
+        post_time = str(post_time) if isinstance(post_time, (int, float)) else None
+        key = hashlib.sha1(f"{package}|{chat}|{text}".encode("utf-8")).hexdigest()[:16]
+        iid = db.add_inbox(
+            package=package, chat=chat, text=text, msg_key=key,
+            sender=sender, post_time=post_time,
+        )
+        if iid is None:
+            return JSONResponse({"ok": True, "dup": True})
+        return JSONResponse({"ok": True, "dup": False, "id": iid})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
+@app.get("/api/inbox")
+def inbox_list(limit: int = 50, chat: str | None = None) -> JSONResponse:
+    items = db.recent_inbox(limit=limit, chat=chat)
+    watched = (db.get_profile("auto_reply") or {}).get("watched", {})
+    for it in items:
+        it["watched"] = bool(watched.get(it["chat"]))
+    return JSONResponse({"items": items})
+
+
 @app.get("/api/import/{source}/preview")
 def import_preview(source: str, limit: int = 100) -> JSONResponse:
     """Read-only candidate preview for one of the five light sources."""

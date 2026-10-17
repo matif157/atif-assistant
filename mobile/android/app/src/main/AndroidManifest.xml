@@ -44,5 +44,17 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Persistent offline assistant engine serving on-device chat, speech and local reminders." />
         </service>
+
+        <!-- Phase 8 live reader: official notification access (user-granted
+             from the system screen) to forward incoming WhatsApp messages to
+             the embedded server. READ-only; never posts as WhatsApp. -->
+        <service
+            android:name=".MessageListenerService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

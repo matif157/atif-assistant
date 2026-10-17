@@ -1466,6 +1466,55 @@ def test_home() -> None:
             db.reset_db_path()
 
 
+def test_inbox() -> None:
+    """Phase 8b: live inbox - the notification listener's push endpoint
+    dedupes re-fired notifications, lists recent messages, and gates on
+    supported packages only."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\ninbox (live notification feed)")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "inbox.db")
+        db.init_db()
+        client = TestClient(app)
+        try:
+            bad = client.post("/api/inbox/whatsapp", json={"text": "hi", "package": "com.evil"})
+            check("foreign package rejected", bad.status_code == 400)
+            empty = client.post("/api/inbox/whatsapp", json={"chat": "Ali", "text": "  "})
+            check("empty text rejected", empty.status_code == 400)
+            ok = client.post(
+                "/api/inbox/whatsapp",
+                json={"chat": "Ali Khan", "text": "Salaam, kal milte hain", "package": "com.whatsapp"},
+            )
+            check("message accepted", ok.status_code == 200 and ok.json()["ok"] and not ok.json()["dup"])
+            same = client.post(
+                "/api/inbox/whatsapp",
+                json={"chat": "Ali Khan", "text": "Salaam, kal milte hain", "package": "com.whatsapp"},
+            )
+            check("re-fired notification dedupes", same.json()["dup"] is True)
+            other = client.post(
+                "/api/inbox/whatsapp",
+                json={"chat": "Ali Khan", "text": "Doosra paighaam", "package": "com.whatsapp"},
+            )
+            check("new message gets new id", other.json()["dup"] is False and other.json()["id"] != ok.json()["id"])
+            lst = client.get("/api/inbox")
+            check("list returns newest first", [i["text"] for i in lst.json()["items"]] == ["Doosra paighaam", "Salaam, kal milte hain"])
+            only = client.get("/api/inbox", params={"chat": "Ali Khan"})
+            check("chat filter works", len(only.json()["items"]) == 2)
+            row_id = ok.json()["id"]
+            check("set draft writes", db.set_inbox_draft(row_id, "Main theek hoon"))
+            check("draft readable", db.inbox_row(row_id)["draft"] == "Main theek hoon")
+            no_row = client.get("/api/inbox", params={"chat": "Nope"})
+            check("unknown chat empty", no_row.json()["items"] == [])
+        finally:
+            db.reset_db_path()
+
+
 def test_whatsapp_txt() -> None:
     """Phase 8: WhatsApp .txt chat exports - both official formats parse,
     stage as LEARNED candidates with content-key dedupe, and land in the
@@ -3984,6 +4033,7 @@ def main() -> int:
     test_home()
     test_importers()
     test_whatsapp_txt()
+    test_inbox()
     test_todos_reminders()
     test_extended_api()
     test_location()

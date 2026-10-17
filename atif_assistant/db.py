@@ -176,6 +176,18 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS inbox (
+    id          INTEGER PRIMARY KEY,
+    package     TEXT NOT NULL,
+    chat        TEXT NOT NULL,
+    sender      TEXT,
+    text        TEXT NOT NULL,
+    msg_key     TEXT NOT NULL,
+    post_time   TEXT,
+    draft       TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_msg_key ON inbox(msg_key);
 CREATE TABLE IF NOT EXISTS works (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
@@ -743,6 +755,59 @@ def add_learned(
     _fts_index("learned", int(cur.lastrowid), text[:80], text)
     conn.commit()
     return int(cur.lastrowid)
+
+
+def add_inbox(
+    package: str,
+    chat: str,
+    text: str,
+    msg_key: str,
+    sender: str | None = None,
+    post_time: str | None = None,
+) -> int | None:
+    """Record one live inbox message; None when this exact message already
+    arrived (notification updates re-fire onNotificationPosted constantly)."""
+    conn = connect()
+    row = conn.execute("SELECT id FROM inbox WHERE msg_key=?", (msg_key,)).fetchone()
+    if row:
+        return None
+    cur = conn.execute(
+        "INSERT INTO inbox(package, chat, sender, text, msg_key, post_time,"
+        " created_at) VALUES (?,?,?,?,?,?,?)",
+        (package, chat, sender, text, msg_key, post_time, now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def recent_inbox(limit: int = 50, chat: str | None = None) -> list[dict[str, Any]]:
+    conn = connect()
+    limit = max(1, min(int(limit), 500))
+    if chat:
+        rows = conn.execute(
+            "SELECT * FROM inbox WHERE chat=? ORDER BY id DESC LIMIT ?",
+            (chat, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM inbox ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def inbox_row(inbox_id: int) -> dict[str, Any] | None:
+    conn = connect()
+    row = conn.execute("SELECT * FROM inbox WHERE id=?", (inbox_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_inbox_draft(inbox_id: int, draft: str | None) -> bool:
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE inbox SET draft=? WHERE id=?", (draft, inbox_id)
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def learned_row(learned_id: int) -> dict[str, Any] | None:
