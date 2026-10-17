@@ -1767,6 +1767,83 @@ document.getElementById("btn-import")?.addEventListener("click", () => {
   const dataSheet = document.getElementById("data-sheet");
   if (dataSheet) { dataSheet.hidden = false; showDataTab("import"); loadWhatsAppStatus(); }
 });
+
+/* five light sources (Phase 6): read-only preview, then stage into LEARNED */
+let srcCurrent = null;
+document.getElementById("src-pick")?.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".src-btn");
+  if (!btn || !btn.dataset.src) return;
+  srcCurrent = btn.dataset.src;
+  const status = document.getElementById("src-status");
+  const preview = document.getElementById("src-preview");
+  const stageBtn = document.getElementById("src-stage");
+  const meta = document.getElementById("src-stage-meta");
+  status.textContent = `Reading ${srcCurrent}...`;
+  preview.hidden = true;
+  stageBtn.hidden = true;
+  meta.textContent = "";
+  try {
+    const r = await fetch(`/api/import/${srcCurrent}/preview?limit=100`);
+    const data = await r.json();
+    if (!r.ok) {
+      status.textContent = data.error || `Could not read ${srcCurrent}.`;
+      return;
+    }
+    if (!data.count) {
+      status.textContent = `${srcCurrent}: nothing found on this machine.`;
+      return;
+    }
+    status.textContent =
+      `${srcCurrent}: ${data.count} candidate${data.count === 1 ? "" : "s"}` +
+      (data.truncated ? " (showing first 100)" : "");
+    preview.innerHTML = "";
+    for (const it of data.candidates || []) {
+      const row = document.createElement("label");
+      row.className = "src-row";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = true;
+      cb.value = JSON.stringify(it);
+      const txt = document.createElement("span");
+      txt.textContent = [it.title, it.detail, (it.when || "").slice(0, 10)]
+        .filter(Boolean)
+        .join(" · ");
+      row.append(cb, txt);
+      preview.appendChild(row);
+    }
+    preview.hidden = false;
+    stageBtn.hidden = false;
+  } catch (err) {
+    status.textContent = `Could not read ${srcCurrent}: ${err.message || err}`;
+  }
+});
+
+document.getElementById("src-stage")?.addEventListener("click", async () => {
+  const preview = document.getElementById("src-preview");
+  const meta = document.getElementById("src-stage-meta");
+  const items = [...preview.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((cb) => { try { return JSON.parse(cb.value); } catch { return null; } })
+    .filter(Boolean);
+  if (!items.length || !srcCurrent) {
+    meta.textContent = "Nothing selected.";
+    return;
+  }
+  try {
+    const r = await fetch(`/api/import/${srcCurrent}/stage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `server returned ${r.status}`);
+    haptic();
+    toast(`Staged ${data.staged} into LEARNED`);
+    meta.textContent =
+      `Staged ${data.staged}, skipped ${(data.skipped || []).length}. Review them in LEARNED.`;
+  } catch (e) {
+    meta.textContent = `Stage failed: ${e.message || e}`;
+  }
+});
 document.getElementById("wa-preview")?.addEventListener("click", previewWhatsApp);
 document.getElementById("wa-stage")?.addEventListener("click", stageWhatsApp);
 document.getElementById("wa-selectall")?.addEventListener("click", () => {
@@ -5044,8 +5121,14 @@ async function loadHome() {
     tile("GROWTH", h.pending_reflections ?? 0, "pending proposals in Insights");
     tile("SIGNALS", `${fb.up ?? 0}👍 ${fb.down ?? 0}👎`, "answers rated");
     tile("DUE", h.due_decisions ?? 0, "decisions up for review");
+    tile("TASKS", h.todos ?? 0, "open tasks captured from chat");
+    tile("REMINDERS", h.reminders ?? 0, "unsettled reminders");
+    tile("PLACES", h.places ?? 0, "known places");
     tile("ROUTINES", `${h.routines ?? 0} / ${h.notes ?? 0}`, "routines / notes");
     body.appendChild(grid);
+
+    await renderHomeTodos(body);
+    await renderHomeReminders(body);
 
     if (h.recent?.length) {
       const head = document.createElement("p");
@@ -5085,6 +5168,211 @@ document.getElementById("btn-home")?.addEventListener("click", async () => {
 document.getElementById("close-home")?.addEventListener("click", () => {
   document.getElementById("home-sheet").hidden = true;
 });
+
+/* Home: open tasks (chat-captured or manual) with done/delete + add. */
+async function renderHomeTodos(body) {
+  const head = document.createElement("p");
+  head.className = "home-when";
+  head.textContent = "TASKS";
+  body.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "home-list";
+  body.appendChild(list);
+
+  const draw = (todos) => {
+    list.innerHTML = "";
+    if (!todos.length) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent = 'No open tasks. Say "remind me to..." in chat and it lands here.';
+      list.appendChild(p);
+    }
+    for (const t of todos) {
+      const row = document.createElement("div");
+      row.className = "todo-row";
+      const done = document.createElement("button");
+      done.type = "button";
+      done.className = "act";
+      done.textContent = "✓";
+      done.title = "Mark done";
+      const txt = document.createElement("span");
+      txt.textContent = t.text;
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "act";
+      del.textContent = "×";
+      del.title = "Delete";
+      done.addEventListener("click", async () => {
+        haptic();
+        await fetch(`/api/todos/${t.id}/toggle`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ done: true }),
+        }).catch(() => {});
+        draw(((await (await fetch("/api/todos")).json()).todos) || []);
+      });
+      del.addEventListener("click", async () => {
+        haptic();
+        await fetch(`/api/todos/${t.id}`, { method: "DELETE" }).catch(() => {});
+        draw(((await (await fetch("/api/todos")).json()).todos) || []);
+      });
+      row.append(done, txt, del);
+      list.appendChild(row);
+    }
+  };
+
+  const addRow = document.createElement("div");
+  addRow.className = "todo-row";
+  const newTask = document.createElement("input");
+  newTask.type = "text";
+  newTask.placeholder = "add a task...";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "act";
+  addBtn.textContent = "ADD";
+  addBtn.addEventListener("click", async () => {
+    const text = (newTask.value || "").trim();
+    if (!text) return;
+    haptic();
+    const r = await fetch("/api/todos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }).catch(() => null);
+    if (r && r.ok) {
+      newTask.value = "";
+      draw(((await (await fetch("/api/todos")).json()).todos) || []);
+    } else {
+      toast("Could not add task");
+    }
+  });
+  addRow.append(newTask, addBtn);
+  list.appendChild(addRow);
+
+  try {
+    const data = await (await fetch("/api/todos")).json();
+    // Redraw above the add row so ADD stays last.
+    const keep = addRow;
+    list.innerHTML = "";
+    draw(data.todos || []);
+    list.appendChild(keep);
+  } catch {
+    /* engine asleep: the add row still works once it is back */
+  }
+}
+
+/* Home: reminders with due times, dismiss, and a local-time add form. */
+async function renderHomeReminders(body) {
+  const head = document.createElement("p");
+  head.className = "home-when";
+  head.textContent = "REMINDERS";
+  body.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "home-list";
+  body.appendChild(list);
+
+  const draw = (rows) => {
+    list.innerHTML = "";
+    for (const rem of rows || []) {
+      const row = document.createElement("div");
+      row.className = "todo-row";
+      const txt = document.createElement("span");
+      let when = "";
+      try {
+        when = new Date(rem.due_at).toLocaleString([], {
+          month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+        });
+      } catch { when = String(rem.due_at || ""); }
+      txt.textContent = `${rem.text} · ${when}`;
+      const off = document.createElement("button");
+      off.type = "button";
+      off.className = "act";
+      off.textContent = "✓";
+      off.title = "Dismissed";
+      off.addEventListener("click", async () => {
+        haptic();
+        await fetch(`/api/reminders/${rem.id}/fire`, { method: "POST" }).catch(() => {});
+        draw(((await (await fetch("/api/reminders")).json()).reminders) || []);
+      });
+      row.append(txt, off);
+      list.appendChild(row);
+    }
+  };
+
+  const addRow = document.createElement("div");
+  addRow.className = "todo-row";
+  const txtIn = document.createElement("input");
+  txtIn.type = "text";
+  txtIn.placeholder = "remind me to...";
+  const whenIn = document.createElement("input");
+  whenIn.type = "datetime-local";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "act";
+  addBtn.textContent = "ADD";
+  addBtn.addEventListener("click", async () => {
+    const text = (txtIn.value || "").trim();
+    if (!text || !whenIn.value) {
+      toast("Reminder needs text and a time");
+      return;
+    }
+    // The picker gives local wall-clock time; the server compares UTC.
+    let iso;
+    try {
+      iso = new Date(whenIn.value).toISOString();
+    } catch {
+      toast("That time could not be read");
+      return;
+    }
+    haptic();
+    const r = await fetch("/api/reminders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, due_at: iso }),
+    }).catch(() => null);
+    if (r && r.ok) {
+      txtIn.value = "";
+      whenIn.value = "";
+      toast("Reminder set");
+      draw(((await (await fetch("/api/reminders")).json()).reminders) || []);
+    } else {
+      toast("Could not set reminder");
+    }
+  });
+  addRow.append(txtIn, whenIn, addBtn);
+  list.appendChild(addRow);
+
+  try {
+    const data = await (await fetch("/api/reminders")).json();
+    const keep = addRow;
+    list.innerHTML = "";
+    draw(data.reminders || []);
+    list.appendChild(keep);
+  } catch {
+    /* engine asleep */
+  }
+}
+
+/* Due reminders: notify (Android) or toast (web), then mark fired so the
+   next tick never delivers the same one twice. */
+async function pollReminders() {
+  try {
+    const r = await fetch("/api/reminders/due");
+    if (!r.ok) return;
+    const { due } = await r.json();
+    for (const rem of due || []) {
+      haptic();
+      if (window.AndroidVoice && typeof window.AndroidVoice.showNotification === "function") {
+        try { window.AndroidVoice.showNotification("Atif Assistant", rem.text); } catch { /* ignore */ }
+      } else {
+        toast(`Reminder: ${rem.text}`);
+      }
+      fetch(`/api/reminders/${rem.id}/fire`, { method: "POST" }).catch(() => {});
+    }
+  } catch { /* engine asleep: try again next tick */ }
+}
+setInterval(pollReminders, 45000);
+setTimeout(pollReminders, 8000);
 document.getElementById("btn-history")?.addEventListener("click", async () => {
   const sheetEl = document.getElementById("history-sheet");
   const box = document.getElementById("history-list");

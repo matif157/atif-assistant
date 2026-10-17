@@ -308,6 +308,26 @@ CREATE TABLE IF NOT EXISTS reflections (
     decided_at TEXT
 );
 
+-- Phase 6. A todo is the user's own words pulled out of conversation - never
+-- invented - and a reminder is an explicit time the user asked to be told.
+CREATE TABLE IF NOT EXISTS todos (
+    id         INTEGER PRIMARY KEY,
+    text       TEXT NOT NULL,
+    done       INTEGER DEFAULT 0,
+    due        TEXT,
+    origin     TEXT,
+    source     TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reminders (
+    id         INTEGER PRIMARY KEY,
+    text       TEXT NOT NULL,
+    due_at     TEXT NOT NULL,
+    fired      INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
 -- the message it came from instead of only carrying a confidence number.
 CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
@@ -1327,6 +1347,100 @@ def set_reflection_status(
     return cur.rowcount > 0
 
 
+def add_todo(
+    text: str,
+    due: str | None = None,
+    origin: str | None = None,
+    source: str | None = None,
+) -> int:
+    """Capture an action in the user's own words. An identical open todo is
+    not duplicated (saying the same thing twice is still one task)."""
+    conn = connect()
+    norm = text.strip().casefold()
+    row = conn.execute(
+        "SELECT id FROM todos WHERE done=0 AND lower(text)=?", (norm,)
+    ).fetchone()
+    if row:
+        return int(row["id"])
+    ts = now()
+    cur = conn.execute(
+        "INSERT INTO todos(text, done, due, origin, source, created_at, updated_at)"
+        " VALUES (?,0,?,?,?,?,?)",
+        (text.strip(), due, origin, source, ts, ts),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_todos(open_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+    conn = connect()
+    where = "WHERE done=0 " if open_only else ""
+    return [
+        dict(r)
+        for r in conn.execute(
+            f"SELECT * FROM todos {where}ORDER BY done, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    ]
+
+
+def set_todo_done(todo_id: int, done: bool = True) -> bool:
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE todos SET done=?, updated_at=? WHERE id=?",
+        (1 if done else 0, now(), todo_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_todo(todo_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM todos WHERE id=?", (todo_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def add_reminder(text: str, due_at: str) -> int:
+    conn = connect()
+    cur = conn.execute(
+        "INSERT INTO reminders(text, due_at, fired, created_at) VALUES (?,?,0,?)",
+        (text.strip(), due_at, now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_reminders(limit: int = 100, include_fired: bool = False) -> list[dict[str, Any]]:
+    conn = connect()
+    where = "" if include_fired else "WHERE fired=0 "
+    return [
+        dict(r)
+        for r in conn.execute(
+            f"SELECT * FROM reminders {where}ORDER BY fired, due_at LIMIT ?",
+            (limit,),
+        ).fetchall()
+    ]
+
+
+def due_reminders(as_of: str | None = None) -> list[dict[str, Any]]:
+    """Unfired reminders whose time has passed (UTC iso cutoff)."""
+    conn = connect()
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM reminders WHERE fired=0 AND due_at<=? ORDER BY due_at",
+            (as_of or now(),),
+        ).fetchall()
+    ]
+
+
+def fire_reminder(reminder_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("UPDATE reminders SET fired=1 WHERE id=?", (reminder_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 COUNTED_TABLES = (
     "facts",
     "episodes",
@@ -1350,6 +1464,8 @@ COUNTED_TABLES = (
     "feedback",
     "mood_history",
     "reflections",
+    "todos",
+    "reminders",
 )
 
 

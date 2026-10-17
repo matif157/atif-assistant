@@ -280,6 +280,20 @@
       <span id="wa-stage-meta" class="muted"></span>
     </div>
     <p class="hint" style="margin:0 .75rem .75rem .75rem">Staged messages become LEARNED candidates for approval. Nothing is auto-promoted to facts.</p>
+    <div id="src-pick" style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem .75rem .25rem .75rem">
+      <button class="ghost small src-btn" data-src="contacts">CONTACTS</button>
+      <button class="ghost small src-btn" data-src="calendar">CALENDAR</button>
+      <button class="ghost small src-btn" data-src="mail">MAIL</button>
+      <button class="ghost small src-btn" data-src="notes">NOTES</button>
+      <button class="ghost small src-btn" data-src="photos">PHOTOS</button>
+    </div>
+    <div id="src-status" class="hint" style="margin:0 .75rem"></div>
+    <div id="src-preview" style="margin:.4rem .75rem;max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:.25rem" hidden></div>
+    <div style="margin:.4rem .75rem .75rem .75rem">
+      <button id="src-stage" class="btn primary" hidden>Stage checked as candidates</button>
+      <span id="src-stage-meta" class="muted"></span>
+    </div>
+    <p class="hint" style="margin:0 .75rem .75rem .75rem">Contacts, Calendar, Mail, Notes and Photos are read from this Mac read-only and staged as LEARNED candidates - nothing becomes a fact until you approve it in LEARNED. A source with no file simply reports nothing found.</p>
   </div>
 
   <div id="data-media" hidden>

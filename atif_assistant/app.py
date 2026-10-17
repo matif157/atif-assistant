@@ -25,11 +25,27 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from . import (
-    applog, db, engine, learn, llm, location, ollama, pipeline, plan,
+    applog, constitution, db, engine, learn, llm, location, ollama, pipeline, plan,
     reflection, router, stt, style, tts, uploads, voice_id,
 )
 from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
+from .importers import calendar as importer_calendar
+from .importers import contacts as importer_contacts
+from .importers import mail as importer_mail
+from .importers import notes as importer_notes
+from .importers import photos as importer_photos
+
+# The five light sources (Phase 6) all follow the same contract: preview
+# candidates read-only, stage them as LEARNED rows the user then approves.
+# WhatsApp keeps its own richer chat-picker routes above.
+IMPORTERS = {
+    "contacts": importer_contacts,
+    "calendar": importer_calendar,
+    "mail": importer_mail,
+    "notes": importer_notes,
+    "photos": importer_photos,
+}
 from .llm import (
     invalidate_probe_cache,
     llm_download_pause,
@@ -566,9 +582,36 @@ async def _extract_in_background(question: str, answer: str, provider: str) -> N
     failed request, and must never crash the worker.
     """
     try:
+        _extract_tasks(question)
+    except Exception:
+        pass
+    try:
         await learn.extract(question, answer, provider)
     except Exception:
         pass
+
+
+# Phase 6: to-do capture runs on the user's own words only. The cue list is
+# deliberately conservative - an over-capture is a visible todo they delete,
+# an invented task would be a lie - and it never invents a due time.
+_TASK_CUES = (
+    "remind me to", "remind me", "don't let me forget", "do not let me forget",
+    "remember to", "still need to", "need to finish", "have to finish",
+    "got to finish", "must finish", "forgot to", "i owe",
+    "karna hai", "karnay hai", "karna para", "karnay paray", "karna parega",
+    "yaad dilana", "bhoolna mat", "bhool na jana",
+)
+
+
+def _extract_tasks(question: str) -> int:
+    """Pull a to-do out of what the user typed. Returns 1 only when a new
+    todo appeared - saying the same thing twice is still one task."""
+    text = " ".join(question.split())[:300]
+    if not constitution._matches(text.casefold(), _TASK_CUES):
+        return 0
+    before = {t["id"] for t in db.list_todos(limit=500)}
+    tid = db.add_todo(text, origin="chat", source=None)
+    return 0 if tid in before else 1
 
 
 def _prepare_ask(payload: Ask) -> dict:
@@ -920,6 +963,66 @@ def wa_stage(payload: dict) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=503)
 
 
+@app.get("/api/import/{source}/preview")
+def import_preview(source: str, limit: int = 100) -> JSONResponse:
+    """Read-only candidate preview for one of the five light sources."""
+    mod = IMPORTERS.get(source)
+    if mod is None:
+        return JSONResponse(
+            {"error": f"unknown source (expected one of {sorted(IMPORTERS)})"},
+            status_code=400,
+        )
+    try:
+        return JSONResponse(mod.import_from_db(limit=min(max(limit, 1), 500)))
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
+@app.post("/api/import/{source}/stage")
+def import_stage(source: str, payload: dict) -> JSONResponse:
+    """Stage selected candidates as LEARNED rows - propose-then-approve:
+    nothing here becomes a fact until the user approves it in LEARNED."""
+    if source not in IMPORTERS:
+        return JSONResponse({"error": "unknown source"}, status_code=400)
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not items:
+        return JSONResponse({"error": "no items"}, status_code=400)
+    staged = 0
+    skipped: list = []
+    conn = db.connect()
+    seen = {
+        r["source"]
+        for r in conn.execute(
+            "SELECT source FROM learned WHERE kind=? AND source IS NOT NULL",
+            (source,),
+        ).fetchall()
+    }
+    for it in items:
+        if not isinstance(it, dict):
+            skipped.append({"reason": "invalid item", "item": it})
+            continue
+        title = str(it.get("title") or "").strip()
+        cid = it.get("id")
+        if not title or cid in (None, ""):
+            skipped.append({"reason": "invalid item", "item": it})
+            continue
+        detail = str(it.get("detail") or "").strip()
+        when = str(it.get("when") or "").strip()
+        text = f"{title} - {detail}" if detail else title
+        if when:
+            text = f"{text} ({when[:10]})"
+        src = f"{source}:id={cid}"
+        if src in seen:
+            skipped.append({"reason": "already staged", "item": {"id": cid}})
+            continue
+        db.add_learned(text=text, kind=source, source=src, confidence=0.6, subject=None)
+        seen.add(src)
+        staged += 1
+    return JSONResponse({"staged": staged, "skipped": skipped, "total": len(items)})
+
+
 @app.get("/api/history/{session}")
 def history(session: str) -> dict:
     return {"messages": db.history(session)}
@@ -959,6 +1062,9 @@ def home() -> dict:
         "feedback": db.feedback_counts(),
         "mood": latest,
         "due_decisions": len(db.due_decisions()),
+        "todos": len(db.list_todos(open_only=True, limit=500)),
+        "reminders": len(db.list_reminders(limit=500)),
+        "places": counts["places"],
         "recent": [
             {
                 "session": s["session"],
@@ -968,6 +1074,79 @@ def home() -> dict:
             for s in db.list_sessions(limit=3)
         ],
     }
+
+
+class TodoIn(BaseModel):
+    text: str
+    due: str | None = None
+
+
+class ReminderIn(BaseModel):
+    text: str
+    # Optional here (not required) so a missing time gets this endpoint's
+    # explicit 400 instead of an opaque 422 from request validation.
+    due_at: str | None = None
+
+
+@app.get("/api/todos")
+def todos(open_only: bool = True, limit: int = 100) -> dict:
+    return {"todos": db.list_todos(open_only=open_only, limit=min(max(limit, 1), 500))}
+
+
+@app.post("/api/todos")
+def create_todo(payload: TodoIn) -> JSONResponse:
+    text = " ".join(payload.text.split())
+    if not text:
+        return JSONResponse({"error": "empty todo"}, status_code=400)
+    tid = db.add_todo(text[:300], due=payload.due, origin="manual")
+    return {"ok": True, "id": tid}
+
+
+@app.post("/api/todos/{todo_id}/toggle")
+def toggle_todo(todo_id: int, payload: dict) -> JSONResponse:
+    done = bool(payload.get("done", True)) if isinstance(payload, dict) else True
+    if not db.set_todo_done(todo_id, done):
+        return JSONResponse({"error": "no such todo"}, status_code=404)
+    return {"ok": True, "id": todo_id, "done": done}
+
+
+@app.delete("/api/todos/{todo_id}")
+def remove_todo(todo_id: int) -> JSONResponse:
+    if not db.delete_todo(todo_id):
+        return JSONResponse({"error": "no such todo"}, status_code=404)
+    return {"ok": True, "id": todo_id}
+
+
+@app.get("/api/reminders")
+def reminders(include_fired: bool = False, limit: int = 100) -> dict:
+    return {
+        "reminders": db.list_reminders(
+            limit=min(max(limit, 1), 500), include_fired=include_fired
+        )
+    }
+
+
+@app.post("/api/reminders")
+def create_reminder(payload: ReminderIn) -> JSONResponse:
+    text = " ".join(payload.text.split())
+    if not text or not payload.due_at:
+        return JSONResponse({"error": "text and due_at are required"}, status_code=400)
+    rid = db.add_reminder(text[:300], payload.due_at)
+    return {"ok": True, "id": rid}
+
+
+@app.get("/api/reminders/due")
+def reminders_due() -> dict:
+    """Unfired reminders whose time has passed. The client notifies (or
+    toasts) and then POSTs /fire, so nothing is delivered twice."""
+    return {"due": db.due_reminders()}
+
+
+@app.post("/api/reminders/{reminder_id}/fire")
+def fire_reminder(reminder_id: int) -> JSONResponse:
+    if not db.fire_reminder(reminder_id):
+        return JSONResponse({"error": "no such reminder"}, status_code=404)
+    return {"ok": True, "id": reminder_id}
 
 
 class ProfileIn(BaseModel):

@@ -2,6 +2,9 @@ package ai.atif.assistant;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -122,6 +125,15 @@ public class MainActivity extends Activity {
         }
 
         setContentView(R.layout.activity_main);
+        // Phase 6: reminder notifications need the runtime grant on 13+.
+        // Asking once at launch is deliberate - the engine polls reminders
+        // from the first minute and a denied permission would drop them.
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1010);
+        }
         bootSplash = findViewById(R.id.boot_splash);
         bootErrorView = findViewById(R.id.boot_error);
         bootStatus = findViewById(R.id.boot_status);
@@ -737,6 +749,37 @@ public class MainActivity extends Activity {
                 View v = getWindow().getDecorView();
                 v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             });
+        }
+
+        /** Foreground notification for a due reminder (Phase 6). Named
+         *  showNotification because Object.notify is final. Dropped, not
+         *  queued, when the user has not granted POST_NOTIFICATIONS. */
+        @JavascriptInterface
+        public void showNotification(String title, String body) {
+            if (Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                            != PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+            NotificationManager nm =
+                    (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm == null) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(new NotificationChannel(
+                        "reminders", "Reminders", NotificationManager.IMPORTANCE_DEFAULT));
+            }
+            Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? new Notification.Builder(MainActivity.this, "reminders")
+                    : new Notification.Builder(MainActivity.this);
+            Notification n = b
+                    .setContentTitle(title == null ? "Atif Assistant" : title)
+                    .setContentText(body == null ? "" : body)
+                    .setSmallIcon(R.mipmap.ic_launcher)
+                    .setAutoCancel(true)
+                    .build();
+            nm.notify((int) SystemClock.uptimeMillis(), n);
         }
     }
 

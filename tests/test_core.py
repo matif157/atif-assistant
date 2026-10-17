@@ -839,6 +839,7 @@ def test_web_sync() -> None:
         "lock-setting-row", "set-applock", "dot", "statusline",
         "btn-new-chat", "btn-history", "history-sheet", "history-list",
         "btn-home", "home-sheet", "home-body",
+        "src-pick", "src-preview", "src-stage",
     )
     for el in critical:
         check(
@@ -1462,6 +1463,253 @@ def test_home() -> None:
             )
             check("date stamped ISO", len(res["date"]) == 10)
         finally:
+            db.reset_db_path()
+
+
+def test_importers() -> None:
+    """Phase 6: the five light importers parse real-shaped fixtures,
+    stage as LEARNED candidates (propose-then-approve), and never explode
+    on a missing file."""
+    import sqlite3
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+    from atif_assistant.importers import calendar, contacts, mail, notes, photos
+
+    print("\nimporters (5 light sources)")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "imp.db")
+        db.init_db()
+        client = TestClient(app)
+        tmp_path = Path(tmp)
+        try:
+            # --- contacts: person table with First/Last/Organization
+            cx = tmp_path / "contacts.db"
+            c = sqlite3.connect(cx)
+            c.execute(
+                "CREATE TABLE ABPerson (ROWID INTEGER PRIMARY KEY, First TEXT,"
+                " Middle TEXT, Last TEXT, Organization TEXT)"
+            )
+            c.executemany(
+                "INSERT INTO ABPerson(ROWID, First, Last, Organization) VALUES (?,?,?,?)",
+                [(1, "Ada", "Lovelace", "Analytical Engine"), (2, "Hamza", None, None)],
+            )
+            c.commit(); c.close()
+            res = contacts.import_from_db(db_path=cx)
+            check("contacts parses persons", res["count"] == 2 and res["truncated"] is False)
+            check(
+                "contacts builds full name + org detail",
+                res["candidates"][0]["title"] == "Ada Lovelace"
+                and res["candidates"][0]["detail"] == "Analytical Engine"
+                and res["candidates"][0]["kind"] == "contacts",
+            )
+            check("contacts single name kept", res["candidates"][1]["title"] == "Hamza")
+
+            # --- calendar: event table with summary + apple-epoch start
+            cal = tmp_path / "calendar.db"
+            c = sqlite3.connect(cal)
+            c.execute(
+                "CREATE TABLE EKEVENT (ROWID INTEGER PRIMARY KEY, summary TEXT,"
+                " start_date REAL, location TEXT)"
+            )
+            c.execute(
+                "INSERT INTO EKEVENT(ROWID, summary, start_date) VALUES (1, 'Football', 800000000.0)"
+            )
+            c.commit(); c.close()
+            cres = calendar.import_from_db(db_path=cal)
+            check("calendar parses events", cres["count"] == 1)
+            check(
+                "calendar converts apple epoch",
+                cres["candidates"][0]["when"] is not None
+                and cres["candidates"][0]["when"].startswith("2026-"),
+            )
+
+            # --- mail: Envelope Index style messages, ns-since-2001 dates
+            ml = tmp_path / "envelope.db"
+            c = sqlite3.connect(ml)
+            c.execute(
+                "CREATE TABLE messages (ROWID INTEGER PRIMARY KEY, subject TEXT,"
+                " sender TEXT, date_sent INTEGER)"
+            )
+            c.execute(
+                "INSERT INTO messages(ROWID, subject, sender, date_sent)"
+                " VALUES (1, 'Rent due', 'landlord@mail.com', 800000000000000000)"
+            )
+            c.commit(); c.close()
+            mres = mail.import_from_db(db_path=ml)
+            check("mail parses subjects", mres["count"] == 1 and mres["candidates"][0]["title"] == "Rent due")
+            check("mail lists sender as detail", mres["candidates"][0]["detail"] == "landlord@mail.com")
+            check("mail converts ns apple date", (mres["candidates"][0]["when"] or "").startswith("2026-"))
+
+            # --- notes: ZTITLE rows, folder rows (no snippet) skipped
+            nt = tmp_path / "notes.db"
+            c = sqlite3.connect(nt)
+            c.execute(
+                "CREATE TABLE ZICCLOUDSYNCINGOBJECT (ROWID INTEGER PRIMARY KEY,"
+                " ZTITLE TEXT, ZSNIPPET TEXT, ZCREATIONDATE1 REAL)"
+            )
+            c.executemany(
+                "INSERT INTO ZICCLOUDSYNCINGOBJECT(ROWID, ZTITLE, ZSNIPPET, ZCREATIONDATE1)"
+                " VALUES (?,?,?,?)",
+                [
+                    (1, "Groceries", "milk, eggs", 700000000.0),
+                    (2, "Work", None, None),  # folder row: no snippet -> skipped
+                ],
+            )
+            c.commit(); c.close()
+            nres = notes.import_from_db(db_path=nt)
+            check("notes skips folder rows", nres["count"] == 1)
+            check("notes carries snippet", nres["candidates"][0]["detail"] == "milk, eggs")
+
+            # --- photos: album titles + counts through the link table
+            #     (the link table has one row per album<->asset pair, which
+            #     is how Photos itself stores it)
+            ph = tmp_path / "photos.db"
+            c = sqlite3.connect(ph)
+            c.execute("CREATE TABLE ZGENERICALBUM (Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT)")
+            c.execute("CREATE TABLE Z_3ALBUMS (_3ALBUMS INTEGER, _3ASSETS INTEGER)")
+            c.executemany("INSERT INTO ZGENERICALBUM(Z_PK, ZTITLE) VALUES (?,?)",
+                          [(1, "Lahore 2025"), (2, "Family")])
+            pairs = [(1, 101), (1, 102), (1, 103), (1, 104), (2, 201), (2, 202)]
+            c.executemany("INSERT INTO Z_3ALBUMS(_3ALBUMS, _3ASSETS) VALUES (?,?)", pairs)
+            c.commit(); c.close()
+            pres = photos.import_from_db(db_path=ph)
+            check("photos parses albums", pres["count"] == 2)
+            check(
+                "photos counts linked assets per album",
+                pres["candidates"][0]["detail"] == "4 photos"
+                and pres["candidates"][1]["detail"] == "2 photos",
+            )
+
+            # --- uniform envelope: truncation marks honestly
+            lim = contacts.import_from_db(db_path=cx, limit=1)
+            check("limit truncates and flags", lim["count"] == 2 and lim["truncated"] is True)
+
+            # --- missing file is a clear FileNotFoundError, not a crash
+            try:
+                contacts.import_from_db(db_path=tmp_path / "nope.db")
+                check("missing file raises FileNotFoundError", False)
+            except FileNotFoundError:
+                check("missing file raises FileNotFoundError", True)
+
+            # --- routes: unknown source rejected
+            check(
+                "unknown source previews 400",
+                client.get("/api/import/nope/preview").status_code == 400,
+            )
+            check(
+                "unknown source stages 400",
+                client.post("/api/import/nope/stage", json={"items": [{"id": 1, "title": "x"}]}).status_code == 400,
+            )
+
+            # --- stage: propose-then-approve into learned, deduped
+            items = [
+                {"id": 1, "title": "Ada Lovelace", "detail": "Analytical Engine"},
+                {"id": 2, "title": "Hamza"},
+                {"id": "", "title": "no id"},  # invalid -> skipped
+            ]
+            st = client.post("/api/import/contacts/stage", json={"items": items}).json()
+            check("stage writes candidates", st["staged"] == 2 and len(st["skipped"]) == 1)
+            again = client.post(
+                "/api/import/contacts/stage", json={"items": items[:1]}
+            ).json()
+            check("stage dedups on source", again["staged"] == 0 and again["skipped"][0]["reason"] == "already staged")
+            learned = client.get("/api/learned").json()["candidates"]
+            imp = [l for l in learned if l["kind"] == "contacts"]
+            check("staged rows are learned candidates", len(imp) == 2 and imp[0]["status"] == "candidate")
+            check(
+                "staged text carries title + detail",
+                any("Ada Lovelace - Analytical Engine" in l["text"] for l in imp),
+            )
+        finally:
+            db.reset_db_path()
+
+
+def test_todos_reminders() -> None:
+    """Phase 6: task capture from the user's own words, todo/reminder CRUD,
+    due delivery marking, and the Home aggregate fields."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, engine, learn
+    from atif_assistant.app import _extract_tasks, app
+
+    print("\ntodos + reminders")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "tasks.db")
+        db.init_db()
+        client = TestClient(app)
+
+        async def fake_complete(messages, **kw):
+            return "[FACT] noted.", "groq"
+
+        orig = (engine.complete, learn.complete)
+        engine.complete = fake_complete
+        learn.complete = fake_complete
+        try:
+            # extraction: cue match creates one todo; repeats do not duplicate
+            check("cue sentence captured", _extract_tasks("Remind me to call ammi after isha") == 1)
+            check("repeat sentence deduped", _extract_tasks("Remind me to call ammi after isha") == 0)
+            check("neutral question ignored", _extract_tasks("what is the capital of france") == 0)
+            open_t = db.list_todos(open_only=True)
+            check("chat todo is open with origin chat",
+                  len(open_t) == 1 and open_t[0]["origin"] == "chat")
+
+            # the ask flow itself feeds the background extractor
+            r = client.post("/api/ask", json={"question": "don't let me forget the passport fee"})
+            check("ask answers", r.status_code == 200)
+            check(
+                "ask background captured the task",
+                any("passport fee" in t["text"] for t in db.list_todos(open_only=True)),
+            )
+
+            # manual todos + routes
+            created = client.post("/api/todos", json={"text": "  file taxes  "}).json()
+            check("manual todo created", created["ok"] and created["id"] > 0)
+            tid = created["id"]
+            listed = client.get("/api/todos").json()["todos"]
+            check("todo text normalised", any(t["id"] == tid and t["text"] == "file taxes" for t in listed))
+            check(
+                "empty todo rejected",
+                client.post("/api/todos", json={"text": "   "}).status_code == 400,
+            )
+            client.post(f"/api/todos/{tid}/toggle", json={"done": True})
+            check("toggle removes from open", all(t["id"] != tid for t in client.get("/api/todos").json()["todos"]))
+            check("toggle 404s on unknown", client.post("/api/todos/99999/toggle", json={}).status_code == 404)
+            check("delete 404s on unknown", client.delete("/api/todos/99999").status_code == 404)
+            check("delete removes", client.delete(f"/api/todos/{tid}").status_code == 200)
+
+            # reminders: due -> fire -> gone from due
+            check(
+                "reminder rejects missing time",
+                client.post("/api/reminders", json={"text": "tea"}).status_code == 400,
+            )
+            rid = client.post(
+                "/api/reminders",
+                json={"text": "call ammi", "due_at": "2001-01-01T00:00:00+00:00"},
+            ).json()["id"]
+            due = client.get("/api/reminders/due").json()["due"]
+            check("past reminder is due", any(d["id"] == rid for d in due))
+            check("fire marks it", client.post(f"/api/reminders/{rid}/fire").json()["ok"] is True)
+            check("fired reminder leaves due list", client.get("/api/reminders/due").json()["due"] == [])
+            with_fired = client.get("/api/reminders?include_fired=true").json()["reminders"]
+            check("fired still listed when asked", any(w["id"] == rid and w["fired"] == 1 for w in with_fired))
+            check("fire 404s on unknown", client.post("/api/reminders/99999/fire").status_code == 404)
+
+            # home carries the new tiles
+            home = client.get("/api/home").json()
+            check(
+                "home aggregates todos/reminders/places",
+                home["todos"] == len(db.list_todos(open_only=True))
+                and "reminders" in home
+                and "places" in home,
+            )
+        finally:
+            engine.complete, learn.complete = orig
             db.reset_db_path()
 
 
@@ -3639,6 +3887,8 @@ def main() -> int:
     test_ask_stream()
     test_ask_stop_disconnect()
     test_home()
+    test_importers()
+    test_todos_reminders()
     test_extended_api()
     test_location()
     test_uploads()

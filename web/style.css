@@ -825,3 +825,41 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .tile .t-lab { font-size: 10px; letter-spacing: .1em; color: var(--dim); }
 .tile .t-num { font-size: 21px; font-weight: 700; color: var(--txt); margin-top: 3px; }
 .tile .t-sub { font-size: 10px; color: var(--dim); margin-top: 3px; }
+.home-list {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px 8px;
+  margin-bottom: 14px;
+}
+.todo-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 2px;
+  font-size: 12px;
+  color: var(--txt);
+  border-bottom: 1px solid var(--line);
+}
+.todo-row:last-child { border-bottom: none; }
+.todo-row span { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+.todo-row input {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--txt);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  min-width: 0;
+}
+.todo-row input[type="text"] { flex: 2 1 110px; }
+.todo-row input[type="datetime-local"] { flex: 1 1 150px; }
+.src-row {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--txt);
+}
+.src-row:hover { background: var(--panel); }
