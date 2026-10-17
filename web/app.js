@@ -2258,10 +2258,26 @@ let currentAudio = null;
 let speechToken = 0;
 let voiceInputPending = false;
 let pendingSpeaker = null;
+// Native TTS reports completion through window.onAndroidSpeechEnd; the
+// resolver and utterance id pair a callback with the answer it belongs to.
+let speechEndResolve = null;
+let speechEndId = null;
+let speechSeq = 0;
 
 // Stop any speech in progress, whichever engine is producing it.
 function stopSpeech() {
   speechToken += 1;
+  speechEndResolve = null;
+  speechEndId = null;
+  // Barge-in must silence the device speaker too - the web cancels below
+  // never reach the Android TextToSpeech engine.
+  try {
+    if (window.AndroidVoice && typeof window.AndroidVoice.stopSpeak === "function") {
+      window.AndroidVoice.stopSpeak();
+    }
+  } catch {
+    /* no bridge */
+  }
   try {
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   } catch {
@@ -2352,15 +2368,23 @@ async function speak(text, opts = {}) {
     done();
   }, Math.min(Math.max(words * 700 + 9000, 12000), 150000));
 
-  // Inside the Android app native TTS is the only engine; there is no
-  // completion callback, so the safety timer releases the loop.
+  // Inside the Android app the native engine reports completion back through
+  // window.onAndroidSpeechEnd, so a call turn ends the moment speech does -
+  // the safety timer above is only the fallback for a silent device.
   if (window.AndroidVoice && typeof window.AndroidVoice.speak === "function") {
+    speechEndId = "s" + (++speechSeq);
+    speechEndResolve = done;
+    let nativeOk = false;
     try {
-      window.AndroidVoice.speak(clean, lang);
-      return;
+      nativeOk = window.AndroidVoice.speak(clean, lang, speechEndId) !== false;
     } catch {
-      /* fall through to the web engine */
+      nativeOk = false;
     }
+    if (nativeOk) return;
+    // No voice for this language (Urdu on most devices) or engine not ready:
+    // fall through to the server clip / web engine chain below.
+    speechEndResolve = null;
+    speechEndId = null;
   }
 
   const hasWeb = "speechSynthesis" in window;
@@ -2393,6 +2417,24 @@ async function speak(text, opts = {}) {
     done();
   }
 }
+
+// Fired by the Android TextToSpeech engine when an utterance finishes (or
+// fails); only the matching id releases the waiting speak() call, so a late
+// callback from a stopped answer can never cut the next one short.
+window.onAndroidSpeechEnd = (id) => {
+  if (speechEndId && id !== speechEndId) return;
+  const fn = speechEndResolve;
+  speechEndResolve = null;
+  speechEndId = null;
+  if (fn) fn();
+};
+
+// Fired by the Android recorder between "clip captured" and "text ready" -
+// transcription can take a while on a cold model, so the call watchdog must
+// stop counting mic time and start counting transcript time.
+window.onAndroidSpeechProgress = () => {
+  armCallWatchdog(60000);
+};
 
 /* ------------------------------------------------------------ speech input */
 
@@ -2746,6 +2788,8 @@ let callGotResult = false;
 let callRetry = null;
 let callResumeTimer = null;
 let callErrorStreak = 0;
+let callMicAsking = false;
+let callListenTimer = null;
 
 function callSupported() {
   // The offline engine makes a call possible even in browsers with no built-in
@@ -2813,6 +2857,12 @@ function startCall() {
   callErrorStreak = 0;
   // A call and the hands-free loop must never run together.
   if (handsFreeActive) stopHandsFree();
+  // A typed answer still streaming would eat the first call turn.
+  try {
+    if (streaming && streamCtl) streamCtl.stop();
+  } catch {
+    /* no stream to stop */
+  }
   // The one-shot mic and the call must never run together.
   if (listening && recognizer) {
     try { recognizer.stop(); } catch { /* ignore */ }
@@ -2829,6 +2879,8 @@ function endCall() {
   callActive = false;
   callPhase = "idle";
   clearTimeout(callResumeTimer);
+  clearTimeout(callListenTimer);
+  callMicAsking = false;
   stopCallRecognition();
   stopSpeech();
   if (window.AndroidVoice && typeof window.AndroidVoice.stop === "function") {
@@ -2837,8 +2889,109 @@ function endCall() {
   if (callSheet) callSheet.hidden = true;
 }
 
+// The bridge branch of callListen has no onend to re-arm it: a stuck
+// recorder, a hung transcription or a dropped callback would freeze the call
+// on LISTENING forever. Watchdog: mic phase gets `ms` (12s covers the 8s
+// capture), and Android's progress callback re-arms it at 60s for the
+// transcript phase. Three hangs in a row end the call with a visible reason.
+function armCallWatchdog(ms) {
+  clearTimeout(callListenTimer);
+  if (!callActive) return;
+  callListenTimer = setTimeout(() => {
+    if (!callActive || callPhase !== "listening") return;
+    callErrorStreak += 1;
+    if (callErrorStreak >= 3) {
+      callTranscriptEl.textContent =
+        "The microphone is not responding. Check it in Settings - device permissions - and try again.";
+      endCall();
+      return;
+    }
+    // Kill any stuck capture, then re-arm. Native only: the browser
+    // recogniser re-arms itself on onend, and doubling would double-listen.
+    if (window.AndroidVoice && typeof window.AndroidVoice.stop === "function") {
+      try { window.AndroidVoice.stop(); } catch { /* ignore */ }
+    }
+    callHeardEl.textContent = "I didn't catch that.";
+    callRetry = setTimeout(() => {
+      if (callActive) callListen();
+    }, 400);
+  }, ms);
+}
+
+// Native recording needs the RECORD_AUDIO runtime grant. Ask once, follow the
+// system dialog, and only start listening when it is actually granted -
+// otherwise the recorder returns empty results in a silent loop.
+function callMicReady() {
+  try {
+    if (!window.AndroidVoice || typeof window.AndroidVoice.permissionStatus !== "function") {
+      return true; // browser/PWA: getUserMedia prompts on its own
+    }
+    const st = JSON.parse(window.AndroidVoice.permissionStatus() || "{}");
+    if (st.mic) return true;
+    if (callMicAsking) return false;
+    callMicAsking = true;
+    callSetPhase("listening");
+    callTranscriptEl.textContent = "Microphone permission is needed for a call.";
+    callHeardEl.textContent = "Waiting for permission…";
+    try { window.AndroidVoice.requestMic(); } catch { /* ignore */ }
+    const t0 = Date.now();
+    const poll = setInterval(() => {
+      let ok = false;
+      try {
+        ok = JSON.parse(window.AndroidVoice.permissionStatus() || "{}").mic;
+      } catch { ok = false; }
+      if (ok) {
+        clearInterval(poll);
+        callMicAsking = false;
+        if (callActive) callListen();
+        return;
+      }
+      if (!callActive || Date.now() - t0 > 25000) {
+        clearInterval(poll);
+        callMicAsking = false;
+        if (callActive) {
+          callTranscriptEl.textContent = "Microphone permission is required for a call.";
+          endCall();
+        }
+      }
+    }, 700);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function callListen() {
   if (!callActive) return;
+  clearTimeout(callListenTimer);
+
+  // Native bridge FIRST: inside Android WebView getUserMedia is always
+  // denied (no onPermissionRequest host hook), so the local web recorder can
+  // only ever fail there - it stays for desktop PWAs.
+  if (window.AndroidVoice && typeof window.AndroidVoice.listen === "function") {
+    if (!callMicReady()) return;
+    clearTimeout(callRetry);
+    callGotResult = false;
+    callSetPhase("listening");
+    callTranscriptEl.textContent = "";
+    callHeardEl.textContent = "";
+    // Single-shot: re-arm after every turn, and never trust a silent drop.
+    window.onAndroidSpeechResult = (text) => {
+      if (!callActive) return;
+      clearTimeout(callListenTimer);
+      const said = (text || "").trim();
+      if (said) callSubmit(said);
+      else callListen();
+    };
+    try {
+      window.AndroidVoice.listen(settings.stt);
+      armCallWatchdog(12000);
+    } catch {
+      callRetry = setTimeout(callListen, 400);
+    }
+    return;
+  }
+
   if (wantLocalStt()) {
     callListenLocal();
     return;
@@ -2848,23 +3001,6 @@ function callListen() {
   callSetPhase("listening");
   callTranscriptEl.textContent = "";
   callHeardEl.textContent = "";
-
-  // Inside the Android app use the native recognizer via the JS bridge. It is
-  // single-shot, so we re-arm it after every turn.
-  if (window.AndroidVoice && typeof window.AndroidVoice.listen === "function") {
-    window.onAndroidSpeechResult = (text) => {
-      if (!callActive) return;
-      const said = (text || "").trim();
-      if (said) callSubmit(said);
-      else callListen();
-    };
-    try {
-      window.AndroidVoice.listen(settings.stt);
-    } catch {
-      callRetry = setTimeout(callListen, 400);
-    }
-    return;
-  }
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let r;

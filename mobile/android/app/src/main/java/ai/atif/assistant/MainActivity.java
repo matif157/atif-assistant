@@ -11,6 +11,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.net.Uri;
@@ -22,6 +23,7 @@ import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
@@ -73,6 +75,11 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private TextToSpeech tts;
+    /** Set once TextToSpeech.onInit succeeds; a speak() before that is a no-op
+     *  (the old code dropped early utterances silently). */
+    private volatile boolean ttsReady;
+    /** Owned while replies play so music ducks instead of fighting the voice. */
+    private final AudioManager.OnAudioFocusChangeListener audioFocusListener = focus -> { };
     private SpeechRecognizer recognizer;
     private Thread recordThread;
     private volatile boolean recording;
@@ -294,7 +301,34 @@ public class MainActivity extends Activity {
         lockBtn.setOnClickListener(v -> startBiometric());
 
         requestAudioPermission();
-        tts = new TextToSpeech(this, status -> { /* locale set per utterance */ });
+        tts = new TextToSpeech(this, status -> {
+            ttsReady = status == TextToSpeech.SUCCESS;
+            if (tts != null) {
+                // The completion signal the whole call loop waits on: without
+                // it every turn dead-airs on a JS safety timer.
+                tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override
+                    public void onStart(String utteranceId) {
+                        // playback started; nothing to release yet
+                    }
+
+                    @Override
+                    public void onDone(String utteranceId) {
+                        emitSpeechEnd(utteranceId);
+                    }
+
+                    @Override
+                    public void onError(String utteranceId) {
+                        emitSpeechEnd(utteranceId);
+                    }
+
+                    @Override
+                    public void onError(String utteranceId, int errorCode) {
+                        emitSpeechEnd(utteranceId);
+                    }
+                });
+            }
+        });
 
         // First launch boots Python + uvicorn (a couple of seconds). The
         // splash shows live status; on timeout or failure the error screen
@@ -779,12 +813,31 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
-        public void speak(String text, String lang) {
-            if (tts == null || text == null) {
-                return;
+        public boolean speak(String text, String lang, String id) {
+            if (tts == null || text == null || !ttsReady) {
+                return false;
             }
-            tts.setLanguage(Locale.forLanguageTag(lang == null ? "en" : lang));
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "atif");
+            int ok = tts.setLanguage(Locale.forLanguageTag(lang == null ? "en" : lang));
+            if (ok == TextToSpeech.LANG_MISSING_DATA
+                    || ok == TextToSpeech.LANG_NOT_SUPPORTED) {
+                // No voice for this language (Urdu on most devices): the
+                // caller falls back to the server voice instead of silence.
+                return false;
+            }
+            gainAudioFocus();
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null,
+                    id == null || id.isEmpty() ? "atif" : id);
+            return true;
+        }
+
+        /** Barge-in: silence only the voice - the mic may already be recording
+         *  the next turn and must not be touched. */
+        @JavascriptInterface
+        public void stopSpeak() {
+            if (tts != null) {
+                tts.stop();
+            }
+            abandonAudioFocus();
         }
 
         @JavascriptInterface
@@ -798,6 +851,7 @@ public class MainActivity extends Activity {
             if (tts != null) {
                 tts.stop();
             }
+            abandonAudioFocus();
             recording = false;
             runOnUiThread(() -> {
                 if (recognizer != null) {
@@ -980,6 +1034,25 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void gainAudioFocus() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am != null) {
+                am.requestAudioFocus(audioFocusListener, AudioManager.STREAM_MUSIC,
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+            }
+        } catch (Throwable ignored) { /* focus is a nicety, never fatal */ }
+    }
+
+    private void abandonAudioFocus() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am != null) {
+                am.abandonAudioFocus(audioFocusListener);
+            }
+        } catch (Throwable ignored) { /* focus is a nicety, never fatal */ }
+    }
+
     private void whisperListen(final String lang) {
         if (recording) {
             return; // already capturing; the next result will arrive on its own
@@ -990,12 +1063,16 @@ public class MainActivity extends Activity {
                 emitResult("");
                 return;
             }
+            // Clip captured; transcription can take a cold minute. Lets the JS
+            // watchdog stop counting mic time before it cuts a live turn.
+            emitProgress();
             String text = postTranscribe(wav, lang);
             if (text == null) {
                 // Stack vanished (model deleted, server restarted...): one
-                // fallback so the mic is never simply dead.
+                // fallback so the mic is never simply dead. SpeechRecognizer
+                // must be created on a Looper thread or it throws.
                 sttAvailable = false;
-                startListeningLegacy(lang);
+                runOnUiThread(() -> startListeningLegacy(lang));
                 return;
             }
             emitResult(text);
@@ -1176,11 +1253,28 @@ public class MainActivity extends Activity {
         web.post(() -> web.evaluateJavascript(js, null));
     }
 
+    /** Utterance finished (or failed): releases the JS speak() waiter. */
+    private void emitSpeechEnd(final String utteranceId) {
+        final String js = "window.onAndroidSpeechEnd && window.onAndroidSpeechEnd("
+                + jsQuote(utteranceId) + ")";
+        web.post(() -> web.evaluateJavascript(js, null));
+    }
+
+    /** Recording done, transcription starting - the JS watchdog re-arms. */
+    private void emitProgress() {
+        web.post(() -> web.evaluateJavascript(
+                "window.onAndroidSpeechProgress && window.onAndroidSpeechProgress()",
+                null));
+    }
+
     private static String jsQuote(String s) {
         if (s == null) {
             s = "";
         }
-        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ") + "\"";
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ")
+                // Line/paragraph separators are legal in JS strings but break
+                // evaluateJavascript's parser when unescaped.
+                .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029") + "\"";
     }
 
     @Override
