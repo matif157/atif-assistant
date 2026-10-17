@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark window background: the launch window used to be a white screen
+         for the whole Python boot; it now matches the splash layout. -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#0b0e14</item>
+    </style>
+</resources>

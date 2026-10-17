@@ -22,13 +22,32 @@ def start(files_dir, llama_bin="", whisper_bin="", host="127.0.0.1", port=8770):
     libs (empty on desktop or on ABIs without the binaries). They have to be
     exported before ``atif_assistant`` is imported so the on-device providers
     can find them. Models live in files_dir/models for both stacks.
+
+    Any failure clears the started guard again, so the UI's RETRY button can
+    call ``start()`` after a port conflict, a bad environment or an import
+    error instead of silently doing nothing forever.
     """
     global _started
     with _lock:
         if _started:
             return
         _started = True
+    try:
+        _boot(files_dir, llama_bin, whisper_bin, host, port)
+    except BaseException as exc:  # noqa: BLE001 - reset, log, then re-raise
+        with _lock:
+            _started = False
+        try:
+            from atif_assistant.applog import log
 
+            log("server.boot_failed", type=type(exc).__name__, error=str(exc)[:200])
+        except Exception:  # noqa: BLE001 - logging must not mask the failure
+            pass
+        raise
+
+
+def _boot(files_dir, llama_bin, whisper_bin, host, port) -> None:
+    """Everything ``start()`` does once it owns the started guard."""
     os.makedirs(files_dir, exist_ok=True)
     os.environ.setdefault("ATIF_ASSISTANT_DATA_DIR", files_dir)
     os.environ.setdefault("ATIF_ASSISTANT_MODEL_DIR", os.path.join(files_dir, "models"))
@@ -59,15 +78,4 @@ def start(files_dir, llama_bin="", whisper_bin="", host="127.0.0.1", port=8770):
         whisper_bin=bool(whisper_bin),
     )
 
-    try:
-        uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
-    except Exception as exc:  # noqa: BLE001 - port conflict, bad env, ...
-        # Let the caller retry (boot timeout / RETRY button): a failed boot
-        # must not leave the guard stuck at "started" forever.
-        with _lock:
-            _started = False
-        try:
-            log("server.boot_failed", error=str(exc)[:200], type=type(exc).__name__)
-        except Exception:  # noqa: BLE001
-            pass
-        raise
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)

@@ -2,6 +2,8 @@ package ai.atif.assistant;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
@@ -14,10 +16,15 @@ import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.util.Base64;
+import android.view.View;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.TextView;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -32,8 +39,11 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Thin WebView shell around the embedded Python server. The server listens on
@@ -41,6 +51,10 @@ import java.util.Locale;
  * front end is reused unchanged. Voice uses the native Android engines through
  * a small JS bridge instead of the Web Speech API, which WebView does not
  * implement.
+ *
+ * Boot UX: a dark splash with live status while the engine starts; a timeout
+ * or a Python failure lands on an error screen with RETRY and COPY
+ * DIAGNOSTICS instead of a dead WebView error page.
  */
 public class MainActivity extends Activity {
 
@@ -53,10 +67,23 @@ public class MainActivity extends Activity {
     /** False once the server reports no offline speech stack; refreshed on boot. */
     private volatile boolean sttAvailable;
 
+    // Boot UI
+    private View bootSplash;
+    private View bootErrorView;
+    private TextView bootStatus;
+    private TextView bootErrorDetail;
+    private volatile String bootError;
+    private volatile boolean pageLoaded;
+    /** Bumped on every RETRY so stale boot threads stop touching the UI. */
+    private volatile int bootGen;
+    private String lastLlamaBin = "";
+    private String lastWhisperBin = "";
+
     private static final String SERVER_URL = "http://127.0.0.1:8770/";
     private static final int STT_RATE = 16000; // whisper expects 16 kHz mono PCM16
     private static final int STT_MAX_MS = 8000;
     private static final int STT_MIN_MS = 400;
+    private static final long BOOT_TIMEOUT_MS = 25_000;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,45 +97,265 @@ public class MainActivity extends Activity {
                 & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
-        // llama-server / whisper-cli ship as JNI libs (jniLibs/<abi>/lib*.so)
-        // so the installer extracts them into nativeLibraryDir, which is one
-        // of the few app-owned locations Android still allows execve() from.
-        // Writing them into filesDir instead would hit the API 29+ W^X block
-        // (Permission denied from the app, even though run-as can exec it).
-        final String dataDir = getFilesDir().getAbsolutePath();
-        final String llamaBin = resolveNativeLib("libllama-server.so");
-        final String whisperBin = resolveNativeLib("libwhisper-cli.so");
-        new Thread(() -> {
-            try {
-                Python.getInstance().getModule("run_server")
-                        .callAttr("start", dataDir, llamaBin, whisperBin);
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
-        }).start();
 
-        web = new WebView(this);
+        setContentView(R.layout.activity_main);
+        bootSplash = findViewById(R.id.boot_splash);
+        bootErrorView = findViewById(R.id.boot_error);
+        bootStatus = findViewById(R.id.boot_status);
+        bootErrorDetail = findViewById(R.id.boot_error_detail);
+
+        web = findViewById(R.id.web);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
-        web.setWebViewClient(new WebViewClient());
+        // Dark under the first paint: matches the splash and the page, so no
+        // white flash between "interface loaded" and the CSS landing.
+        web.setBackgroundColor(0xFF0B0E14);
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                pageLoaded = true;
+                if (bootSplash != null) {
+                    bootSplash.setVisibility(View.GONE);
+                }
+            }
+
+            @Override
+            public void onReceivedError(
+                    WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request.isForMainFrame() && !pageLoaded) {
+                    showBootError("The interface failed to load: "
+                            + error.getDescription());
+                }
+            }
+        });
         web.addJavascriptInterface(new VoiceBridge(), "AndroidVoice");
-        setContentView(web);
+
+        Button retryBtn = findViewById(R.id.boot_retry);
+        Button copyBtn = findViewById(R.id.boot_copy);
+        retryBtn.setOnClickListener(v -> startBoot());
+        copyBtn.setOnClickListener(v -> {
+            String report = collectDiagnostics();
+            try {
+                ClipboardManager cm =
+                        (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("Atif diagnostics", report));
+                    if (bootErrorDetail != null) {
+                        bootErrorDetail.setText(
+                                "Diagnostics copied to clipboard - paste them anywhere.");
+                    }
+                }
+            } catch (Throwable t) {
+                android.util.Log.w("Atif", "clipboard failed: " + t);
+            }
+        });
 
         requestAudioPermission();
         tts = new TextToSpeech(this, status -> { /* locale set per utterance */ });
 
-        // First launch boots Python + uvicorn (a couple of seconds). Wait for
-        // the port to accept connections before loading, otherwise the WebView
-        // would render a connection error and never retry.
-        new Thread(() -> {
-            if (!waitForServer(20_000)) {
-                android.util.Log.w("Atif", "server not ready after 20s, loading anyway");
+        // First launch boots Python + uvicorn (a couple of seconds). The
+        // splash shows live status; on timeout or failure the error screen
+        // appears - the WebView never renders a dead connection page.
+        startBoot();
+    }
+
+    /**
+     * (Re)start the embedded server and run the splash -> page sequence.
+     * A RETRY calls this again: run_server clears its started guard after a
+     * failure, and stale boot threads from earlier attempts stop themselves
+     * through the generation counter.
+     */
+    private void startBoot() {
+        final int gen = ++bootGen;
+        bootError = null;
+        pageLoaded = false;
+        if (bootSplash != null) {
+            bootSplash.setVisibility(View.VISIBLE);
+        }
+        if (bootErrorView != null) {
+            bootErrorView.setVisibility(View.GONE);
+        }
+        if (web != null) {
+            web.setVisibility(View.INVISIBLE);
+        }
+        setBootStatus("Starting the offline engine...");
+
+        // llama-server / whisper-cli ship as JNI libs (jniLibs/<abi>/lib*.so)
+        // so the installer extracts them into nativeLibraryDir, which is one
+        // of the few app-owned locations Android still allows execve() from.
+        final String dataDir = getFilesDir().getAbsolutePath();
+        lastLlamaBin = resolveNativeLib("libllama-server.so");
+        lastWhisperBin = resolveNativeLib("libwhisper-cli.so");
+
+        final AtomicReference<String> pyErr = new AtomicReference<>();
+        Thread server = new Thread(() -> {
+            try {
+                Python.getInstance().getModule("run_server")
+                        .callAttr("start", dataDir, lastLlamaBin, lastWhisperBin);
+            } catch (Throwable t) {
+                String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
+                pyErr.set(msg);
+                android.util.Log.e("Atif", "server boot failed: " + msg, t);
+                if (gen == bootGen) {
+                    showBootError("The offline engine failed to start.\n" + msg);
+                }
             }
+        }, "python-server");
+        server.setDaemon(true);
+        server.start();
+
+        new Thread(() -> {
+            setBootStatus("Waiting for the offline engine...");
+            long deadline = System.currentTimeMillis() + BOOT_TIMEOUT_MS;
+            boolean up = false;
+            while (System.currentTimeMillis() < deadline && gen == bootGen) {
+                if (pyErr.get() != null) {
+                    return; // error screen already shown by the server thread
+                }
+                if (portOpen()) {
+                    up = true;
+                    break;
+                }
+                try {
+                    Thread.sleep(250);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            if (gen != bootGen) {
+                return; // a RETRY superseded this attempt
+            }
+            if (!up) {
+                String reason = pyErr.get() != null
+                        ? "The offline engine failed to start.\n" + pyErr.get()
+                        : "The offline engine did not respond within "
+                                + (BOOT_TIMEOUT_MS / 1000)
+                                + " seconds. It may still be busy, or the device "
+                                + "may be low on storage.";
+                showBootError(reason);
+                return;
+            }
+            setBootStatus("Loading interface...");
             probeOfflineStt();
-            web.post(() -> web.loadUrl(SERVER_URL));
-        }).start();
+            if (gen != bootGen) {
+                return;
+            }
+            web.post(() -> {
+                if (gen != bootGen) {
+                    return;
+                }
+                web.setVisibility(View.VISIBLE);
+                web.loadUrl(SERVER_URL);
+                // Never a silent dark screen: if the first page takes long,
+                // the status line says so instead of freezing.
+                bootStatus.postDelayed(() -> {
+                    if (gen == bootGen && !pageLoaded && bootError == null) {
+                        setBootStatus("Loading interface... (still working)");
+                    }
+                }, 8000);
+            });
+        }, "boot-wait").start();
+    }
+
+    /** Update the splash status line; safe from any thread. */
+    private void setBootStatus(final String text) {
+        if (bootStatus == null) {
+            return;
+        }
+        bootStatus.post(() -> bootStatus.setText(text));
+    }
+
+    /** Leave the splash for the error screen with an honest explanation. */
+    private void showBootError(final String detail) {
+        bootError = detail;
+        runOnUiThread(() -> {
+            if (bootSplash != null) {
+                bootSplash.setVisibility(View.GONE);
+            }
+            if (bootErrorView != null) {
+                bootErrorView.setVisibility(View.VISIBLE);
+            }
+            if (bootErrorDetail != null) {
+                bootErrorDetail.setText(detail
+                        + "\n\nTap RETRY to try again, or copy the diagnostics "
+                        + "and share them when asking for help.");
+            }
+        });
+    }
+
+    private static boolean portOpen() {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", 8770), 250);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Everything worth pasting into a bug report; never throws. */
+    private String collectDiagnostics() {
+        StringBuilder sb = new StringBuilder("Atif Assistant diagnostics\n");
+        try {
+            sb.append("time: ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                    .format(new Date())).append('\n');
+        } catch (Throwable ignored) { /* absurd clock */ }
+        sb.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append(", Android ").append(Build.VERSION.RELEASE)
+                .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
+        try {
+            android.content.pm.PackageInfo pi =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+            sb.append("version: ").append(pi.versionName).append('\n');
+        } catch (Throwable ignored) { /* package manager hiccups */ }
+        try {
+            long free = getFilesDir().getUsableSpace();
+            sb.append("storage free: ").append(free / 1048576).append(" MB\n");
+        } catch (Throwable ignored) { /* ignore */ }
+        sb.append("llama-server: ")
+                .append(lastLlamaBin == null || lastLlamaBin.isEmpty() ? "missing" : "present")
+                .append('\n');
+        sb.append("whisper-cli: ")
+                .append(lastWhisperBin == null || lastWhisperBin.isEmpty() ? "missing" : "present")
+                .append('\n');
+        sb.append("boot error: ")
+                .append(bootError == null ? "unknown" : bootError)
+                .append('\n');
+        sb.append("\n--- logcat (this app) ---\n").append(logcatTail());
+        return sb.toString();
+    }
+
+    /** Last few hundred of our own app's logcat lines; never throws. */
+    private String logcatTail() {
+        Process p = null;
+        try {
+            p = new ProcessBuilder(
+                    "logcat", "-d", "-t", "400",
+                    "--pid=" + android.os.Process.myPid())
+                    .redirectErrorStream(true)
+                    .start();
+            ByteArrayOutputStream buf = new ByteArrayOutputStream(16384);
+            InputStream in = p.getInputStream();
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = in.read(chunk)) > 0) {
+                buf.write(chunk, 0, n);
+            }
+            in.close();
+            String all = buf.toString(StandardCharsets.UTF_8.name());
+            if (all.length() > 8000) {
+                all = all.substring(all.length() - 8000);
+            }
+            return all.isEmpty() ? "(no logcat output)" : all;
+        } catch (Throwable t) {
+            return "(logcat unavailable: " + t + ")";
+        } finally {
+            if (p != null) {
+                p.destroy();
+            }
+        }
     }
 
     /** Cache whether the server has whisper + a model, so listen() can choose. */
@@ -134,28 +381,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static boolean waitForServer(long timeoutMs) {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
-            try (Socket socket = new Socket()) {
-                socket.connect(new InetSocketAddress("127.0.0.1", 8770), 250);
-                return true;
-            } catch (Exception e) {
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                }
-            }
-        }
-        return false;
-    }
-
     /**
      * Absolute path of an extracted JNI lib, or "" when this build/ABI does
      * not ship one. nativeLibraryDir is installer-managed and executable,
-     * unlike the app's own files dir.
+     * unlike the app's own files dir: writing the libs into filesDir instead
+     * would hit the API 29+ W^X block (Permission denied from the app, even
+     * though run-as can exec it).
      */
     private String resolveNativeLib(String libName) {
         File lib = new File(getApplicationInfo().nativeLibraryDir, libName);
