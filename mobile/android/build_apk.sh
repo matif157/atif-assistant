@@ -57,12 +57,14 @@ export PATH="$SDK/platform-tools:$SDK/cmdline-tools/latest/bin:$PATH"
 log "Accepting SDK licenses and installing platform/build-tools/NDK"
 yes | sdkmanager --licenses >/dev/null 2>&1 || true
 # NDK 26.1: what AGP 8.5 defaults to; also the toolchain llama.cpp/whisper
-# will be cross-compiled with in M2/M3.
-sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" >/dev/null
+# will be cross-compiled with in M2/M3. android-36: compileSdk/targetSdk for
+# the Play targetSdk-36 deadline (AGP's suppress flag lives in gradle.properties).
+sdkmanager "platform-tools" "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "ndk;26.1.10909125" >/dev/null
 
 # ------------------------------------------------------------- 3. Gradle
-# Build with the committed wrapper (pinned Gradle 8.7, what AGP 8.5.2
-# expects) so the machine's own Gradle version can never break the build.
+# Build with the committed wrapper (pinned Gradle 8.13, what AGP 8.13.2 /
+# Chaquopy 16.1.0 expect) so the machine's own Gradle version can never
+# break the build.
 if [ ! -x ./gradlew ]; then
   echo "gradlew wrapper missing — run:  gradle wrapper --gradle-version 8.7" >&2
   exit 1

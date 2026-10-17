@@ -5,6 +5,14 @@
          app works fully offline without it. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Declared here too: the runtime request in onCreate is silently denied
+         while the permission is absent from the manifest, which would drop
+         every reminder notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Foreground service: keeps the embedded Python engine alive (and its
+         loopback server reachable) while the app is backgrounded. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:label="Atif Assistant"
@@ -25,5 +33,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Holds the app (and the embedded engine) in the foreground so chat,
+             voice and the loopback server keep working when backgrounded. -->
+        <service
+            android:name=".EngineService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Persistent offline assistant engine serving on-device chat, speech and local reminders." />
+        </service>
     </application>
 </manifest>

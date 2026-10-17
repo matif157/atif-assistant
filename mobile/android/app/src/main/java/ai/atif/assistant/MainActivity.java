@@ -111,6 +111,79 @@ public class MainActivity extends Activity {
     private static final int STT_MIN_MS = 400;
     private static final long BOOT_TIMEOUT_MS = 25_000;
 
+    /**
+     * targetSdk 35+ is edge-to-edge: content draws behind the status and
+     * navigation bars unless the insets are consumed here. Pad the root view
+     * with the system-bar insets (IME included, so adjustResize-style keyboard
+     * lift keeps working) and force *light* icons off: the theme is Material
+     * Light but every screen is dark, so dark icons would be invisible on the
+     * transparent bars.
+     */
+    private void applyEdgeToEdge() {
+        final View root = findViewById(android.R.id.content);
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+            root.setOnApplyWindowInsetsListener((v, insets) -> {
+                android.graphics.Insets bars = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars()
+                                | android.view.WindowInsets.Type.ime());
+                v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return insets;
+            });
+            android.view.WindowInsetsController c =
+                    getWindow().getInsetsController();
+            if (c != null) {
+                c.setSystemBarsAppearance(
+                        0,
+                        android.view.WindowInsetsController
+                                .APPEARANCE_LIGHT_STATUS_BARS
+                                | android.view.WindowInsetsController
+                                .APPEARANCE_LIGHT_NAVIGATION_BARS);
+            }
+        } else {
+            // API 24-29: same contract via the legacy layout flags (the
+            // enforcement itself only exists on API 35+, but opting out
+            // manually keeps behaviour identical across versions).
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+            root.setOnApplyWindowInsetsListener((v, insets) -> {
+                v.setPadding(
+                        insets.getSystemWindowInsetLeft(),
+                        insets.getSystemWindowInsetTop(),
+                        insets.getSystemWindowInsetRight(),
+                        insets.getSystemWindowInsetBottom());
+                return insets;
+            });
+            getWindow().getDecorView().setSystemUiVisibility(
+                    getWindow().getDecorView().getSystemUiVisibility()
+                            & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                            & ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        }
+        // No-op on 35+ (bars are forced transparent there); keeps 24-34
+        // matching the app background instead of the theme's light colour.
+        getWindow().setStatusBarColor(0xFF0B0E14);
+        getWindow().setNavigationBarColor(0xFF0B0E14);
+    }
+
+    /**
+     * Raises the foreground service so the embedded engine (and its loopback
+     * server) survives backgrounding instead of being frozen within minutes.
+     */
+    private void startEngineService() {
+        try {
+            Intent svc = new Intent(this, EngineService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(svc);
+            } else {
+                startService(svc);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("Atif", "engine service not started", t);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -125,6 +198,8 @@ public class MainActivity extends Activity {
         }
 
         setContentView(R.layout.activity_main);
+        applyEdgeToEdge();
+        startEngineService();
         // Phase 6: reminder notifications need the runtime grant on 13+.
         // Asking once at launch is deliberate - the engine polls reminders
         // from the first minute and a denied permission would drop them.

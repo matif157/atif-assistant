@@ -13,7 +13,7 @@ if (ksFile.exists()) {
 
 android {
     namespace "ai.atif.assistant"
-    compileSdk 34
+    compileSdk 36
 
     signingConfigs {
         if (ksFile.exists()) {
@@ -29,9 +29,9 @@ android {
     defaultConfig {
         applicationId "ai.atif.assistant"
         minSdk 24
-        targetSdk 34
-        versionCode 2
-        versionName "1.0.0"
+        targetSdk 36
+        versionCode 3
+        versionName "1.1.0"
         // arm64 only: every phone that can run a 1.5B model, plus the arm64
         // emulator. Chaquopy insists these live in defaultConfig (buildType
         // filters are ignored), so x86_64 images are not supported - use an

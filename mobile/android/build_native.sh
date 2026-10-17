@@ -53,6 +53,8 @@ cmake -S "$SRC" -B "$SRC/build-$ABI" \
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
   -DLLAMA_BUILD_SERVER=ON \
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
   -DLLAMA_BUILD_TOOLS=ON \
   -DLLAMA_BUILD_UI=OFF
 cmake --build "$SRC/build-$ABI" --target llama-server -j "$JOBS"
@@ -90,6 +92,8 @@ cmake -S "$WSRC" -B "$WSRC/build-$ABI" \
   -DGGML_NATIVE=OFF \
   -DGGML_OPENMP=OFF \
   -DGGML_CCACHE=OFF \
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
   -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16 \
   -DWHISPER_SDL2=OFF \
   -DBUILD_SHARED_LIBS=OFF
