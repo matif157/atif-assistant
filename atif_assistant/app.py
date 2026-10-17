@@ -10,13 +10,14 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -36,6 +37,33 @@ from .llm import (
 )
 
 app = FastAPI(title="Atif Assistant", version="0.1.0")
+
+
+@app.middleware("http")
+async def web_password_gate(request: Request, call_next):
+    """Optional gate for public URLs (tunnels, hosted deployments).
+
+    Set ``ATIF_ASSISTANT_WEB_PASSWORD`` and every request needs HTTP Basic
+    auth — the browser prompts once and then attaches the header to all
+    fetches automatically, so the UI needs no changes. Unset = no gate,
+    which keeps local/Tailscale use exactly as before.
+    """
+    expected = os.environ.get("ATIF_ASSISTANT_WEB_PASSWORD", "")
+    if not expected:
+        return await call_next(request)
+    header = request.headers.get("authorization", "")
+    if header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8")
+            _user, _sep, password = decoded.partition(":")
+            if secrets.compare_digest(password, expected):
+                return await call_next(request)
+        except Exception:  # noqa: BLE001 - malformed header just fails the gate
+            pass
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Atif Assistant"'},
+    )
 
 
 class Ask(BaseModel):

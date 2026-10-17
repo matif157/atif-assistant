@@ -13,8 +13,8 @@ A personal intelligence system. Persistent memory, a Reality Engine that
 labels every claim, a Challenge Mode that argues against you, and a Pattern
 Radar that notices recurring behaviour before you do.
 
-One codebase, three deployments: the Mac app (`./run.sh`), the hosted web
-version (this Space), and the offline Android APK — all served from the same
+One codebase, three deployments: the Mac app (`./run.sh`), the public web URL
+(`./web-tunnel.sh`), and the offline Android APK — all served from the same
 `web/` UI and `atif_assistant/` package. Memory stays where you run it.
 
 ---
@@ -37,6 +37,24 @@ cp .env.example .env
 
 Without a key, Atif Assistant still runs: retrieval, the Pattern Radar, the brake and
 memory search all work. Only free-text generation is disabled.
+
+### Access from anywhere (public web URL)
+
+```bash
+./run.sh          # terminal 1 — server on 127.0.0.1:8770
+./web-tunnel.sh   # terminal 2 — prints a public https:// URL
+```
+
+Free and accountless: the script tries a Cloudflare quick tunnel first and
+falls back to an SSH tunnel (localhost.run) when Cloudflare's API is
+unreachable. The URL changes on every restart, so share it only with people
+you trust — and the app itself asks for the password from
+`ATIF_ASSISTANT_WEB_PASSWORD` in `.env` (browser login prompt, one per
+device). The Mac must be awake and `./run.sh` running for the URL to work.
+
+`GET /api/backup?token=…` (set `ATIF_ASSISTANT_BACKUP_TOKEN` in `.env`)
+downloads memory + uploads as a zip — the export/restore path for any
+deployment.
 
 ---
 
