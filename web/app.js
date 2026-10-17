@@ -4514,23 +4514,90 @@ async function healthTick() {
   }
 }
 
+/* ------------------------------------------------- conversations (sessions) */
+
+/** Render the active conversation from the server. Used at boot and after a
+ *  switch; tolerates empty history and an unreachable engine. */
+async function loadSessionHistory() {
+  if (!session) return;
+  try {
+    const hr = await fetch(`/api/history/${session}`);
+    const { messages } = await hr.json();
+    for (const m of messages || []) {
+      if (m.role === "user") addUser(m.content);
+      else addBot({ text: m.content, warnings: [] });
+    }
+  } catch { /* no history: start clean */ }
+}
+
+/** Clear the thread and forget the session id; the next ask creates a new
+ *  conversation server-side. */
+function startNewChat() {
+  session = null;
+  try { localStorage.removeItem("atif-assistant.session"); } catch { /* private mode */ }
+  chat.innerHTML = "";
+  document.getElementById("history-sheet").hidden = true;
+  document.getElementById("input")?.focus();
+}
+
+function switchSession(sid) {
+  if (!sid) return;
+  session = sid;
+  try { localStorage.setItem("atif-assistant.session", sid); } catch { /* private mode */ }
+  chat.innerHTML = "";
+  document.getElementById("history-sheet").hidden = true;
+  loadSessionHistory();
+}
+
+function renderSessions(list) {
+  const box = document.getElementById("history-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!list.length) {
+    box.textContent = "No conversations yet - tap NEW to start the first one.";
+    return;
+  }
+  for (const s of list) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "history-item" + (s.session === session ? " sel" : "");
+    const prev = document.createElement("span");
+    prev.className = "h-prev";
+    prev.textContent = s.last_message || "(empty)";
+    const meta = document.createElement("span");
+    meta.className = "h-meta";
+    const when = (s.last_at || "").slice(0, 16).replace("T", " ");
+    const n = s.messages || 0;
+    meta.textContent = `${n} message${n === 1 ? "" : "s"}${when ? " · " + when : ""}`;
+    item.append(prev, meta);
+    item.addEventListener("click", () => switchSession(s.session));
+    box.appendChild(item);
+  }
+}
+
+document.getElementById("btn-new-chat")?.addEventListener("click", startNewChat);
+document.getElementById("close-history")?.addEventListener("click", () => {
+  document.getElementById("history-sheet").hidden = true;
+});
+document.getElementById("btn-history")?.addEventListener("click", async () => {
+  const sheetEl = document.getElementById("history-sheet");
+  const box = document.getElementById("history-list");
+  sheetEl.hidden = false;
+  if (box) box.textContent = "Loading...";
+  try {
+    const res = await fetch("/api/sessions");
+    renderSessions((await res.json()).sessions || []);
+  } catch {
+    if (box) box.textContent = "Could not load conversations. Is the engine running?";
+  }
+});
+
 /* boot */
 (async function init() {
   await loadSettings();
   loadVoices();
   await healthTick();
-  try {
-    if (session) {
-      const hr = await fetch(`/api/history/${session}`);
-      const { messages } = await hr.json();
-      if (messages?.length) {
-        for (const m of messages) {
-          if (m.role === "user") addUser(m.content);
-          else addBot({ text: m.content, warnings: [] });
-        }
-      }
-    }
-  } catch { /* no history: start clean */ }
+  await loadSessionHistory();
 })();
 
 // Keep the status fresh and recover automatically when the engine comes

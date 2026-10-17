@@ -816,6 +816,7 @@ def test_web_sync() -> None:
         "setup-dl", "setup-pause", "setup-start", "setup-skip",
         "setup-lock-row", "setup-lock-btn",
         "lock-setting-row", "set-applock", "dot", "statusline",
+        "btn-new-chat", "btn-history", "history-sheet", "history-list",
     )
     for el in critical:
         check(
@@ -849,6 +850,93 @@ def test_web_sync() -> None:
     check("every bridge call exists in MainActivity", not missing_m)
     if missing_m:
         print("       missing: " + ", ".join(missing_m))
+
+
+def test_sessions_feedback() -> None:
+    """Conversations browsing and per-message feedback plumbing (Phase 1).
+
+    The history sheet only works if sessions list with previews and counts;
+    the future reflection loop only works if feedback kinds are validated at
+    the API boundary instead of in the UI. Both depend on history exposing
+    message ids, which the feedback UI will target.
+    """
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    tmp = tempfile.mkdtemp()
+    db.use_test_db(Path(tmp) / "sess.db")
+    db.init_db()
+    try:
+        client = TestClient(app)
+
+        # Two conversations; sessB holds the newest activity (last insert).
+        db.save_message("sessA", "user", "first question from A")
+        db.save_message("sessA", "assistant", "first answer to A")
+        db.save_message("sessA", "user", "another line from A")
+        last_id = db.save_message("sessB", "user", "the newest question belongs to B")
+
+        sessions = client.get("/api/sessions").json()["sessions"]
+        check("two sessions listed", len(sessions) == 2)
+        check("newest activity listed first", sessions[0]["session"] == "sessB")
+        by_id = {s["session"]: s for s in sessions}
+        check(
+            "session carries message count",
+            by_id["sessA"]["messages"] == 3 and by_id["sessB"]["messages"] == 1,
+        )
+        check(
+            "session preview is its last message",
+            by_id["sessA"]["last_message"] == "another line from A"
+            and by_id["sessB"]["last_message"] == "the newest question belongs to B",
+        )
+
+        # History exposes message ids (feedback targets) and stays isolated.
+        hist_b = client.get("/api/history/sessB").json()["messages"]
+        check("history exposes message ids", bool(hist_b) and hist_b[0]["id"] == last_id)
+        hist_a = client.get("/api/history/sessA").json()["messages"]
+        check(
+            "sessions do not leak into each other",
+            len(hist_a) == 3
+            and all("belongs to B" not in m["content"] for m in hist_a),
+        )
+
+        # Feedback: valid kinds stored, invalid rejected at the boundary.
+        ok = client.post(
+            "/api/feedback",
+            json={"kind": "down", "message_id": last_id,
+                  "session": "sessB", "note": "too long"},
+        )
+        check("feedback accepted", ok.status_code == 200 and ok.json().get("ok"))
+        bad = client.post("/api/feedback", json={"kind": "shrug"})
+        check("unknown feedback kind rejected", bad.status_code == 400)
+        bad2 = client.post("/api/feedback", json={"kind": "up", "message_id": "x"})
+        check("non-numeric message id rejected", bad2.status_code == 400)
+
+        pending = client.get(
+            "/api/feedback", params={"unapplied": "true"}
+        ).json()["feedback"]
+        check(
+            "unapplied feedback retrievable",
+            len(pending) == 1 and pending[0]["kind"] == "down",
+        )
+        db.mark_feedback_applied(pending[0]["id"])
+        check(
+            "applied feedback leaves the pending queue",
+            client.get("/api/feedback", params={"unapplied": "true"}).json()["feedback"] == [],
+        )
+
+        # The whitelist lives in db, so writer and reader always agree.
+        try:
+            db.save_feedback("nope")
+            raised = False
+        except ValueError:
+            raised = True
+        check("db refuses unknown feedback kind", raised)
+    finally:
+        db.reset_db_path()
 
 
 def test_extended_api() -> None:
@@ -2782,6 +2870,7 @@ def main() -> int:
     test_isolation()
     test_remote_web()
     test_web_sync()
+    test_sessions_feedback()
     test_extended_api()
     test_location()
     test_uploads()

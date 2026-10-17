@@ -268,6 +268,20 @@ CREATE TABLE IF NOT EXISTS voiceprints (
     updated_at TEXT NOT NULL
 );
 
+-- Per-message signals from the user (thumbs, edits, regeneration asks).
+-- The self-improvement loop consumes these and sets `applied`, so a signal
+-- is never processed twice. Raw interaction data like `messages`: excluded
+-- from the curated-memory backup on purpose.
+CREATE TABLE IF NOT EXISTS feedback (
+    id         INTEGER PRIMARY KEY,
+    message_id INTEGER,
+    session    TEXT,
+    kind       TEXT NOT NULL,
+    note       TEXT,
+    applied    INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
 -- the message it came from instead of only carrying a confidence number.
 CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
@@ -286,6 +300,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session);
+CREATE INDEX IF NOT EXISTS idx_feedback_applied ON feedback(applied);
 CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source);
 CREATE INDEX IF NOT EXISTS idx_evidence_at ON evidence(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_decisions_review ON decisions(review_date);
@@ -1042,9 +1057,9 @@ def save_message(
     content: str,
     labels: Any = None,
     patterns: Any = None,
-) -> None:
+) -> int:
     conn = connect()
-    conn.execute(
+    cur = conn.execute(
         """INSERT INTO messages(session, role, content, labels, patterns, created_at)
            VALUES (?,?,?,?,?,?)""",
         (
@@ -1057,16 +1072,81 @@ def save_message(
         ),
     )
     conn.commit()
+    return int(cur.lastrowid)
 
 
 def history(session: str, limit: int = 12) -> list[dict[str, Any]]:
     conn = connect()
     rows = conn.execute(
-        """SELECT role, content, created_at FROM messages
+        """SELECT id, role, content, created_at FROM messages
            WHERE session=? ORDER BY id DESC LIMIT ?""",
         (session, limit),
     ).fetchall()
     return [dict(r) for r in reversed(rows)]
+
+
+def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
+    """Conversations, newest activity first, with a one-line preview.
+
+    Single grouped query: no N+1 fetch per session, which matters on a phone
+    where the first paint of the history sheet must not stall the UI.
+    """
+    conn = connect()
+    rows = conn.execute(
+        """SELECT m.session AS session,
+                  COUNT(*) AS messages,
+                  MAX(m.id) AS last_id,
+                  MAX(m.created_at) AS last_at,
+                  (SELECT content FROM messages
+                     WHERE session = m.session
+                     ORDER BY id DESC LIMIT 1) AS last_message
+           FROM messages m
+           GROUP BY m.session
+           ORDER BY last_id DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# Signal kinds the UI may record. Anything else is a client bug, rejected at
+# the API boundary so the reflection loop never reads garbage rows.
+FEEDBACK_KINDS = ("up", "down", "edit", "regenerate", "note")
+
+
+def save_feedback(
+    kind: str,
+    message_id: int | None = None,
+    session: str | None = None,
+    note: str | None = None,
+) -> int:
+    if kind not in FEEDBACK_KINDS:
+        raise ValueError(f"unknown feedback kind: {kind!r}")
+    conn = connect()
+    cur = conn.execute(
+        """INSERT INTO feedback(message_id, session, kind, note, applied, created_at)
+           VALUES (?,?,?,?,0,?)""",
+        (message_id, session, kind, note, now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_feedback(limit: int = 100, only_unapplied: bool = False) -> list[dict[str, Any]]:
+    conn = connect()
+    where = "WHERE applied=0" if only_unapplied else ""
+    rows = conn.execute(
+        f"""SELECT * FROM feedback {where}
+            ORDER BY id DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_feedback_applied(feedback_id: int) -> None:
+    conn = connect()
+    conn.execute("UPDATE feedback SET applied=1 WHERE id=?", (feedback_id,))
+    conn.commit()
 
 
 COUNTED_TABLES = (
@@ -1089,6 +1169,7 @@ COUNTED_TABLES = (
     "places",
     "location_points",
     "routines",
+    "feedback",
 )
 
 

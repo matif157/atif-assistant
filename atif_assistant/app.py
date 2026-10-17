@@ -785,6 +785,47 @@ def history(session: str) -> dict:
     return {"messages": db.history(session)}
 
 
+@app.get("/api/sessions")
+def sessions(limit: int = 50) -> dict:
+    """Conversations with preview, newest first (history sheet + NEW CHAT)."""
+    return {"sessions": db.list_sessions(limit=min(max(limit, 1), 200))}
+
+
+@app.post("/api/feedback")
+def record_feedback(payload: dict) -> JSONResponse:
+    """A per-message user signal (thumbs / edit / regenerate / note).
+
+    Validation lives here, not in the UI: the reflection loop in a later
+    phase reads this table and must never see an unknown kind.
+    """
+    kind = payload.get("kind")
+    if kind not in db.FEEDBACK_KINDS:
+        return JSONResponse(
+            {"ok": False, "error": f"kind must be one of {list(db.FEEDBACK_KINDS)}"},
+            status_code=400,
+        )
+    try:
+        message_id = payload.get("message_id")
+        fid = db.save_feedback(
+            kind=str(kind),
+            message_id=int(message_id) if message_id is not None else None,
+            session=payload.get("session"),
+            note=payload.get("note"),
+        )
+    except (TypeError, ValueError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "id": fid}
+
+
+@app.get("/api/feedback")
+def feedback(limit: int = 100, unapplied: bool = False) -> dict:
+    return {
+        "feedback": db.list_feedback(
+            limit=min(max(limit, 1), 500), only_unapplied=unapplied
+        )
+    }
+
+
 @app.get("/api/evidence")
 def evidence(q: str = "", limit: int = 20) -> JSONResponse:
     """Search the raw source lines behind stored memory."""

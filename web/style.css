@@ -235,6 +235,44 @@ textarea:focus { outline: none; border-color: var(--acc); }
   font: inherit;
 }
 #mem-results { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+/* Conversations sheet: thumb-friendly rows with a one-line preview. */
+.history-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  -webkit-overflow-scrolling: touch;
+}
+.history-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 12px;
+  color: var(--txt);
+  font: inherit;
+  cursor: pointer;
+}
+.history-item:active,
+.history-item.sel { border-color: var(--acc); }
+.history-item .h-prev {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+.history-item .h-meta {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--dim);
+}
 /* Rules list: without this the fixed sheet grew past the screen with no
    way to scroll - long rule sets were unreachable on a phone. */
 #rules-body {

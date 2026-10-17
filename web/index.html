@@ -86,6 +86,8 @@
     <button class="ghost" id="btn-upload" title="Upload a file" style="display:none">UPLOAD</button>
     <button class="ghost" id="btn-import" title="Import local data" style="display:none">IMPORT</button>
     <button class="ghost" id="btn-call" title="Hands-free voice call">CALL</button>
+    <button class="ghost" id="btn-new-chat" title="Start a new conversation">NEW</button>
+    <button class="ghost" id="btn-history" title="Past conversations">HISTORY</button>
     <button class="ghost" id="btn-settings" title="Settings">SETTINGS</button>
   </nav>
 </header>
@@ -125,6 +127,14 @@
     <button class="ghost" id="close-memory">CLOSE</button>
   </div>
   <div id="mem-results"></div>
+</div>
+
+<div class="sheet" id="history-sheet" hidden>
+  <div class="sheet-head">
+    <strong>CONVERSATIONS / گفتگوییں</strong>
+    <button class="ghost" id="close-history">CLOSE</button>
+  </div>
+  <div class="history-list" id="history-list"></div>
 </div>
 
 <div class="sheet" id="insights-sheet" hidden>
