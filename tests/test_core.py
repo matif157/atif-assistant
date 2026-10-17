@@ -838,6 +838,7 @@ def test_web_sync() -> None:
         "setup-lock-row", "setup-lock-btn",
         "lock-setting-row", "set-applock", "dot", "statusline",
         "btn-new-chat", "btn-history", "history-sheet", "history-list",
+        "btn-home", "home-sheet", "home-body",
     )
     for el in critical:
         check(
@@ -1411,6 +1412,270 @@ def test_reflection() -> None:
                 ),
             )
         finally:
+            db.reset_db_path()
+
+
+def test_home() -> None:
+    """/api/home (Phase 5): the dashboard's single round trip carries today's
+    activity, growth pending count and recent sessions - and a fresh install
+    answers with zeros instead of failing."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\nhome dashboard")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "home.db")
+        db.init_db()
+        client = TestClient(app)
+        try:
+            # zero state first: nothing has happened yet.
+            empty = client.get("/api/home").json()
+            check("zero-state home answers", client.get("/api/home").status_code == 200)
+            check("zero-state today is zero", empty["today"] == {"messages": 0, "questions": 0})
+            check("zero-state has no recent", empty["recent"] == [])
+            check("zero-state mood is null", empty["mood"] is None)
+
+            db.save_message("h1", "user", "hello home")
+            db.save_message("h1", "assistant", "[FACT] hi")
+            db.record_question("social", "hello home")
+
+            res = client.get("/api/home").json()
+            check(
+                "today counts this session's rows",
+                res["today"]["messages"] == 2 and res["today"]["questions"] == 1,
+            )
+            check(
+                "all-time aggregates present",
+                res["sessions"] == 1 and res["messages"] == 2 and res["evidence"] == 0,
+            )
+            check("growth pending is an int", isinstance(res["pending_reflections"], int))
+            check("feedback map is a dict", isinstance(res["feedback"], dict))
+            check("due decisions counted", res["due_decisions"] == 0)
+            check(
+                "recent sessions listed newest-first",
+                [s["session"] for s in res["recent"]] == ["h1"]
+                and res["recent"][0]["messages"] == 2,
+            )
+            check("date stamped ISO", len(res["date"]) == 10)
+        finally:
+            db.reset_db_path()
+
+
+def test_ask_stream() -> None:
+    """/api/ask/stream (Phase 5): deltas then one final event; sectioned
+    modes arrive as a single final; STOP keeps the question and flags the
+    partial answer instead of losing the turn or shipping it as complete.
+    """
+    import asyncio
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, engine, learn
+    from atif_assistant.app import app
+
+    print("\nask stream")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "stream.db")
+        db.init_db()
+        client = TestClient(app)
+
+        async def fake_complete(messages, **kw):
+            return "[FACT] Blocking stub answer.", "groq"
+
+        chunks = (
+            "[FACT] Streamed ", "answer ", "in ", "six ", "small ", "parts."
+        )
+
+        async def fake_stream(messages, **kw):
+            async def deltas():
+                for c in chunks:
+                    await asyncio.sleep(0.05)
+                    yield c
+            return "groq", deltas()
+
+        orig = (engine.complete, engine.complete_stream, learn.complete)
+        engine.complete = fake_complete
+        engine.complete_stream = fake_stream
+        learn.complete = fake_complete
+        try:
+            # 1. ask mode: deltas in order, exactly one final, last event.
+            with client.stream(
+                "POST",
+                "/api/ask/stream",
+                json={"question": "what is photosynthesis", "session": "st-s"},
+            ) as resp:
+                ctype = resp.headers.get("content-type", "")
+                check("stream responds ndjson", "ndjson" in ctype)
+                events = [_json.loads(l) for l in resp.iter_lines() if l.strip()]
+            deltas = [e for e in events if "delta" in e]
+            finals = [e for e in events if "final" in e]
+            check("all deltas arrive before one final", len(deltas) == len(chunks) and len(finals) == 1)
+            check("final is the last event", "final" in events[-1])
+            joined = "".join(d["delta"] for d in deltas)
+            check("deltas concatenate to the draft", joined == "".join(chunks))
+            fin = finals[0]["final"]
+            check("final carries the full text", fin["text"] == "".join(chunks))
+            check("final carries route and language", "route" in fin and "language" in fin)
+            hist = client.get("/api/history/st-s").json()["messages"]
+            check("stream exchange persisted", len(hist) == 2 and hist[1]["role"] == "assistant")
+            check(
+                "final exposes message ids for feedback buttons",
+                isinstance(fin.get("message_id"), int)
+                and isinstance(fin.get("user_message_id"), int),
+            )
+
+            # 2. challenge mode: sectioned output needs the whole answer -
+            #    a single final event, no deltas.
+            with client.stream(
+                "POST", "/api/ask/stream", json={"question": "why am i like this"}
+            ) as resp:
+                ev2 = [_json.loads(l) for l in resp.iter_lines() if l.strip()]
+            check(
+                "challenge emits one final only",
+                len(ev2) == 1
+                and "final" in ev2[0]
+                and ev2[0]["final"]["route"]["mode"] == "challenge",
+            )
+
+            # 3. STOP is exercised over a real socket in
+            #    test_ask_stop_disconnect() - TestClient drains the app
+            #    instead of delivering a disconnect, so it can't test STOP.
+
+            # 4. blocking endpoint is intact alongside the stream one.
+            r = client.post("/api/ask", json={"question": "what is sqlite"})
+            check("blocking ask still answers", "Blocking stub answer" in r.json().get("text", ""))
+        finally:
+            engine.complete, engine.complete_stream, learn.complete = orig
+            db.reset_db_path()
+
+
+def test_ask_stop_disconnect() -> None:
+    """STOP over a real socket: aborting the stream mid-answer must leave the
+    question plus a flagged partial behind, and never a silently-complete one.
+
+    TestClient drains the ASGI app instead of delivering a client disconnect,
+    so this single test boots uvicorn in-process on an ephemeral port and
+    closes the connection for real - which is exactly what the phone's
+    AbortController does.
+    """
+    import asyncio
+    import socket
+    import threading
+    import time
+
+    import httpx
+    import uvicorn
+
+    from atif_assistant import db, engine, learn
+    from atif_assistant.app import app
+
+    print("\nask stop (real disconnect)")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "stop.db")
+        db.init_db()
+
+        async def fake_complete(messages, **kw):
+            return "[FACT] Blocking stub answer.", "groq"
+
+        # Long enough that the stream cannot finish before the abort lands.
+        chunks = ("[FACT] The long story ",) + tuple(
+            f"beat {i}. " for i in range(29)
+        )
+
+        async def fake_stream(messages, **kw):
+            async def deltas():
+                for c in chunks:
+                    await asyncio.sleep(0.1)
+                    yield c
+            return "groq", deltas()
+
+        orig = (engine.complete, engine.complete_stream, learn.complete)
+        engine.complete = fake_complete
+        engine.complete_stream = fake_stream
+        learn.complete = fake_complete
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+        thread = threading.Thread(
+            target=server.run, kwargs={"sockets": [sock]}, daemon=True
+        )
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+
+        ready = False
+        for _ in range(60):
+            try:
+                httpx.get(base + "/api/health", timeout=0.5)
+                ready = True
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        try:
+            check("ephemeral test server boots", ready)
+            if not ready:
+                return
+
+            # 1. stream starts, then the client yanks the connection away.
+            saw_delta = False
+            with httpx.stream(
+                "POST",
+                base + "/api/ask/stream",
+                json={
+                    "question": "how does sqlite write data to disk",
+                    "session": "stop-s",
+                },
+                timeout=5.0,
+            ) as resp:
+                for line in resp.iter_lines():
+                    if '"delta"' in line:
+                        saw_delta = True
+                        break  # __exit__ closes the socket for real
+            check("first delta arrived before the abort", saw_delta)
+
+            # 2. the server-side save happens after cancellation - poll.
+            rows: list = []
+            bot = None
+            for _ in range(50):
+                conn = db.connect()
+                rows = conn.execute(
+                    "SELECT role, content, labels FROM messages WHERE session=? ORDER BY id",
+                    ("stop-s",),
+                ).fetchall()
+                bots = [r for r in rows if r["role"] == "assistant"]
+                if bots:
+                    bot = bots[0]
+                    break
+                time.sleep(0.1)
+
+            check(
+                "question survived the abort",
+                any(r["role"] == "user" for r in rows),
+            )
+            check("partial answer persisted after stop", bot is not None)
+            if bot is not None:
+                labels = json.loads(bot["labels"]) if bot["labels"] else {}
+                check("partial flagged stopped", labels.get("stopped") is True)
+                check(
+                    "partial text is the streamed prefix",
+                    bot["content"].startswith(chunks[0]),
+                )
+                check(
+                    "no complete answer slipped through",
+                    "Blocking stub" not in bot["content"],
+                )
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+            engine.complete, engine.complete_stream, learn.complete = orig
             db.reset_db_path()
 
 
@@ -3371,6 +3636,9 @@ def main() -> int:
     test_soul_ask()
     test_style_mirror()
     test_reflection()
+    test_ask_stream()
+    test_ask_stop_disconnect()
+    test_home()
     test_extended_api()
     test_location()
     test_uploads()

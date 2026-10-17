@@ -77,6 +77,7 @@
     <span class="sub" id="statusline">personal intelligence</span>
   </div>
   <nav class="hdr-nav">
+    <button class="ghost" id="btn-home" title="Home dashboard">HOME</button>
     <button class="ghost" id="btn-memory" title="Search memory">MEM</button>
     <button class="ghost" id="btn-learned" title="Learned candidates">LEARNED</button>
     <button class="ghost" id="btn-insights" title="Insights">INSIGHTS</button>
@@ -94,7 +95,7 @@
 
 <div class="chat-wrap">
   <div class="chat-col">
-    <main id="chat"></main>
+    <main id="chat" role="log" aria-live="polite" aria-relevant="additions"></main>
     <div id="reply-options" class="reply-options" hidden></div>
   </div>
   <aside id="basis-sidebar" class="basis-sidebar" hidden>
@@ -135,6 +136,14 @@
     <button class="ghost" id="close-history">CLOSE</button>
   </div>
   <div class="history-list" id="history-list"></div>
+</div>
+
+<div class="sheet" id="home-sheet" hidden>
+  <div class="sheet-head">
+    <strong>HOME</strong>
+    <button class="ghost" id="close-home">CLOSE</button>
+  </div>
+  <div id="home-body"></div>
 </div>
 
 <div class="sheet" id="insights-sheet" hidden>

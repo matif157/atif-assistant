@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -571,8 +571,12 @@ async def _extract_in_background(question: str, answer: str, provider: str) -> N
         pass
 
 
-@app.post("/api/ask")
-async def ask(payload: Ask, background: BackgroundTasks) -> dict:
+def _prepare_ask(payload: Ask) -> dict:
+    """Route, context, language - everything generation needs.
+
+    Shared verbatim by the blocking and the streaming endpoint so the two
+    cannot diverge on routing, Urdu-first social handling, mood or style.
+    """
     session = payload.session or uuid.uuid4().hex[:12]
 
     # No mode in, no mode out. The router decides, and the user sees why.
@@ -615,25 +619,45 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     # stored fact and is labelled as a guess in the guardrails.
     if payload.speaker:
         ctx["speaker"] = {"name": payload.speaker, "score": payload.speaker_score}
-    result = await engine.respond(
-        payload.question, mode=route.mode, ctx=ctx
-    )
-    result["route"] = route.to_dict()
-    result["asked_count"] = repeats + 1
-    result["language"] = resolved_lang
+    return {
+        "question": payload.question,
+        "session": session,
+        "qclass": qclass,
+        "repeats": repeats,
+        "route": route,
+        "ctx": ctx,
+        "language": resolved_lang,
+    }
 
-    db.save_message(
-        session,
-        "user",
-        payload.question,
-        labels={
-            "route": route.mode,
-            "intent": result.get("intent"),
-            "qclass": qclass,
-        },
-        patterns=[p["name"] for p in result.get("patterns", [])],
-    )
-    db.save_message(
+
+def _finalize_ask(
+    prepared: dict,
+    result: dict,
+    background: BackgroundTasks | None,
+    *,
+    user_saved: bool = False,
+) -> dict:
+    """Persist the exchange and decorate the result (shared by both ends)."""
+    session = prepared["session"]
+    route = prepared["route"]
+    result["route"] = route.to_dict()
+    result["asked_count"] = prepared["repeats"] + 1
+    result["language"] = prepared["language"]
+
+    if not user_saved:
+        uid = db.save_message(
+            session,
+            "user",
+            prepared["question"],
+            labels={
+                "route": route.mode,
+                "intent": result.get("intent"),
+                "qclass": prepared["qclass"],
+            },
+            patterns=[p["name"] for p in result.get("patterns", [])],
+        )
+        result["user_message_id"] = uid
+    bid = db.save_message(
         session,
         "assistant",
         result["text"],
@@ -645,10 +669,12 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
         },
         patterns=[p["name"] for p in result.get("patterns", [])],
     )
+    result["message_id"] = bid
 
     result["session"] = session
     # Soul layer exposure: the mood chip in the UI, and the trajectory the
     # reflection loop will read later (Phase 4).
+    ctx = prepared["ctx"]
     result["mood"] = ctx.get("mood")
     result["mood_trajectory"] = ctx.get("mood_trajectory")
     mood = ctx.get("mood") or {}
@@ -664,14 +690,94 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     # Memory extraction runs after the response is sent. It was awaited inline
     # before, which meant a slow extra provider call delayed the answer even
     # though the comment claimed otherwise.
-    background.add_task(
-        _extract_in_background,
-        payload.question,
-        result["text"],
-        result.get("provider", "offline"),
-    )
-
+    if background is not None:
+        background.add_task(
+            _extract_in_background,
+            prepared["question"],
+            result["text"],
+            result.get("provider", "offline"),
+        )
     return result
+
+
+@app.post("/api/ask")
+async def ask(payload: Ask, background: BackgroundTasks) -> dict:
+    prepared = _prepare_ask(payload)
+    result = await engine.respond(
+        payload.question, mode=prepared["route"].mode, ctx=prepared["ctx"]
+    )
+    return _finalize_ask(prepared, result, background)
+
+
+def _save_stopped(session: str, prepared: dict, text: str) -> None:
+    """Persist a STOPPED partial answer, clearly marked, and nothing else.
+
+    The memory extractor never runs over half an answer; the marker lets the
+    UI and later phases tell a stop from a finished reply.
+    """
+    if not text.strip():
+        return
+    try:
+        db.save_message(
+            session,
+            "assistant",
+            text,
+            labels={"stopped": True, "route": prepared["route"].mode},
+            patterns=[],
+        )
+    except Exception:  # noqa: BLE001 - teardown must never raise
+        pass
+
+
+@app.post("/api/ask/stream")
+async def ask_stream(payload: Ask, background: BackgroundTasks) -> StreamingResponse:
+    """NDJSON stream: ``{"delta": ...}`` lines while the model writes, one
+    ``{"final": {...}}`` line at the end (same shape as /api/ask).
+
+    The user's question is persisted before the first delta, so a client that
+    presses STOP never loses the turn; the partial answer is saved flagged
+    ``stopped``. challenge/decide modes arrive as a single final event.
+    """
+    prepared = _prepare_ask(payload)
+    session = prepared["session"]
+
+    async def gen():
+        uid = db.save_message(
+            session,
+            "user",
+            payload.question,
+            labels={
+                "route": prepared["route"].mode,
+                "qclass": prepared["qclass"],
+            },
+            patterns=[],
+        )
+        partial: list[str] = []
+        try:
+            async for event in engine.respond_stream(
+                payload.question,
+                mode=prepared["route"].mode,
+                ctx=prepared["ctx"],
+            ):
+                if "final" in event:
+                    event["final"]["user_message_id"] = uid
+                    _finalize_ask(prepared, event["final"], background, user_saved=True)
+                    yield json.dumps(event) + "\n"
+                else:
+                    partial.append(event.get("delta", ""))
+                    yield json.dumps(event) + "\n"
+        except (GeneratorExit, asyncio.CancelledError):
+            _save_stopped(session, prepared, "".join(partial))
+            raise
+        except Exception:
+            _save_stopped(session, prepared, "".join(partial))
+            raise
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/insights")
@@ -830,11 +936,51 @@ def mood(limit: int = 50) -> dict:
     return {"mood": db.mood_timeline(limit=min(max(limit, 1), 200))}
 
 
+@app.get("/api/home")
+def home() -> dict:
+    """Home dashboard aggregate: today's shape of the assistant in one
+    round trip. Phase 6 hangs routines/notes/reminders off the same tiles."""
+    counts = db.counts()
+    moods = db.mood_timeline(30)
+    latest = None
+    for m in reversed(moods):
+        if (m.get("mood") or "neutral") != "neutral":
+            latest = m
+            break
+    return {
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "today": db.today_activity(),
+        "sessions": db.session_count(),
+        "messages": counts["messages"],
+        "evidence": counts["evidence"],
+        "routines": counts["routines"],
+        "notes": counts["notes"],
+        "pending_reflections": len(db.list_reflections(limit=100, status="pending")),
+        "feedback": db.feedback_counts(),
+        "mood": latest,
+        "due_decisions": len(db.due_decisions()),
+        "recent": [
+            {
+                "session": s["session"],
+                "preview": (s["last_message"] or "")[:80],
+                "messages": s["messages"],
+            }
+            for s in db.list_sessions(limit=3)
+        ],
+    }
+
+
 class ProfileIn(BaseModel):
-    """Editable Profile-card overrides. Omitted fields stay untouched."""
+    """Editable Profile-card overrides. Omitted fields stay untouched.
+
+    The wire name stays ``register``; the Python field is ``register_value``
+    because pydantic's BaseModel already has a ``register`` attribute.
+    """
+
+    model_config = {"populate_by_name": True}
 
     length: str | None = None
-    register: str | None = None
+    register_value: str | None = Field(default=None, alias="register")
     language: str | None = None
 
 
@@ -857,7 +1003,8 @@ def update_profile(payload: ProfileIn) -> JSONResponse:
     current = db.get_profile("style_overrides") or {}
     changed = False
     for field, keys in allowed.items():
-        value = getattr(payload, field)
+        attr = "register_value" if field == "register" else field
+        value = getattr(payload, attr)
         if value is None:
             continue
         value = value.strip().lower()

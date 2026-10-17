@@ -8,11 +8,12 @@ never silently useless.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -416,6 +417,215 @@ HANDLERS = {
     "openrouter": _openrouter,
     "ollama": _ollama,
 }
+
+
+# ------------------------------------------------------------- streaming
+#
+# Token streaming for the ask endpoint (Phase 5). One generic OpenAI-style
+# SSE reader covers groq / openrouter / llama.cpp; ollama speaks ndjson and
+# Gemini speaks SSE with a different envelope. Failures surface while the
+# iterator is consumed - the engine falls back to a blocking call when no
+# delta ever arrives, so a flaky stream can never lose an answer.
+
+
+async def _openai_sse(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> AsyncIterator[str]:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, headers=headers, json=payload) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    continue
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                text = (choices[0].get("delta") or {}).get("content")
+                if text:
+                    yield text
+
+
+def _chat_payload(model: str, messages: list[dict], kw: Any, stream: bool) -> dict[str, Any]:
+    return {
+        "model": model,
+        "messages": messages,
+        "temperature": kw.get("temperature", 0.4),
+        "max_tokens": kw.get("max_tokens", 1800),
+        "stream": stream,
+    }
+
+
+async def _groq_stream(model: str, messages: list[dict], **kw: Any) -> AsyncIterator[str]:
+    key = kw.get("key") or provider_key("groq")
+    if not key:
+        raise ProviderError("no GROQ_API_KEY")
+    async for t in _openai_sse(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {"Authorization": f"Bearer {key}"},
+        _chat_payload(model, messages, kw, True),
+        timeout=kw.get("timeout", 60),
+    ):
+        yield t
+
+
+async def _openrouter_stream(model: str, messages: list[dict], **kw: Any) -> AsyncIterator[str]:
+    key = kw.get("key") or provider_key("openrouter")
+    if not key:
+        raise ProviderError("no OPENROUTER_API_KEY")
+    async for t in _openai_sse(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {"Authorization": f"Bearer {key}", "HTTP-Referer": "http://localhost:8770"},
+        _chat_payload(model, messages, kw, True),
+        timeout=kw.get("timeout", 60),
+    ):
+        yield t
+
+
+async def _llamacpp_stream(model: str, messages: list[dict], **kw: Any) -> AsyncIterator[str]:
+    state = ensure_llamacpp_started()
+    if state == "unavailable":
+        raise ProviderError(_LLAMACPP.get("error") or "on-device model not available")
+    wait = kw.get("timeout") if kw.get("timeout") else 90.0
+    if not await llamacpp_is_up(timeout=0.5) and not await _wait_llamacpp(wait):
+        raise ProviderError(_LLAMACPP.get("error") or "llama-server did not start")
+    base = llamacpp_url()
+    model_id = _LLAMACPP.get("model_id") or model or "local"
+    async for t in _openai_sse(
+        f"{base}/v1/chat/completions",
+        {},
+        _chat_payload(model_id, messages, kw, True),
+        timeout=kw.get("timeout") or 300.0,
+    ):
+        yield t
+
+
+async def _ollama_stream(model: str, messages: list[dict], **kw: Any) -> AsyncIterator[str]:
+    base = kw.get("base") or ollama_url()
+    key = kw.get("key") or provider_key("ollama")
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    prompt = "\n\n".join(
+        f"{m['role'].upper()}: {m['content']}"
+        for m in messages
+        if m["role"] != "system"
+    )
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": True,
+        "options": {
+            "temperature": kw.get("temperature", 0.4),
+            "num_ctx": kw.get("num_ctx", 4096),
+        },
+    }
+    async with httpx.AsyncClient(timeout=kw.get("timeout", 120)) as client:
+        async with client.stream("POST", f"{base}/api/generate", headers=headers, json=payload) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                chunk = obj.get("response")
+                if chunk:
+                    yield chunk
+                if obj.get("done"):
+                    return
+
+
+async def _gemini_stream(model: str, messages: list[dict], **kw: Any) -> AsyncIterator[str]:
+    key = kw.get("key") or provider_key("gemini")
+    if not key:
+        raise ProviderError("no GEMINI_API_KEY")
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    turns = [
+        {
+            "role": "user" if m["role"] == "user" else "model",
+            "parts": [{"text": m["content"]}],
+        }
+        for m in messages
+        if m["role"] != "system"
+    ]
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:streamGenerateContent?alt=sse"
+    )
+    body: dict[str, Any] = {
+        "contents": turns,
+        "generationConfig": {
+            "temperature": kw.get("temperature", 0.4),
+            "maxOutputTokens": kw.get("max_tokens", 1800),
+        },
+    }
+    if system.strip():
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    async with httpx.AsyncClient(timeout=kw.get("timeout", 60)) as client:
+        async with client.stream("POST", url, headers={"x-goog-api-key": key}, json=body) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    continue
+                candidates = obj.get("candidates") or []
+                if not candidates:
+                    continue
+                for part in candidates[0].get("content", {}).get("parts") or []:
+                    if part.get("text"):
+                        yield part["text"]
+
+
+STREAM_HANDLERS = {
+    "llamacpp": _llamacpp_stream,
+    "groq": _groq_stream,
+    "gemini": _gemini_stream,
+    "openrouter": _openrouter_stream,
+    "ollama": _ollama_stream,
+}
+
+
+async def complete_stream(
+    messages: list[dict],
+    temperature: float = 0.4,
+    max_tokens: int = 1800,
+) -> tuple[str, AsyncIterator[str]]:
+    """Pick a provider the way complete() does, but stream its deltas.
+
+    Returns ``(provider_name, iterator)``. Network failures surface while the
+    iterator is consumed, not here; callers fall back to a blocking complete()
+    when no delta ever arrives. Raises ProviderError when nothing is enabled.
+    """
+    for name in PROVIDER_ORDER:
+        if not provider_enabled(name):
+            continue
+        handler = STREAM_HANDLERS.get(name)
+        if handler is None:
+            continue
+        deltas = handler(
+            provider_model(name), messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        return name, deltas
+    raise ProviderError("no streaming provider available")
 
 
 async def complete(

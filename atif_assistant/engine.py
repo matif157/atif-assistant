@@ -9,12 +9,12 @@ Three modes:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, AsyncIterator
 
 from . import constitution as C
 from . import db, emotion, radar, router, style
 from .config import RETRIEVAL_LIMIT
-from .llm import ProviderError, complete
+from .llm import ProviderError, complete, complete_stream
 
 # ---------------------------------------------------------------- prompting
 
@@ -542,7 +542,7 @@ def audit_response(text: str, challenge_mode: bool = False) -> list[str]:
 
 # --------------------------------------------------------------- generators
 
-async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
+def _ask_messages(question: str, ctx: dict[str, Any]) -> list[dict[str, Any]]:
     ctx_block = ctx["context_block"]
     guard = _guardrails(ctx)
 
@@ -565,22 +565,27 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         if part
     )
 
-    messages = [
+    return [
         {"role": "system", "content": _system_with(ctx, LABEL_INSTRUCTIONS)},
         {"role": "user", "content": user_content},
     ]
 
-    try:
-        text, provider = await complete(messages)
-    except ProviderError:
-        text, provider = _offline_answer(question, ctx), "offline"
 
+async def _finish_ask(
+    question: str, ctx: dict[str, Any], draft: str, provider: str
+) -> dict[str, Any]:
+    """Critique, repair and assemble the result.
+
+    Shared verbatim by the blocking and the streaming path so the brake
+    pipeline cannot drift between them: a streamed answer passes exactly the
+    same second pass and audit as a blocking one.
+    """
+    text = draft
+    critique_notes: list[str] = []
     # Adversarial second pass: find what the draft got wrong, then fix it.
     # Pure knowledge questions carry no personal stakes - the pass only adds
     # latency there, and on a small local model its "revision" tends to be
     # critique-shaped text that overwrites a fine answer.
-    draft = text
-    critique_notes: list[str] = []
     if router.question_class(question) != "knowledge":
         critique, revised, critique_notes = await _self_critique(
             question, text, ctx, provider
@@ -613,6 +618,49 @@ async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
         "memories_used": len(ctx["memories"]),
         "critique": critique_notes,
     }
+
+
+async def _ask(question: str, ctx: dict[str, Any]) -> dict[str, Any]:
+    messages = _ask_messages(question, ctx)
+    try:
+        text, provider = await complete(messages)
+    except ProviderError:
+        text, provider = _offline_answer(question, ctx), "offline"
+    return await _finish_ask(question, ctx, text, provider)
+
+
+async def _ask_stream(
+    question: str, ctx: dict[str, Any]
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield ``{"delta": text}`` events as the model writes, then exactly one
+    ``{"final": result}`` event after critique/repair.
+
+    Falls back to a blocking generation (single final event) when streaming
+    is unavailable, no deltas arrive, or the stream dies midway with nothing
+    received - a flaky stream can never lose an answer.
+    """
+    messages = _ask_messages(question, ctx)
+    parts: list[str] = []
+    provider = "offline"
+    try:
+        provider, deltas = await complete_stream(messages)
+        async for d in deltas:
+            if not d:
+                continue
+            parts.append(d)
+            yield {"delta": d}
+    except ProviderError:
+        result = await _ask(question, ctx)
+        yield {"final": result}
+        return
+    except Exception:  # noqa: B901 - keep partial text; blocking fallback below
+        pass
+    if not parts:
+        result = await _ask(question, ctx)
+        yield {"final": result}
+        return
+    result = await _finish_ask(question, ctx, "".join(parts), provider)
+    yield {"final": result}
 
 
 # ------------------------------------------------- adversarial self-critique
@@ -925,3 +973,24 @@ async def respond(
     if mode == "decide":
         return await _decide(question, ctx)
     return await _ask(question, ctx)
+
+
+async def respond_stream(
+    question: str,
+    mode: str = "ask",
+    ctx: dict[str, Any] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Async-generator form of :func:`respond`.
+
+    ask mode streams ``{"delta"}`` events then one ``{"final"}`` event;
+    challenge/decide emit a single final event because their sectioned output
+    only means anything complete.
+    """
+    if ctx is None:
+        ctx = build_context(question)
+    if mode == "ask":
+        async for event in _ask_stream(question, ctx):
+            yield event
+        return
+    result = await respond(question, mode=mode, ctx=ctx)
+    yield {"final": result}

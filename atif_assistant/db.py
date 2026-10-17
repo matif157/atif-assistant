@@ -1358,6 +1358,28 @@ def counts() -> dict[str, int]:
     return {t: conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] for t in COUNTED_TABLES}
 
 
+def today_activity() -> dict[str, int]:
+    """Messages and questions since UTC midnight - the Home TODAY tile."""
+    day = datetime.now(timezone.utc).date().isoformat()
+    conn = connect()
+    return {
+        "messages": conn.execute(
+            "SELECT COUNT(*) c FROM messages WHERE substr(created_at,1,10)=?",
+            (day,),
+        ).fetchone()["c"],
+        "questions": conn.execute(
+            "SELECT COUNT(*) c FROM questions WHERE substr(created_at,1,10)=?",
+            (day,),
+        ).fetchone()["c"],
+    }
+
+
+def session_count() -> int:
+    """Distinct conversations (sessions live only as message rows)."""
+    conn = connect()
+    return conn.execute("SELECT COUNT(DISTINCT session) c FROM messages").fetchone()["c"]
+
+
 def content_digest() -> str:
     """Hash of every row in every counted table, order-independent per table.
 

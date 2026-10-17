@@ -22,6 +22,7 @@ import android.speech.tts.TextToSpeech;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
@@ -726,6 +727,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void setAppLock(boolean on) {
             lockPrefs().edit().putBoolean("app_lock", on).apply();
+        }
+
+        /** Light tap feedback for send / STOP / feedback buttons. Runs on the
+         *  view haptic path, which needs no VIBRATE permission. */
+        @JavascriptInterface
+        public void haptic() {
+            runOnUiThread(() -> {
+                View v = getWindow().getDecorView();
+                v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            });
         }
     }
 

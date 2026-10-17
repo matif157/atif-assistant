@@ -13,6 +13,48 @@ const dot = document.getElementById("dot");
 let session = localStorage.getItem("atif-assistant.session") || null;
 let lastBasis = null;
 
+/* Exactly one answer may be in flight. `streamCtl` is also the STOP handle:
+   while it is set, the send button aborts the stream instead of sending. */
+let streaming = false;
+let streamCtl = null;
+let userStopped = false;
+const SEND_ICON = sendBtn ? sendBtn.innerHTML : "";
+
+/** Session id minted client-side (12 hex chars, same shape as the server's)
+ *  before the first stream, so a STOP still saves into the conversation the
+ *  user is actually looking at. */
+function genSessionId() {
+  const a = new Uint8Array(6);
+  if (globalThis.crypto?.getRandomValues) crypto.getRandomValues(a);
+  else for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256);
+  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function toast(msg) {
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.setAttribute("role", "status");
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2600);
+}
+
+/** Native tap feedback inside the Android app; a silent no-op on the web. */
+function haptic() {
+  if (window.AndroidVoice && typeof window.AndroidVoice.haptic === "function") {
+    try { window.AndroidVoice.haptic(); } catch { /* ignore */ }
+  }
+}
+
+function setStreamMode(on) {
+  streaming = on;
+  chat.setAttribute("aria-busy", on ? "true" : "false");
+  if (!sendBtn) return;
+  sendBtn.classList.toggle("stopmode", on);
+  sendBtn.innerHTML = on ? "&#9724;" : SEND_ICON;
+  sendBtn.setAttribute("aria-label", on ? "Stop the answer" : "Send");
+}
+
 function renderBasis(data) {
   const sidebar = document.getElementById("basis-sidebar");
   const body = document.getElementById("basis-body");
@@ -207,9 +249,12 @@ function labelize(text) {
   return out;
 }
 
-function addBot(res) {
+function buildBot(res, promptText) {
   const el = document.createElement("div");
   el.className = "msg bot";
+  // The prompt travels with the bubble so REGEN can re-ask exactly this
+  // question without the caller having to track pairs.
+  if (promptText) el.dataset.q = promptText;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
 
@@ -229,6 +274,7 @@ function addBot(res) {
     return c;
   };
 
+  if (res.stopped) meta.appendChild(chip("stop", "STOPPED"));
   if (res.rumination) meta.appendChild(chip("rum", "RUMINATION RISK"));
   if (res.professional_risk?.length) meta.appendChild(chip("prof", "NEEDS PROFESSIONAL"));
   for (const p of res.patterns || []) {
@@ -259,8 +305,90 @@ function addBot(res) {
     el.appendChild(b);
   }
 
+  if (res.message_id) el.appendChild(messageActions(el, res));
+  return el;
+}
+
+function addBot(res, promptText) {
+  const el = buildBot(res, promptText);
   chat.appendChild(el);
   chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+/* Per-answer actions: copy / thumbs / regenerate. Only answers that came back
+   with a message id get them, so the feedback row always points at a real
+   database row. */
+function messageActions(el, res) {
+  const bar = document.createElement("div");
+  bar.className = "actions";
+  const act = (label, title, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "act";
+    b.textContent = label;
+    b.title = title;
+    b.addEventListener("click", fn);
+    bar.appendChild(b);
+    return b;
+  };
+
+  act("COPY", "Copy this answer", async () => {
+    try {
+      await navigator.clipboard.writeText(res.text || "");
+      toast("Copied");
+    } catch {
+      toast("Could not copy");
+    }
+  });
+  act("👍", "Good answer", (ev) => sendSignal(res, "up", ev.currentTarget));
+  act("👎", "Answer was wrong", (ev) => sendSignal(res, "down", ev.currentTarget));
+  if (el.dataset.q) act("REGEN", "Ask this question again", () => regenerate(el));
+  return bar;
+}
+
+async function sendSignal(res, kind, btn) {
+  const mid = res.message_id;
+  if (!mid) return;
+  haptic();
+  const body = (extra) =>
+    JSON.stringify({ kind, message_id: mid, session: res.session || session, ...extra });
+  try {
+    const r = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body(),
+    });
+    if (!r.ok) throw new Error(`server returned ${r.status}`);
+    if (btn) {
+      btn.classList.add("on");
+      btn.disabled = true;
+    }
+    if (kind === "up") toast("Marked as a good answer");
+    if (kind === "down") {
+      const note = ((window.prompt && window.prompt("What was wrong? (optional)")) || "").trim();
+      if (note) {
+        const r2 = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: body({ kind: "note", note }),
+        });
+        if (!r2.ok) throw new Error(`server returned ${r2.status}`);
+      }
+      toast("Signal saved - the reflection loop reads these");
+    }
+  } catch (e) {
+    toast(`Could not send feedback: ${e.message || e}`);
+  }
+}
+
+/** Re-ask the prompt behind `el`. The old answer dims instead of vanishing,
+ *  so the user sees which reply belongs to which attempt. */
+function regenerate(el) {
+  const q = el?.dataset?.q;
+  if (!q || streaming) return;
+  el.classList.add("stale");
+  ask(q, { regenerate: true });
 }
 
 function addTyping() {
@@ -279,39 +407,70 @@ function removeTyping() {
 /* ------------------------------------------------------------- requests */
 
 async function ask(question, opts = {}) {
-  addUser(question);
-  addTyping();
-  sendBtn.disabled = true;
+  // One answer at a time: a voice turn must not fight a typed stream.
+  if (streaming) return { text: null, error: "an answer is already in flight" };
+  if (!opts.regenerate) addUser(question);
+  if (!session) {
+    session = genSessionId();
+    try { localStorage.setItem("atif-assistant.session", session); } catch { /* private mode */ }
+  }
   // A question that came in by voice is answered out loud even if SPEAK
   // REPLIES is off, so tapping the mic gives a real voice assistant.
   const spokeQuestion = voiceInputPending;
   voiceInputPending = false;
   const speaker = opts.speaker || pendingSpeaker || null;
   pendingSpeaker = null;
+
+  const ctl = ("AbortController" in window) ? new AbortController() : null;
+  userStopped = false;
   // Nothing should hang forever: a wedged provider or dead engine must not
-  // leave the typing indicator up with the send button disabled. 240s covers
-  // a cold on-device model start plus generation.
-  const askCtl = ("AbortController" in window) ? new AbortController() : null;
-  const askTimer = askCtl ? setTimeout(() => askCtl.abort(), 240000) : 0;
-  try {
-    const res = await fetch("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        session,
-        lang: settings.lang,
-        reply_language: settings.replyLanguage,
-        detail: settings.detail,
-        speaker: speaker ? speaker.name : null,
-        speaker_score: speaker ? speaker.score : null,
-      }),
-      signal: askCtl ? askCtl.signal : undefined,
-    });
-    if (!res.ok) throw new Error(`server returned ${res.status}`);
-    const data = await res.json();
+  // leave STOP pending. 240s covers a cold on-device model start plus
+  // generation. Aborting after partial text keeps the partial (flagged
+  // stopped server-side); aborting with nothing turns into the timeout error.
+  const watchdog = ctl ? setTimeout(() => ctl.abort(), 240000) : 0;
+  streamCtl = {
+    stop() {
+      userStopped = true;
+      ctl?.abort();
+    },
+  };
+  setStreamMode(true);
+  addTyping();
+
+  let partial = "";
+  let botEl = null;
+  const ensureBot = () => {
+    if (botEl) return botEl;
     removeTyping();
-    addBot(data);
+    botEl = document.createElement("div");
+    botEl.className = "msg bot streaming";
+    botEl.innerHTML = `<div class="bubble"></div>`;
+    chat.appendChild(botEl);
+    return botEl;
+  };
+  const paint = () => {
+    if (!botEl) return;
+    botEl.querySelector(".bubble").replaceChildren(...labelize(partial));
+    chat.scrollTop = chat.scrollHeight;
+  };
+
+  const payload = {
+    question,
+    session,
+    lang: settings.lang,
+    reply_language: settings.replyLanguage,
+    detail: settings.detail,
+    speaker: speaker ? speaker.name : null,
+    speaker_score: speaker ? speaker.score : null,
+  };
+
+  const finalize = (data) => {
+    removeTyping();
+    const real = buildBot(data, question);
+    if (botEl) botEl.replaceWith(real);
+    else chat.appendChild(real);
+    chat.scrollTop = chat.scrollHeight;
+    botEl = null;
     lastBasis = data;
     renderBasis(data);
     renderReplyOptions(data);
@@ -320,18 +479,37 @@ async function ask(question, opts = {}) {
     }
     if (data.session) {
       session = data.session;
-      localStorage.setItem("atif-assistant.session", session);
+      try { localStorage.setItem("atif-assistant.session", session); } catch { /* private mode */ }
     }
     // Learning runs server-side after the reply is sent, so the response no
     // longer carries `learned`. Poll once after a short delay instead.
-    if (data.learned?.length) {
-      refreshLearned();
-    } else {
-      setTimeout(refreshLearnedIfAny, 2500);
-    }
+    if (data.learned?.length) refreshLearned();
+    else setTimeout(refreshLearnedIfAny, 2500);
     return data;
-  } catch (e) {
+  };
+
+  // User STOP (or a mid-stream drop): keep whatever text arrived, mark it
+  // STOPPED, never pretend the answer was complete.
+  const stopFinish = () => {
     removeTyping();
+    if (!botEl) {
+      addBot({ text: "Stopped before any answer arrived.", warnings: [], stopped: true }, question);
+      return { text: null, stopped: true, error: "stopped" };
+    }
+    const real = buildBot({ text: partial, warnings: [], stopped: true, session }, question);
+    botEl.replaceWith(real);
+    botEl = null;
+    chat.scrollTop = chat.scrollHeight;
+    return { text: partial, stopped: true, session };
+  };
+
+  const failTurn = (e) => {
+    removeTyping();
+    if (botEl) {
+      stopFinish();
+      toast("Connection lost mid-answer - the partial text was kept");
+      return { text: partial || null, error: String(e.message || e), session };
+    }
     const timedOut = e && (e.name === "AbortError" || e.code === 20);
     const detail = timedOut
       ? "the engine took too long to answer (4 minutes) - try again"
@@ -345,9 +523,71 @@ async function ask(question, opts = {}) {
     // Callers (the voice call and hands-free loop) need the reason, not just
     // a null, so the failure can be shown instead of looping silently.
     return { text: null, error: detail };
+  };
+
+  try {
+    const res = await fetch("/api/ask/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctl ? ctl.signal : undefined,
+    });
+    if (!res.ok || !res.body) throw new Error(`server returned ${res.status}`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let final = null;
+    const takeLine = (line) => {
+      if (!line.trim()) return;
+      let ev;
+      try { ev = JSON.parse(line); } catch { return; }
+      if (ev.final) final = ev.final;
+      else if (ev.delta) {
+        partial += ev.delta;
+        ensureBot();
+        paint();
+      }
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        takeLine(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+      }
+    }
+    buf += decoder.decode();
+    takeLine(buf);
+    if (!final) throw new Error("the stream ended without an answer");
+    return finalize(final);
+  } catch (e) {
+    const aborted = !!(ctl && ctl.signal.aborted);
+    if (aborted && (userStopped || partial)) return stopFinish();
+    if (!partial && !aborted) {
+      // Streaming unavailable (older server or a proxy that broke the
+      // response): fall back to the blocking endpoint instead of failing
+      // the turn outright.
+      try {
+        const r = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: ctl ? ctl.signal : undefined, // same 240s watchdog still runs
+        });
+        if (!r.ok) throw new Error(`server returned ${r.status}`);
+        return finalize(await r.json());
+      } catch (e2) {
+        return failTurn(e2);
+      }
+    }
+    return failTurn(e);
   } finally {
-    clearTimeout(askTimer);
-    sendBtn.disabled = false;
+    clearTimeout(watchdog);
+    streamCtl = null;
+    setStreamMode(false);
   }
 }
 
@@ -367,6 +607,12 @@ function showRoute(route) {
 /* ---------------------------------------------------------------- wiring */
 
 sendBtn.addEventListener("click", () => {
+  haptic();
+  // While an answer streams, the button IS the stop control.
+  if (streaming) {
+    streamCtl?.stop();
+    return;
+  }
   const raw = input.value.trim();
   if (!raw) return;
   // Typing takes over from a running hands-free conversation.
@@ -379,6 +625,8 @@ sendBtn.addEventListener("click", () => {
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
+    // Enter must not kill a running answer; STOP is an explicit tap.
+    if (streaming) return;
     sendBtn.click();
   }
 });
@@ -4680,9 +4928,15 @@ async function loadSessionHistory() {
   try {
     const hr = await fetch(`/api/history/${session}`);
     const { messages } = await hr.json();
+    let lastUser = "";
     for (const m of messages || []) {
-      if (m.role === "user") addUser(m.content);
-      else addBot({ text: m.content, warnings: [] });
+      if (m.role === "user") {
+        addUser(m.content);
+        lastUser = m.content;
+      } else {
+        // The prompt rides along so REGEN works on restored answers too.
+        addBot({ text: m.content, warnings: [], message_id: m.id }, lastUser);
+      }
     }
   } catch { /* no history: start clean */ }
 }
@@ -4736,11 +4990,115 @@ document.getElementById("btn-new-chat")?.addEventListener("click", startNewChat)
 document.getElementById("close-history")?.addEventListener("click", () => {
   document.getElementById("history-sheet").hidden = true;
 });
+
+/* home dashboard */
+async function loadHome() {
+  const body = document.getElementById("home-body");
+  if (!body) return;
+  body.innerHTML = "";
+  for (let i = 0; i < 3; i++) {
+    const s = document.createElement("div");
+    s.className = "skel";
+    body.appendChild(s);
+  }
+  try {
+    const r = await fetch("/api/home");
+    if (!r.ok) throw new Error(`server returned ${r.status}`);
+    const h = await r.json();
+    body.innerHTML = "";
+
+    const when = document.createElement("p");
+    when.className = "home-when";
+    when.textContent = h.date || "";
+    body.appendChild(when);
+
+    const grid = document.createElement("div");
+    grid.className = "home-grid";
+    const tile = (lab, num, sub) => {
+      const t = document.createElement("div");
+      t.className = "tile";
+      const l = document.createElement("div");
+      l.className = "t-lab";
+      l.textContent = lab;
+      const n = document.createElement("div");
+      n.className = "t-num";
+      n.textContent = String(num);
+      t.append(l, n);
+      if (sub) {
+        const s2 = document.createElement("div");
+        s2.className = "t-sub";
+        s2.textContent = sub;
+        t.appendChild(s2);
+      }
+      grid.appendChild(t);
+    };
+    const fb = h.feedback || {};
+    tile("TODAY", `${h.today?.messages ?? 0} msg`, `${h.today?.questions ?? 0} questions asked`);
+    tile("CHATS", h.sessions ?? 0, `${h.messages ?? 0} messages all time`);
+    tile("MEMORY", h.evidence ?? 0, "evidence rows");
+    tile(
+      "MOOD",
+      h.mood ? String(h.mood.mood).toUpperCase() : "STEADY",
+      h.mood ? "last detected (inference)" : "no non-neutral turns yet",
+    );
+    tile("GROWTH", h.pending_reflections ?? 0, "pending proposals in Insights");
+    tile("SIGNALS", `${fb.up ?? 0}👍 ${fb.down ?? 0}👎`, "answers rated");
+    tile("DUE", h.due_decisions ?? 0, "decisions up for review");
+    tile("ROUTINES", `${h.routines ?? 0} / ${h.notes ?? 0}`, "routines / notes");
+    body.appendChild(grid);
+
+    if (h.recent?.length) {
+      const head = document.createElement("p");
+      head.className = "home-when";
+      head.textContent = "RECENT";
+      body.appendChild(head);
+      const list = document.createElement("div");
+      list.className = "history-list";
+      for (const s of h.recent) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "history-item";
+        const prev = document.createElement("span");
+        prev.className = "h-prev";
+        prev.textContent = s.preview || "(empty)";
+        const meta = document.createElement("span");
+        meta.className = "h-meta";
+        meta.textContent = `${s.messages} message${s.messages === 1 ? "" : "s"}`;
+        item.append(prev, meta);
+        item.addEventListener("click", () => {
+          document.getElementById("home-sheet").hidden = true;
+          switchSession(s.session);
+        });
+        list.appendChild(item);
+      }
+      body.appendChild(list);
+    }
+  } catch (e) {
+    body.textContent = `Could not load Home: ${e.message || e}`;
+  }
+}
+
+document.getElementById("btn-home")?.addEventListener("click", async () => {
+  document.getElementById("home-sheet").hidden = false;
+  await loadHome();
+});
+document.getElementById("close-home")?.addEventListener("click", () => {
+  document.getElementById("home-sheet").hidden = true;
+});
 document.getElementById("btn-history")?.addEventListener("click", async () => {
   const sheetEl = document.getElementById("history-sheet");
   const box = document.getElementById("history-list");
   sheetEl.hidden = false;
-  if (box) box.textContent = "Loading...";
+  // Skeleton rows instead of a bare word: the list always shows its shape
+  // while the request is in flight.
+  if (box) {
+    box.innerHTML = "";
+    for (let i = 0; i < 4; i++) {
+      const s = document.createElement("div");
+      s.className = "skel";
+      box.appendChild(s);
+    }
+  }
   try {
     const res = await fetch("/api/sessions");
     renderSessions((await res.json()).sessions || []);
