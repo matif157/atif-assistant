@@ -25,8 +25,8 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from . import (
-    applog, db, engine, learn, llm, location, ollama, pipeline, plan, router,
-    stt, style, tts, uploads, voice_id,
+    applog, db, engine, learn, llm, location, ollama, pipeline, plan,
+    reflection, router, stt, style, tts, uploads, voice_id,
 )
 from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
@@ -909,6 +909,59 @@ def feedback(limit: int = 100, unapplied: bool = False) -> dict:
             limit=min(max(limit, 1), 500), only_unapplied=unapplied
         )
     }
+
+
+@app.get("/api/reflections")
+def reflections(status: str | None = None) -> dict:
+    """Evolution loop: drain the feedback queue into proposals, then serve
+    them plus live insights. Reading never approves anything."""
+    if status is not None and status not in ("pending", "approved", "rejected"):
+        return JSONResponse(
+            {"error": "status must be pending, approved or rejected"},
+            status_code=400,
+        )
+    reflection.reflect()
+    return {
+        "proposals": db.list_reflections(limit=200, status=status),
+        "feedback_counts": db.feedback_counts(),
+        "insights": reflection.insights(),
+    }
+
+
+@app.post("/api/reflections/{reflection_id}/approve")
+def approve_reflection(reflection_id: int) -> JSONResponse:
+    """The user's press IS the approval: the proposal becomes an approved
+    rule and from then on reaches every answer via the guardrails block."""
+    item = db.get_reflection(reflection_id)
+    if item is None:
+        return JSONResponse({"ok": False, "error": "no such reflection"}, status_code=404)
+    if item["status"] != "pending":
+        return JSONResponse(
+            {"ok": False, "error": f"already {item['status']}"},
+            status_code=400,
+        )
+    rule_id = db.add_rule(
+        text=item["title"],
+        code="REFLECT",
+        source=f"reflection:{reflection_id}",
+        approved=True,
+    )
+    db.set_reflection_status(reflection_id, "approved", rule_id=rule_id)
+    return {"ok": True, "rule_id": rule_id}
+
+
+@app.post("/api/reflections/{reflection_id}/reject")
+def reject_reflection(reflection_id: int) -> JSONResponse:
+    item = db.get_reflection(reflection_id)
+    if item is None:
+        return JSONResponse({"ok": False, "error": "no such reflection"}, status_code=404)
+    if item["status"] != "pending":
+        return JSONResponse(
+            {"ok": False, "error": f"already {item['status']}"},
+            status_code=400,
+        )
+    db.set_reflection_status(reflection_id, "rejected")
+    return {"ok": True}
 
 
 @app.get("/api/evidence")

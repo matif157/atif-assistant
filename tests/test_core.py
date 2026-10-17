@@ -1279,6 +1279,141 @@ def test_style_mirror() -> None:
             db.reset_db_path()
 
 
+def test_reflection() -> None:
+    """Evolution loop (Phase 4): feedback -> proposal -> explicit approval.
+
+    The master-plan gate is zero silent rule changes: reflecting must never
+    touch the rules table on its own; only the approve endpoint may, only for
+    pending items, and the user's press is the recorded approval.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, reflection
+    from atif_assistant.app import app
+
+    print("\nevolution: proposals, approval, zero silent changes")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "refl.db")
+        db.init_db()
+        client = TestClient(app)
+        try:
+            rules_before = len(db.approved_rules())
+
+            # Signals: two noted downs, one noted edit, one bare down, one up.
+            db.save_feedback(
+                "down", message_id=1, session="s1",
+                note="Stop using bullet points; write paragraphs.",
+            )
+            db.save_feedback("edit", message_id=2, session="s1",
+                             note="Keep answers shorter please")
+            db.save_feedback("down", message_id=3, session="s1")
+            db.save_feedback("up", message_id=4, session="s1")
+            db.save_feedback(
+                "down", message_id=5, session="s1",
+                note="Stop using bullet points; write paragraphs.",
+            )
+
+            res = client.get("/api/reflections").json()
+            check(
+                "two proposals from three noted signals (deduped)",
+                len(res["proposals"]) == 2,
+            )
+            check("feedback queue drained", db.list_feedback(only_unapplied=True) == [])
+            check(
+                "feedback counts served",
+                res["feedback_counts"].get("down") == 3
+                and res["feedback_counts"].get("up") == 1,
+            )
+            check(
+                "down-ratio insight present",
+                any("👎" in line for line in res["insights"]),
+            )
+            check(
+                "zero silent rule changes on read",
+                len(db.approved_rules()) == rules_before,
+            )
+
+            pending = [p for p in res["proposals"] if p["status"] == "pending"]
+            check("both proposals pending", len(pending) == 2)
+
+            # Approve one: it becomes an approved rule reachable by guardrails.
+            ok = client.post(f"/api/reflections/{pending[0]['id']}/approve")
+            check("approve is ok", ok.status_code == 200 and ok.json().get("ok"))
+            rule_id = ok.json().get("rule_id")
+            check("rule id recorded on the reflection", rule_id and rule_id > 0)
+            texts = [r["text"] for r in db.approved_rules()]
+            check(
+                "approved rule carries the proposal text",
+                pending[0]["title"] in texts,
+            )
+            check(
+                "reflection marked approved",
+                db.get_reflection(pending[0]["id"])["status"] == "approved",
+            )
+            again = client.post(f"/api/reflections/{pending[0]['id']}/approve")
+            check("approving twice is refused", again.status_code == 400)
+
+            # Reject the other: it must never reach the rules table.
+            rej = client.post(f"/api/reflections/{pending[1]['id']}/reject")
+            check("reject is ok", rej.status_code == 200)
+            check(
+                "rejected proposal never becomes a rule",
+                pending[1]["title"]
+                not in [r["text"] for r in db.approved_rules()],
+            )
+            check(
+                "reflection marked rejected",
+                db.get_reflection(pending[1]["id"])["status"] == "rejected",
+            )
+
+            check(
+                "unknown reflection approve is 404",
+                client.post("/api/reflections/9999/approve").status_code == 404,
+            )
+            check(
+                "unknown reflection reject is 404",
+                client.post("/api/reflections/9999/reject").status_code == 404,
+            )
+            check(
+                "bad status filter is 400",
+                client.get("/api/reflections", params={"status": "maybe"}).status_code == 400,
+            )
+            filt = client.get("/api/reflections", params={"status": "pending"})
+            check(
+                "status filter serves only pending",
+                filt.json()["proposals"] == [],
+            )
+
+            res2 = client.get("/api/reflections").json()
+            check(
+                "re-read keeps decided states, no resurrection",
+                {p["status"] for p in res2["proposals"]} == {"approved", "rejected"},
+            )
+            check(
+                "approved proposal visible to guardrails as REFLECT",
+                any(
+                    r.get("code") == "REFLECT"
+                    and r["text"] == pending[0]["title"]
+                    for r in db.approved_rules()
+                ),
+            )
+
+            # A fresh noted signal after decisions still reflects.
+            db.save_feedback("regenerate", message_id=9, session="s2",
+                             note="Never open answers with a greeting")
+            res3 = client.get("/api/reflections").json()
+            check(
+                "later signal still produces a pending proposal",
+                any(
+                    p["status"] == "pending"
+                    and p["title"] == "Never open answers with a greeting"
+                    for p in res3["proposals"]
+                ),
+            )
+        finally:
+            db.reset_db_path()
+
+
 def test_extended_api() -> None:
     """Settings, notes, works, media and social endpoints persist correctly.
 
@@ -3235,6 +3370,7 @@ def main() -> int:
     test_soul()
     test_soul_ask()
     test_style_mirror()
+    test_reflection()
     test_extended_api()
     test_location()
     test_uploads()

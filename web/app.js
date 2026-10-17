@@ -616,6 +616,85 @@ async function loadInsights() {
       iBody.appendChild(card);
     } catch { /* profile card optional */ }
 
+    // Evolution loop: feedback-derived proposals. Reading this endpoint only
+    // reflects; approval happens exclusively on the button press.
+    try {
+      const rd = await (await fetch("/api/reflections")).json();
+      const fc = rd.feedback_counts || {};
+      const total = Object.values(fc).reduce((a, b) => a + b, 0);
+      const proposals = rd.proposals || [];
+      const insightLines = rd.insights || [];
+      if (total || proposals.length || insightLines.length) {
+        const h = document.createElement("div");
+        h.className = "ihead";
+        h.textContent = "GROWTH";
+        iBody.appendChild(h);
+        if (total) {
+          const s = document.createElement("div");
+          s.className = "gtally";
+          s.textContent =
+            `${fc.up || 0} 👍 · ${fc.down || 0} 👎 · ` +
+            `${fc.edit || 0} edits · ${fc.note || 0} notes`;
+          iBody.appendChild(s);
+        }
+        for (const line of insightLines) {
+          const r = document.createElement("div");
+          r.className = "mrow";
+          const t = document.createElement("div");
+          t.className = "t";
+          t.textContent = line;
+          r.appendChild(t);
+          iBody.appendChild(r);
+        }
+        for (const p of proposals) {
+          const r = document.createElement("div");
+          r.className = "mrow";
+          const t = document.createElement("div");
+          t.className = "t";
+          const decided = p.status !== "pending";
+          t.textContent =
+            `${p.status === "approved" ? "✓ rule: " : p.status === "rejected" ? "✗ rejected: " : "proposal: "}${p.title}`;
+          r.appendChild(t);
+          if (p.detail) {
+            const d = document.createElement("div");
+            d.className = "k";
+            d.textContent = p.detail;
+            r.appendChild(d);
+          }
+          if (!decided) {
+            const actions = document.createElement("div");
+            actions.className = "m";
+            const app = document.createElement("button");
+            app.className = "ghost small";
+            app.textContent = "APPROVE AS RULE";
+            app.addEventListener("click", async () => {
+              app.disabled = true;
+              const res = await fetch(`/api/reflections/${p.id}/approve`, {
+                method: "POST",
+              });
+              if (res.ok) loadInsights();
+              else app.textContent = "FAILED";
+            });
+            const rej = document.createElement("button");
+            rej.className = "ghost small";
+            rej.textContent = "REJECT";
+            rej.style.marginLeft = "8px";
+            rej.addEventListener("click", async () => {
+              rej.disabled = true;
+              const res = await fetch(`/api/reflections/${p.id}/reject`, {
+                method: "POST",
+              });
+              if (res.ok) loadInsights();
+              else rej.textContent = "FAILED";
+            });
+            actions.append(app, rej);
+            r.appendChild(actions);
+          }
+          iBody.appendChild(r);
+        }
+      }
+    } catch { /* growth optional */ }
+
     // Soul layer: inferred mood moments across turns - a timeline, never a
     // diagnosis. Optional, so a missing endpoint cannot break Insights.
     try {

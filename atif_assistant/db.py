@@ -294,6 +294,20 @@ CREATE TABLE IF NOT EXISTS mood_history (
     created_at TEXT NOT NULL
 );
 
+-- Evolution loop (Phase 4): feedback becomes a PROPOSAL, never a rule by
+-- itself. Only the explicit approve endpoint copies title -> rules.approved.
+CREATE TABLE IF NOT EXISTS reflections (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL DEFAULT 'proposal',
+    status     TEXT NOT NULL DEFAULT 'pending',
+    title      TEXT NOT NULL,
+    detail     TEXT,
+    source     TEXT,
+    rule_id    INTEGER,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+
 -- Raw source lines, indexed for retrieval. A stored fact can be traced back to
 -- the message it came from instead of only carrying a confidence number.
 CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
@@ -1233,6 +1247,86 @@ def set_profile(name: str, data: dict[str, Any]) -> None:
     conn.commit()
 
 
+def feedback_counts() -> dict[str, int]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT kind, COUNT(*) c FROM feedback GROUP BY kind"
+    ).fetchall()
+    return {r["kind"]: r["c"] for r in rows}
+
+
+def create_reflection(
+    title: str,
+    detail: str | None = None,
+    source: list[int] | None = None,
+    kind: str = "proposal",
+    status: str = "pending",
+) -> int:
+    conn = connect()
+    cur = conn.execute(
+        """INSERT INTO reflections(kind, status, title, detail, source,
+                                   created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (
+            kind,
+            status,
+            title,
+            detail,
+            json.dumps(source or []),
+            now(),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_reflection(reflection_id: int) -> dict[str, Any] | None:
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM reflections WHERE id=?", (reflection_id,)
+    ).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    try:
+        out["source"] = json.loads(out.get("source") or "[]")
+    except (TypeError, ValueError):
+        out["source"] = []
+    return out
+
+
+def list_reflections(limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+    conn = connect()
+    where, args = "", []
+    if status:
+        where, args = "WHERE status = ?", [status]
+    rows = conn.execute(
+        f"SELECT * FROM reflections {where} ORDER BY id DESC LIMIT ?",
+        (*args, limit),
+    ).fetchall()
+    out = []
+    for r in rows:
+        row = dict(r)
+        try:
+            row["source"] = json.loads(row.get("source") or "[]")
+        except (TypeError, ValueError):
+            row["source"] = []
+        out.append(row)
+    return out
+
+
+def set_reflection_status(
+    reflection_id: int, status: str, rule_id: int | None = None
+) -> bool:
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE reflections SET status=?, rule_id=?, decided_at=? WHERE id=?",
+        (status, rule_id, now(), reflection_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 COUNTED_TABLES = (
     "facts",
     "episodes",
@@ -1255,6 +1349,7 @@ COUNTED_TABLES = (
     "routines",
     "feedback",
     "mood_history",
+    "reflections",
 )
 
 
