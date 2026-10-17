@@ -1,0 +1,36 @@
+name: CI
+
+# The sync guarantee: every push runs the same checks before anything
+# deploys, so a change that lands for one target lands for all three.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (the proven lock set)
+        run: pip install -r requirements.lock
+
+      - name: Run the 429-check suite
+        run: python tests/test_core.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check the front end
+        run: node --check web/app.js
+
+      - name: Report build commit
+        run: echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_ENV"

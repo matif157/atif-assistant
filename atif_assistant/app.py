@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +20,10 @@ from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from . import applog, db, engine, learn, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
-from .config import PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
+from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
 from .llm import (
     invalidate_probe_cache,
@@ -149,6 +152,70 @@ async def health(probe: bool = False) -> dict:
         "ollama": ollama.status(),
         "tailscale_host": TAILSCALE_HOST,
     }
+
+
+@app.get("/api/version")
+def version() -> dict:
+    """Which build this instance is running.
+
+    Every target (Mac, web, Android) serves the same code, so a commit hash
+    is how you check that all three deployments are actually in sync.
+    ``ATIF_ASSISTANT_COMMIT`` is set by CI/containers; local runs fall back
+    to git, and the APK reports ``dev``.
+    """
+    commit = os.environ.get("ATIF_ASSISTANT_COMMIT", "")
+    if not commit:
+        try:
+            commit = (
+                subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    capture_output=True, text=True, timeout=2,
+                    cwd=Path(__file__).resolve().parent.parent,
+                ).stdout.strip()
+                or "dev"
+            )
+        except Exception:  # noqa: BLE001 - no git on device/in containers
+            commit = "dev"
+    return {"app": "atif-assistant", "version": "1.0.0", "commit": commit}
+
+
+@app.get("/api/backup")
+def backup(token: str = "") -> Response:
+    """Download memory + uploads as a zip (models excluded - they re-download).
+
+    Guarded by ``ATIF_ASSISTANT_BACKUP_TOKEN``; when that env var is unset the
+    endpoint does not exist. On a hosted instance this is how memory survives
+    a redeploy; on a phone it is the export button.
+    """
+    expected = os.environ.get("ATIF_ASSISTANT_BACKUP_TOKEN", "")
+    if not expected or token != expected:
+        return JSONResponse({"error": "not available"}, status_code=404)
+    import tempfile
+    import zipfile
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    tmp.close()
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+        if DB_PATH.is_file():
+            zf.write(DB_PATH, "atif-assistant.db")
+        uploads = DATA_DIR / "uploads"
+        if uploads.is_dir():
+            for path in sorted(uploads.rglob("*")):
+                if path.is_file():
+                    zf.write(path, str(path.relative_to(DATA_DIR)))
+
+    def _cleanup(path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    return FileResponse(
+        tmp.name,
+        media_type="application/zip",
+        background=BackgroundTask(_cleanup, tmp.name),
+        headers={"Content-Disposition": 'attachment; filename="atif-assistant-backup.zip"'},
+    )
 
 
 @app.get("/api/memory")

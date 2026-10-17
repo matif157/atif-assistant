@@ -1,10 +1,21 @@
+---
+title: Atif Assistant
+emoji: 🧠
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
 # Atif Assistant
 
 A personal intelligence system. Persistent memory, a Reality Engine that
 labels every claim, a Challenge Mode that argues against you, and a Pattern
 Radar that notices recurring behaviour before you do.
 
-Runs on your Mac. Access it from any device with a browser. Memory stays local.
+One codebase, three deployments: the Mac app (`./run.sh`), the hosted web
+version (this Space), and the offline Android APK — all served from the same
+`web/` UI and `atif_assistant/` package. Memory stays where you run it.
 
 ---
 

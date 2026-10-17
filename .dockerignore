@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.native
+mobile
+data
+dist
+docs
+**/__pycache__
+**/*.pyc
+*.apk
+Dockerfile
+.dockerignore

@@ -1,0 +1,29 @@
+name: Keep-alive (web sleep control)
+
+# Hugging Face free Spaces sleep when idle. This scheduled ping keeps the
+# web app awake. Flip it off in Settings -> Actions -> this workflow ->
+# "Disable workflow" when you WANT it to sleep (to save quota), and back on
+# for always-available. Needs two repo settings:
+#   secret  HF_SPACE_URL   e.g. https://--.hf.space
+#   variable KEEP_ALIVE     "true" to run
+on:
+  schedule:
+    - cron: "*/25 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    if: ${{ vars.KEEP_ALIVE == 'true' }}
+    steps:
+      - name: Wake the Space
+        run: |
+          if [ -z "${{ secrets.HF_SPACE_URL }}" ]; then
+            echo "HF_SPACE_URL secret not set; skipping."
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "${{ secrets.HF_SPACE_URL }}/api/health")
+          echo "health -> $code"
+          # 200 = awake; 503 = still waking (Space cold-starts take ~1-2 min,
+          # the next run catches it). Never fail the schedule for a sleep.
+          exit 0
