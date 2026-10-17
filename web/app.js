@@ -3768,7 +3768,6 @@ document.getElementById("close-rules").addEventListener("click", () => {
 
 /* ------------------------------------------------------------ settings ui */
 
-const setSheet = document.getElementById("settings-sheet");
 const setLang = document.getElementById("set-lang");
 const setReplyLang = document.getElementById("set-reply-lang");
 const setSpeak = document.getElementById("set-speak");
@@ -3861,17 +3860,26 @@ document.getElementById("inbox-open-access")?.addEventListener("click", () => {
 });
 
 document.getElementById("btn-settings").addEventListener("click", () => {
-  syncSettingsForm();
-  syncAppLockToggle();
-  loadProviders();
-  loadSpeechStatus();
-  refreshLlmStatus();
-  loadVoiceprints();
-  loadOllama();
-  refreshPermissions();
-  openModelSetup();
-  uSheet.hidden = true;
+  // Open the sheet FIRST: nothing below may ever block it. A dead refresh
+  // used to throw synchronously and the button looked broken for releases.
   document.getElementById("settings-sheet").hidden = false;
+  document.querySelectorAll(".sheet").forEach((s) => {
+    if (s.id !== "settings-sheet") s.hidden = true;
+  });
+  const refresh = [
+    syncSettingsForm,
+    syncAppLockToggle,
+    loadProviders,
+    loadSpeechStatus,
+    refreshLlmStatus,
+    loadVoiceprints,
+    loadOllama,
+    refreshPermissions,
+    openModelSetup,
+  ];
+  for (const fn of refresh) {
+    try { fn(); } catch { /* one broken panel must not kill the rest */ }
+  }
 });
 // Returning from a system grant screen: re-read the real state so the card
 // never shows what the user did ten seconds ago.

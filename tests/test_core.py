@@ -4136,6 +4136,203 @@ def test_crud() -> None:
         db.reset_db_path()
 
 
+def _js_skeleton(src: str) -> str:
+    """Blank out strings, comments, template bodies and regex literals.
+
+    Only a hand-rolled scanner is safe here: a regex like // inside a string
+    would derail a naive split, and a missed declaration turns into a false
+    alarm in the sweep below. Interpolations (``${...}``) are dropped whole -
+    losing a rare inline declaration only weakens the sweep, never breaks it.
+    """
+    out: list[str] = []
+    i, n = 0, len(src)
+    mode = "code"
+    quote = ""
+    last_sig = ""        # last meaningful char in code mode
+    last_word = ""       # identifier run immediately before position
+    while i < n:
+        c = src[i]
+        if mode == "code":
+            if c == "/" and i + 1 < n and src[i + 1] == "/":
+                mode = "line"
+                i += 2
+                continue
+            if c == "/" and i + 1 < n and src[i + 1] == "*":
+                mode = "block"
+                i += 2
+                continue
+            if c in "\"'":
+                quote = c
+                mode = "str"
+                out.append(" ")
+                i += 1
+                continue
+            if c == "`":
+                mode = "tpl"
+                i += 1
+                continue
+            regex_after = (
+                last_sig in "([=,:;!&|?{};+-*%^~<>\n"
+                or last_sig == ""
+                or last_word in ("return", "case", "typeof", "instanceof", "in",
+                                 "of", "delete", "void", "new", "do", "else",
+                                 "yield", "await")
+            )
+            if c == "/" and regex_after:
+                mode = "regex"
+                i += 1
+                continue
+            out.append(c)
+            if c.isspace():
+                if c == "\n":
+                    last_sig = "\n"
+                    last_word = ""
+            else:
+                last_sig = c
+                if c.isalnum() or c in "_$":
+                    last_word += c
+                else:
+                    last_word = ""
+            i += 1
+        elif mode == "line":
+            if c == "\n":
+                mode = "code"
+                out.append("\n")
+                last_sig = "\n"
+                last_word = ""
+            i += 1
+        elif mode == "block":
+            if c == "*" and i + 1 < n and src[i + 1] == "/":
+                mode = "code"
+                i += 2
+            else:
+                if c == "\n":
+                    out.append("\n")
+                    last_sig = "\n"
+                    last_word = ""
+                i += 1
+        elif mode == "str":
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                mode = "code"
+                last_sig = quote
+                last_word = ""
+            i += 1
+        else:  # tpl or regex
+            if c == "\\":
+                i += 2
+                continue
+            if mode == "tpl" and c == "`":
+                mode = "code"
+                last_sig = "`"
+                last_word = ""
+                i += 1
+                continue
+            if mode == "regex":
+                if c == "[":
+                    i += 1
+                    while i < n and src[i] != "]":
+                        if src[i] == "\\":
+                            i += 1
+                        i += 1
+                    i += 1  # past the class (or off the end)
+                    continue
+                if c == "/":
+                    mode = "code"
+                    last_sig = "/"
+                    last_word = ""
+                    i += 1
+                    while i < n and (src[i].isalpha() or src[i] == "$"):
+                        i += 1  # flags
+                    continue
+                if c == "\n":
+                    # Not a regex after all - recover at the line break.
+                    mode = "code"
+                    out.append("\n")
+                    last_sig = "\n"
+                    last_word = ""
+            i += 1
+    return "".join(out)
+
+
+def test_no_undeclared_identifiers() -> None:
+    """An undeclared identifier throws at click time and is invisible to the
+    getElementById checks: one stale variable kept Settings closed for a whole
+    release. Sweep app.js - every property base and call target must be
+    declared somewhere in the file or be a known browser global."""
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "web" / "app.js").read_text(encoding="utf-8")
+    stripped = _js_skeleton(src)
+
+    globals_ok = set(
+        """
+        window document navigator location history console performance screen
+        localStorage sessionStorage caches fetch WebSocket Worker XMLHttpRequest
+        URL URLSearchParams Blob File FormData AbortController AbortSignal Headers
+        Request Response Event CustomEvent KeyboardEvent MouseEvent EventSource
+        TextEncoder TextDecoder IntersectionObserver MutationObserver ResizeObserver
+        requestAnimationFrame cancelAnimationFrame setTimeout clearTimeout
+        setInterval clearInterval queueMicrotask matchMedia getComputedStyle
+        alert confirm prompt atob btoa encodeURIComponent decodeURIComponent
+        encodeURI decodeURI parseInt parseFloat isNaN isFinite Math JSON Date
+        String Number Boolean Array Object Promise Error TypeError RangeError
+        RegExp Map Set WeakMap WeakSet Symbol Proxy Reflect Infinity NaN
+        undefined speechSynthesis SpeechRecognition webkitSpeechRecognition
+        SpeechSynthesisUtterance Audio Image AudioContext webkitAudioContext
+        OfflineAudioContext MediaRecorder AndroidVoice globalThis top self
+        Notification crypto structuredClone DOMParser HTMLElement Element Node
+        devicePixelRatio constructor get set of from async await new function
+        if for while switch catch return typeof delete void instanceof in do
+        else break continue case default class extends super this null true
+        false with throw import export yield
+        ArrayBuffer DataView Uint8Array Int8Array Uint16Array Int16Array
+        Uint32Array Int32Array Float32Array Float64Array BigInt
+        """.split()
+    )
+
+    bases = set(re.findall(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.", stripped))
+    calls = set(re.findall(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(", stripped))
+    candidates = (bases | calls) - globals_ok
+
+    declared = set(
+        re.findall(r"\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)",
+                   stripped)
+    )
+    # Destructuring targets: const { a, b: c } = ... / const [x] = ...
+    for m in re.finditer(r"\b(?:const|let|var)\s*[{[]([^=;]+?)[=\]]", stripped):
+        declared.update(re.findall(r"[A-Za-z_$][\w$]*", m.group(1)))
+    # Arrow parameters, including single-parameter arrows without parens.
+    declared.update(re.findall(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*=>", stripped))
+    # Object-literal method shorthand: { name(...) {} } declares name.
+    for m in re.finditer(r"[{,]\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(", stripped):
+        declared.add(m.group(1))
+    # Every balanced paren group may hold a parameter list (or a catch var).
+    depth = 0
+    start = -1
+    for idx, ch in enumerate(stripped):
+        if ch == "(":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                declared.update(re.findall(r"[A-Za-z_$][\w$]*", stripped[start + 1:idx]))
+                start = -1
+
+    missing = sorted(candidates - declared)
+    check(
+        "no undeclared identifiers in app.js",
+        not missing,
+    )
+    if missing:
+        print(f"         undeclared: {', '.join(missing[:12])}")
+
+
 def main() -> int:
     before = None
     before_digest = None
@@ -4163,6 +4360,7 @@ def main() -> int:
     test_isolation()
     test_remote_web()
     test_web_sync()
+    test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()
     test_soul()
