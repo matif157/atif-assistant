@@ -1440,6 +1440,27 @@ def test_uploads() -> None:
         check("duplicate adds no second episode", b2.get("episode_id") is None)
         check("duplicate adds no second evidence row", b2.get("evidence_id") is None)
 
+        # Duplicate handling must be time-independent: evidence identity
+        # hashes occurred_at, so a re-upload "later" (clock frozen forward)
+        # still must not stack rows. Regression for a CI-only flake where the
+        # two uploads straddled a second boundary.
+        orig_now = db.now
+        db.now = lambda: "2099-01-01 00:00:00"
+        try:
+            r2b = client.post(
+                "/api/upload",
+                json={"filename": "plan.txt", "related_to": "business plan",
+                      "text": "Secret growth plan"},
+            )
+        finally:
+            db.now = orig_now
+        b2b = r2b.json()
+        check("duplicate detected even at a later time", b2b.get("duplicate_file") is True)
+        check(
+            "later duplicate adds no episode or evidence",
+            b2b.get("episode_id") is None and b2b.get("evidence_id") is None,
+        )
+
         png = base64.b64encode(b"\x89PNG\r\n\x1a\n\x00binary").decode()
         r3 = client.post("/api/upload", json={"filename": "pic.png", "content_b64": png})
         b3 = r3.json()

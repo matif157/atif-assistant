@@ -267,6 +267,13 @@ def ingest_upload(
         body = body[:MAX_TEXT_CHARS]
         report["read"] = True
         report["read_chars"] = len(body)
+
+    # A file whose bytes are already stored was ingested when it first
+    # arrived. Ingesting again would not be idempotent: evidence identity
+    # hashes occurred_at (second precision), so the same line re-uploaded in
+    # a later second would stack a second row. Skipping here makes duplicate
+    # handling time-independent - no evidence, no episode, no proposals.
+    if body and not duplicate_file:
         eid = db.add_evidence(
             source=f"{source}:{filename}",
             body=body,
