@@ -381,12 +381,38 @@
       </span>
       <small class="hint">Keeps other people out of the app; it does not encrypt your data.</small>
     </label>
-    <label>WHATSAPP LIVE READER
-      <span style="display:flex; align-items:center; gap:.5rem; letter-spacing:normal; text-transform:none; font-size:12px; color:var(--txt); flex-wrap:wrap">
-        <button type="button" class="ghost small" id="inbox-open-access">GRANT NOTIFICATION ACCESS</button>
-        <span id="inbox-access-state" class="hint">checking...</span>
-      </span>
-      <small class="hint">Reads incoming WhatsApp messages as they arrive, through the official Android notification-access screen (only you can grant it there). Messages land in the INBOX for review - read-only, never sent anywhere.</small>
+    <label>DEVICE PERMISSIONS
+      <div id="perm-rows" style="display:flex;flex-direction:column;gap:.45rem;letter-spacing:normal;text-transform:none;font-size:12px;color:var(--txt);margin-top:.35rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+          <span>Microphone - voice input</span>
+          <span style="display:flex;align-items:center;gap:.4rem">
+            <span id="perm-mic-state" class="hint">checking...</span>
+            <button type="button" class="ghost small" id="perm-mic-btn">ALLOW</button>
+          </span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+          <span>Notifications - reminders and reply drafts</span>
+          <span style="display:flex;align-items:center;gap:.4rem">
+            <span id="perm-notif-state" class="hint">checking...</span>
+            <button type="button" class="ghost small" id="perm-notif-btn">ALLOW</button>
+          </span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+          <span>Live reader - read incoming WhatsApp notifications</span>
+          <span style="display:flex;align-items:center;gap:.4rem">
+            <span id="inbox-access-state" class="hint">checking...</span>
+            <button type="button" class="ghost small" id="inbox-open-access">GRANT</button>
+          </span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+          <span>Keep-alive - exempt Atif from battery optimization</span>
+          <span style="display:flex;align-items:center;gap:.4rem">
+            <span id="perm-battery-state" class="hint">checking...</span>
+            <button type="button" class="ghost small" id="perm-battery-btn">KEEP ALIVE</button>
+          </span>
+        </div>
+      </div>
+      <small class="hint">Each grant is yours to give or revoke in Android settings. The live reader only ever sees what WhatsApp puts in a notification, and drafts are suggestions you copy - Atif never sends anything on your behalf.</small>
     </label>
     <div class="form-actions">
       <button class="ghost" id="download-urdu-model" hidden>DOWNLOAD URDU MODEL</button>

@@ -3804,24 +3804,54 @@ function syncSettingsForm() {
   }
 }
 
-/* Phase 8: live reader - status + the system-owned grant flow */
-function refreshInboxAccess() {
-  const state = document.getElementById("inbox-access-state");
-  if (!state) return;
-  let granted = false;
+/* Phase 8: device permissions center - live status + the system-owned grant
+   flows (the OS owns every one of these screens; we only ever open them). */
+function refreshPermissions() {
+  const st = {
+    mic: document.getElementById("perm-mic-state"),
+    notif: document.getElementById("perm-notif-state"),
+    listener: document.getElementById("inbox-access-state"),
+    battery: document.getElementById("perm-battery-state"),
+  };
+  let s = {};
   try {
-    granted = !!(
-      window.AndroidVoice && typeof window.AndroidVoice.notificationAccess === "function" && window.AndroidVoice.notificationAccess()
-    );
-  } catch { granted = false; }
-  if (granted) {
-    state.textContent = "granted - live reader on";
-  } else if (window.AndroidVoice && typeof window.AndroidVoice.openNotificationAccess === "function") {
-    state.textContent = "not granted yet - tap the button";
-  } else {
-    state.textContent = "live reader is Android-only (works in the APK)";
-  }
+    if (window.AndroidVoice && typeof window.AndroidVoice.permissionStatus === "function") {
+      s = JSON.parse(window.AndroidVoice.permissionStatus() || "{}");
+    }
+  } catch { s = {}; }
+  const on = (x) => (x ? "allowed" : "not allowed");
+  if (st.mic) st.mic.textContent = on(s.mic);
+  if (st.notif) st.notif.textContent = on(s.notifications);
+  if (st.listener) st.listener.textContent = on(s.listener);
+  if (st.battery) st.battery.textContent = s.battery ? "exempt" : "may sleep";
+  const micBtn = document.getElementById("perm-mic-btn");
+  if (micBtn) micBtn.hidden = !!s.mic;
+  const notifBtn = document.getElementById("perm-notif-btn");
+  if (notifBtn) notifBtn.hidden = !!s.notifications;
+  const battBtn = document.getElementById("perm-battery-btn");
+  if (battBtn) battBtn.hidden = !!s.battery;
 }
+document.getElementById("perm-mic-btn")?.addEventListener("click", () => {
+  try {
+    if (window.AndroidVoice && typeof window.AndroidVoice.requestMic === "function") {
+      window.AndroidVoice.requestMic();
+    }
+  } catch { /* no bridge (browser/PWA) */ }
+});
+document.getElementById("perm-notif-btn")?.addEventListener("click", () => {
+  try {
+    if (window.AndroidVoice && typeof window.AndroidVoice.requestNotifications === "function") {
+      window.AndroidVoice.requestNotifications();
+    }
+  } catch { /* no bridge (browser/PWA) */ }
+});
+document.getElementById("perm-battery-btn")?.addEventListener("click", () => {
+  try {
+    if (window.AndroidVoice && typeof window.AndroidVoice.requestBatteryExempt === "function") {
+      window.AndroidVoice.requestBatteryExempt();
+    }
+  } catch { /* no bridge (browser/PWA) */ }
+});
 document.getElementById("inbox-open-access")?.addEventListener("click", () => {
   try {
     if (window.AndroidVoice && typeof window.AndroidVoice.openNotificationAccess === "function") {
@@ -3837,9 +3867,15 @@ document.getElementById("btn-settings").addEventListener("click", () => {
   loadSpeechStatus();
   loadVoiceprints();
   loadOllama();
-  refreshInboxAccess();
+  refreshPermissions();
   uSheet.hidden = true;
   document.getElementById("settings-sheet").hidden = false;
+});
+// Returning from a system grant screen: re-read the real state so the card
+// never shows what the user did ten seconds ago.
+document.addEventListener("visibilitychange", () => {
+  const sheet = document.getElementById("settings-sheet");
+  if (!document.hidden && sheet && !sheet.hidden) refreshPermissions();
 });
 document.getElementById("close-settings").addEventListener("click", () => {
   document.getElementById("settings-sheet").hidden = true;

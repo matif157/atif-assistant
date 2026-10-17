@@ -895,6 +895,69 @@ public class MainActivity extends Activity {
                 }
             }
         }
+
+        /** Phase 8 permissions center: live status of every grant Atif can
+         *  hold, so the settings card never lies about what is allowed. */
+        @JavascriptInterface
+        public String permissionStatus() {
+            try {
+                android.os.PowerManager pm =
+                        getSystemService(android.os.PowerManager.class);
+                boolean mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED;
+                boolean notif = Build.VERSION.SDK_INT < 33
+                        || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                                == PackageManager.PERMISSION_GRANTED;
+                boolean battery = pm != null
+                        && pm.isIgnoringBatteryOptimizations(getPackageName());
+                org.json.JSONObject j = new org.json.JSONObject();
+                j.put("mic", mic);
+                j.put("notifications", notif);
+                j.put("listener", notificationAccess());
+                j.put("battery", battery);
+                return j.toString();
+            } catch (Throwable t) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public void requestMic() {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                        new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+            }
+        }
+
+        @JavascriptInterface
+        public void requestNotifications() {
+            if (Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                            != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1010);
+            }
+        }
+
+        /** Direct system dialog to exempt Atif from battery optimization;
+         *  falls back to the per-app list when the OEM blocks the dialog. */
+        @JavascriptInterface
+        public void requestBatteryExempt() {
+            try {
+                Intent i = new Intent(
+                        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName()));
+                startActivity(i);
+            } catch (Throwable t) {
+                try {
+                    startActivity(new Intent(
+                            android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                } catch (Throwable t2) {
+                    android.util.Log.w("Atif", "no battery exemption screen", t2);
+                }
+            }
+        }
     }
 
     /**

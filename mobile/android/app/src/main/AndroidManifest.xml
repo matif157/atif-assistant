@@ -9,6 +9,10 @@
          while the permission is absent from the manifest, which would drop
          every reminder notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Phase 8 permissions center: lets the user exempt Atif from battery
+         optimization so the foreground engine and draft notifier keep
+         running while the phone is idle. User-initiated, system dialog. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Foreground service: keeps the embedded Python engine alive (and its
          loopback server reachable) while the app is backgrounded. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
