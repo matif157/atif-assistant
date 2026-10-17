@@ -3219,7 +3219,10 @@ async function refreshLlmStatus() {
   }
   const d = s.download || {};
   // The section only exists on builds that ship llama-server (Android).
-  if (llmSectionEl) llmSectionEl.hidden = !s.binary && d.state !== "downloading";
+  if (llmSectionEl) {
+    llmSectionEl.hidden =
+      !s.binary && d.state !== "downloading" && d.state !== "paused";
+  }
   if (d.state === "downloading") {
     const pct = d.total ? Math.floor((d.bytes / d.total) * 100) : 0;
     llmStatusEl.textContent = `Downloading model... ${pct}% (${llmMb(d.bytes)} of ${llmMb(d.total)} MB)`;
@@ -3227,19 +3230,47 @@ async function refreshLlmStatus() {
       llmProgressEl.hidden = false;
       llmProgressEl.value = pct;
     }
-    if (dlLlmBtn) dlLlmBtn.disabled = true;
+    if (dlLlmBtn) {
+      dlLlmBtn.disabled = true;
+      dlLlmBtn.hidden = false;
+      dlLlmBtn.textContent = "DOWNLOADING...";
+    }
     scheduleLlmPoll(1500);
+    return;
+  }
+  if (d.state === "paused") {
+    const mb = llmMb(d.bytes || d.partial || 0);
+    llmStatusEl.textContent =
+      `Model download paused at ${mb} MB. Resume continues from there.`;
+    if (llmProgressEl && d.total) {
+      llmProgressEl.hidden = false;
+      llmProgressEl.value = Math.floor(((d.bytes || 0) / d.total) * 100);
+    }
+    if (dlLlmBtn) {
+      dlLlmBtn.disabled = false;
+      dlLlmBtn.hidden = false;
+      dlLlmBtn.textContent = "RESUME DOWNLOAD";
+    }
+    scheduleLlmPoll(3000);
     return;
   }
   if (llmProgressEl) llmProgressEl.hidden = true;
   if (dlLlmBtn) dlLlmBtn.disabled = false;
   if (d.state === "error") {
     llmStatusEl.textContent = "Download failed: " + (d.reason || "unknown error");
+    if (dlLlmBtn) {
+      dlLlmBtn.hidden = false;
+      dlLlmBtn.textContent = "RETRY DOWNLOAD";
+    }
   } else if (s.model && s.model.present) {
     llmStatusEl.textContent = `Model ready (${s.model.file}, ${llmMb(s.model.size)} MB). Server: ${s.server}.`;
     if (dlLlmBtn) dlLlmBtn.hidden = true;
   } else if (s.binary) {
     llmStatusEl.textContent = "llama-server is ready. Download the model to answer fully offline.";
+    if (dlLlmBtn) {
+      dlLlmBtn.hidden = false;
+      dlLlmBtn.textContent = "DOWNLOAD MODEL (~1.1 GB)";
+    }
   } else {
     llmStatusEl.textContent = "On-device model is not part of this build.";
     if (dlLlmBtn) dlLlmBtn.hidden = true;
@@ -3277,7 +3308,11 @@ async function loadSpeechStatus() {
     const dl = (s && s.download) || {};
     if (dl.state === "downloading") {
       // Mid-fetch: report progress instead of the static note.
-      if (dlModelBtn) dlModelBtn.disabled = true;
+      if (dlModelBtn) {
+        dlModelBtn.disabled = true;
+        dlModelBtn.hidden = false;
+        dlModelBtn.textContent = "DOWNLOADING...";
+      }
       if (dlModelNote) {
         const got = Math.round((dl.bytes || 0) / 1048576);
         const want = Math.round((dl.total || 0) / 1048576);
@@ -3288,9 +3323,25 @@ async function loadSpeechStatus() {
       scheduleSpeechPoll(1500);
       return;
     }
+    if (dl.state === "paused") {
+      const mb = Math.round((dl.bytes || dl.partial || 0) / 1048576);
+      if (dlModelBtn) {
+        dlModelBtn.disabled = false;
+        dlModelBtn.hidden = false;
+        dlModelBtn.textContent = "RESUME DOWNLOAD";
+      }
+      if (dlModelNote) {
+        dlModelNote.textContent =
+          `Speech model paused at ${mb} MB. Resume continues from there.`;
+      }
+      scheduleSpeechPoll(3000);
+      return;
+    }
     if (dlModelBtn) {
       dlModelBtn.disabled = false;
       dlModelBtn.hidden = hasSmall || dl.state === "ready";
+      dlModelBtn.textContent =
+        dl.state === "error" ? "RETRY DOWNLOAD" : "DOWNLOAD URDU MODEL";
     }
     if (dlModelNote) {
       if (dl.state === "error") {
@@ -3316,16 +3367,30 @@ function scheduleSpeechPoll(ms) {
 }
 
 /* ------------------------------------------------------- first-run setup */
-// One overlay, shown once, when the offline models are still missing. It
-// offers the same background downloads as Settings but without assuming the
-// user knows where Settings is.
+// Shown once, when the offline models are missing. START is never blocked by
+// a download: the set below is a one-tap fetch of both models that pauses,
+// resumes where it stopped, and never throws away progress.
 
 const setupOverlay = document.getElementById("setup-overlay");
-const setupSpeechState = document.getElementById("setup-speech-state");
-const setupLlmState = document.getElementById("setup-llm-state");
-const setupLlmRow = document.getElementById("setup-llm-row");
+const setupModelsState = document.getElementById("setup-models-state");
+const setupHint = document.getElementById("setup-hint");
+const setupEta = document.getElementById("setup-eta");
+const setupDlBtn = document.getElementById("setup-dl");
+const setupPauseBtn = document.getElementById("setup-pause");
 const setupStartBtn = document.getElementById("setup-start");
+const setupSetBtns = Array.from(document.querySelectorAll(".setup-set"));
 let setupPollTimer = 0;
+let setupInfo = null;    // GET /api/setup: sets, recommendation, free space
+let setupSet = "quick";  // which set the DOWNLOAD button fetches
+let setupEtaFrom = { t: 0, got: 0 };
+let setupDlArmedAt = 0;  // second-tap timestamp for the mobile-data guard
+
+// Same numbers the backend reports, used when /api/setup is unreachable so
+// the button never lies about the size.
+const SETUP_SETS_FALLBACK = {
+  quick: { llm: "qwen2.5-0.5b", stt: "ggml-base.bin", total_mib: 610 },
+  full: { llm: "qwen2.5-1.5b", stt: "ggml-small.bin", total_mib: 1531 },
+};
 
 function markSetupDone() {
   try { localStorage.setItem("atif_setup_done", "1"); } catch { /* private mode */ }
@@ -3339,6 +3404,59 @@ function setupState(el, text, cls) {
   el.className = "setup-state" + (cls ? " " + cls : "");
 }
 
+function setupActiveSet() {
+  const sets = (setupInfo && setupInfo.sets) || SETUP_SETS_FALLBACK;
+  return sets[setupSet] || sets.quick || SETUP_SETS_FALLBACK.quick;
+}
+
+function setupOnCellular() {
+  try {
+    const c = navigator.connection || navigator.mozConnection;
+    if (!c) return false;
+    if (c.type) return c.type === "cellular";
+    return /^(slow-2g|2g|3g|4g|5g)$/.test(c.effectiveType || "");
+  } catch { return false; }
+}
+
+function renderSetupSet() {
+  setupSetBtns.forEach((b) => b.classList.toggle("sel", b.dataset.set === setupSet));
+  const set = setupActiveSet();
+  const free = (setupInfo && setupInfo.storage && setupInfo.storage.free_bytes) || 0;
+  const need = set.total_mib * 1048576;
+  const noSpace = Boolean(setupInfo) && free > 0 && free < need;
+  if (setupDlBtn) setupDlBtn.disabled = noSpace;
+  if (setupHint) {
+    setupHint.textContent = noSpace
+      ? `Needs about ${set.total_mib} MB but only ${Math.round(free / 1048576)} MB free - ` +
+        "free up space and retry. START works either way."
+      : "Speech recognition and the reasoning model, downloaded once. " +
+        "Pause anytime; progress is never lost.";
+  }
+}
+
+// Speed from the previous poll, so a phone on a flaky link sees an honest
+// countdown instead of a fake one.
+function setupEtaText(want, got, downloading) {
+  const now = Date.now();
+  if (!downloading) {
+    setupEtaFrom = { t: 0, got: 0 };
+    return "";
+  }
+  let text = "";
+  if (setupEtaFrom.t && got > setupEtaFrom.got && want > got) {
+    const dt = (now - setupEtaFrom.t) / 1000;
+    const dB = got - setupEtaFrom.got;
+    if (dt >= 1 && dB > 65536) {
+      const secs = (want - got) / (dB / dt);
+      if (secs > 20 && secs < 8 * 3600) {
+        text = secs >= 90 ? `about ${Math.ceil(secs / 60)} min left` : "finishing soon";
+      }
+    }
+  }
+  setupEtaFrom = { t: now, got };
+  return text;
+}
+
 async function refreshSetup() {
   if (!setupOverlay || setupOverlay.hidden) return;
   let speech = null;
@@ -3346,46 +3464,65 @@ async function refreshSetup() {
   try { speech = await (await fetch("/api/speech")).json(); } catch { /* next poll */ }
   try { llm = await (await fetch("/api/llm")).json(); } catch { /* desktop: none */ }
   const s = (speech && speech.stt) || {};
-  const d = (s.download) || {};
-  const lm = (llm && llm.model) || {};
-
-  let speechReady = Boolean(s.small_present);
-  const speechDlBtn = document.getElementById("setup-speech-dl");
-  if (speechDlBtn) speechDlBtn.hidden = speechReady || d.state === "downloading";
-  if (d.state === "downloading") {
-    const got = Math.round((d.bytes || 0) / 1048576);
-    const want = Math.round((d.total || 0) / 1048576);
-    setupState(setupSpeechState, want ? `downloading ${got}/${want} MB` : "downloading...");
-  } else if (d.state === "error") {
-    setupState(setupSpeechState, "failed: " + (d.reason || "network"), "err");
-  } else if (speechReady) {
-    setupState(setupSpeechState, "ready", "ok");
-  } else {
-    setupState(setupSpeechState, "not installed");
-  }
-
+  const d = s.download || {};
   const hasLlm = Boolean(llm && llm.binary);
-  if (setupLlmRow) setupLlmRow.hidden = !hasLlm;
   const ldl = (llm && llm.download) || {};
-  let llmReady = !hasLlm || Boolean(lm.present);
-  const llmDlBtn = document.getElementById("setup-llm-dl");
-  if (llmDlBtn) llmDlBtn.hidden = llmReady || ldl.state === "downloading";
-  if (ldl.state === "downloading") {
-    const got = Math.round((ldl.bytes || 0) / 1048576);
-    const want = Math.round((ldl.total || 0) / 1048576);
-    setupState(setupLlmState, want ? `downloading ${got}/${want} MB` : "downloading...");
-  } else if (ldl.state === "error") {
-    setupState(setupLlmState, "failed: " + (ldl.reason || "network"), "err");
-  } else if (llmReady && hasLlm) {
-    setupState(setupLlmState, "ready", "ok");
-  } else {
-    setupState(setupLlmState, "not installed");
+  const set = setupActiveSet();
+  const speechReady = (s.models_present || []).includes(set.stt);
+  const llmReady = !hasLlm || Boolean(llm.model && llm.model.present);
+  const parts = [d].concat(hasLlm ? [ldl] : []);
+  const phase = parts.some((p) => p.state === "downloading")
+    ? "downloading"
+    : parts.some((p) => p.state === "paused")
+      ? "paused"
+      : parts.some((p) => p.state === "error")
+        ? "error"
+        : (speechReady && llmReady) ? "ready"
+        : "idle";
+
+  let got = 0;
+  let want = 0;
+  for (const p of parts) {
+    if (p.total) {
+      want += p.total;
+      got += Math.min(p.bytes || 0, p.total);
+    }
+  }
+  if (want && got > want) got = want;
+  const gotMb = Math.round(got / 1048576);
+  const wantMb = Math.round(want / 1048576);
+  const eta = setupEtaText(want, got, phase === "downloading");
+
+  if (setupDlBtn) setupDlBtn.hidden = phase === "downloading" || phase === "ready";
+  if (setupPauseBtn) setupPauseBtn.hidden = phase !== "downloading";
+  if (setupEta) {
+    setupEta.hidden = phase !== "paused";
+    setupEta.textContent = phase === "paused"
+      ? "Paused. Resume continues from where it stopped."
+      : "";
   }
 
-  if (setupStartBtn) setupStartBtn.disabled = !(speechReady && llmReady);
-  if (d.state === "downloading" || ldl.state === "downloading") {
-    setupPollTimer = setTimeout(refreshSetup, 1500);
+  if (phase === "downloading") {
+    setupState(setupModelsState, wantMb
+      ? `downloading ${gotMb}/${wantMb} MB${eta ? " · " + eta : ""}`
+      : "downloading...");
+  } else if (phase === "paused") {
+    setupState(setupModelsState, gotMb
+      ? `paused at ${gotMb} MB - resumes where it stopped`
+      : "paused - progress saved");
+    if (setupDlBtn) setupDlBtn.textContent = `RESUME (${set.total_mib} MB)`;
+  } else if (phase === "error") {
+    const bad = parts.find((p) => p.state === "error") || {};
+    setupState(setupModelsState, "failed: " + (bad.reason || "network error"), "err");
+    if (setupDlBtn) setupDlBtn.textContent = `RETRY (${set.total_mib} MB)`;
+  } else if (phase === "ready") {
+    setupState(setupModelsState, "ready", "ok");
+  } else {
+    setupState(setupModelsState, "not installed");
+    if (setupDlBtn) setupDlBtn.textContent = `DOWNLOAD (${set.total_mib} MB)`;
   }
+
+  if (phase === "downloading") setupPollTimer = setTimeout(refreshSetup, 1500);
 }
 
 async function maybeShowSetup() {
@@ -3394,7 +3531,7 @@ async function maybeShowSetup() {
   let need = false;
   try {
     const speech = await (await fetch("/api/speech")).json();
-    need = !speech?.stt?.small_present;
+    need = (speech?.stt?.models_present || []).length === 0;
     if (!need && speech?.stt?.available === false) need = true;
   } catch { return; /* server unreachable: never block the app */ }
   if (!need) {
@@ -3407,38 +3544,85 @@ async function maybeShowSetup() {
     markSetupDone(); // nothing to set up; never nag again
     return;
   }
+  try { setupInfo = await (await fetch("/api/setup")).json(); } catch { /* fallback */ }
+  if (setupInfo && setupInfo.recommended) setupSet = setupInfo.recommended;
   setupOverlay.hidden = false;
+  renderSetupSet();
   refreshSetup();
 }
 
-if (document.getElementById("setup-speech-dl")) {
-  document.getElementById("setup-speech-dl").addEventListener("click", async () => {
+setupSetBtns.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    setupSet = btn.dataset.set === "full" ? "full" : "quick";
+    setupEtaFrom = { t: 0, got: 0 };
+    renderSetupSet();
+    refreshSetup();
+  });
+});
+
+if (setupDlBtn) {
+  setupDlBtn.addEventListener("click", async () => {
+    // Two taps on mobile data: an accidental 1.5 GB over a metered link is
+    // worse than one extra tap. Wi-Fi starts immediately.
+    if (setupOnCellular() && Date.now() - setupDlArmedAt > 5000) {
+      setupDlArmedAt = Date.now();
+      setupDlBtn.textContent = "TAP AGAIN TO USE MOBILE DATA";
+      setTimeout(() => {
+        if (Date.now() - setupDlArmedAt >= 4900) refreshSetup();
+      }, 5000);
+      return;
+    }
+    setupDlArmedAt = 0;
+    const set = setupActiveSet();
     try {
       await fetch("/api/speech/model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "ggml-small.bin", background: true }),
+        body: JSON.stringify({ name: set.stt, background: true }),
       });
+      let llmBin = false;
+      try {
+        llmBin = Boolean((await (await fetch("/api/llm")).json()).binary);
+      } catch { /* no llm endpoints */ }
+      if (llmBin) {
+        await fetch("/api/llm/model", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: set.llm }),
+        });
+      }
     } catch { /* refreshSetup shows the failure */ }
     refreshSetup();
   });
 }
-if (document.getElementById("setup-llm-dl")) {
-  document.getElementById("setup-llm-dl").addEventListener("click", async () => {
+
+if (setupPauseBtn) {
+  setupPauseBtn.addEventListener("click", async () => {
+    try {
+      await fetch("/api/speech/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "pause" }),
+      });
+    } catch { /* offline */ }
     try {
       await fetch("/api/llm/model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: "{}",
+        body: JSON.stringify({ action: "pause" }),
       });
-    } catch { /* refreshSetup shows the failure */ }
+    } catch { /* offline */ }
+    clearTimeout(setupPollTimer);
     refreshSetup();
   });
 }
+
 if (document.getElementById("setup-skip")) {
   document.getElementById("setup-skip").addEventListener("click", markSetupDone);
 }
 if (setupStartBtn) {
+  // START is deliberately never disabled: a failed or slow download must not
+  // stop the user from reaching the app.
   setupStartBtn.addEventListener("click", () => {
     markSetupDone();
     localSttReady = true;

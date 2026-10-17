@@ -788,7 +788,16 @@ def _part_file(name: str) -> Path:
 
 
 def llm_download_start(name: str | None = None) -> dict[str, Any]:
-    """Start the model download in the background; never blocks the caller."""
+    """Start the model download in the background; never blocks the caller.
+
+    When no name is given, a paused or failed download is resumed as-is
+    instead of silently switching to the default model.
+    """
+    if name is None:
+        with _LLM_DL_LOCK:
+            prev_state, prev_name = _LLM_DL["state"], _LLM_DL["name"]
+        if prev_state in ("paused", "error") and prev_name in LLM_MODEL_URLS:
+            name = prev_name
     name = name or LLM_MODEL_DEFAULT
     if name not in LLM_MODEL_URLS:
         return {"ok": False, "reason": f"unknown model {name!r}"}

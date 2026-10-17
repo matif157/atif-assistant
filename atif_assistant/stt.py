@@ -248,7 +248,16 @@ def stt_download_pause() -> dict[str, Any]:
 
 
 def stt_download_start(name: str | None = None) -> dict[str, Any]:
-    """Start the model download in the background; never blocks the caller."""
+    """Start the model download in the background; never blocks the caller.
+
+    When no name is given, a paused or failed download is resumed as-is
+    instead of silently switching to the preferred model.
+    """
+    if name is None:
+        with _STT_DL_LOCK:
+            prev_state, prev_name = _STT_DL["state"], _STT_DL["name"]
+        if prev_state in ("paused", "error") and prev_name in MODEL_URLS:
+            name = prev_name
     name = name or PREFERRED_MODEL
     if name not in MODEL_URLS:
         return {"ok": False, "reason": f"unknown model {name!r}"}

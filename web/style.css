@@ -586,3 +586,22 @@ textarea:focus { outline: none; border-color: var(--acc); }
 .setup-hint { color: var(--dim); font-size: 12px; margin: 6px 0 8px; line-height: 1.45; }
 .setup-actions { margin-top: 6px; display: flex; gap: 10px; justify-content: flex-end; }
 .setup-actions button { min-width: 110px; }
+.setup-sets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.setup-set {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel2);
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.setup-set strong { font-size: 12px; letter-spacing: 0.05em; color: var(--txt); }
+.setup-set.sel { border-color: var(--acc); }
+.setup-set.sel strong { color: var(--acc); }
+.setup-eta { margin: 8px 0 0; font-size: 12px; color: var(--dim); }

@@ -2123,6 +2123,23 @@ def test_model_downloads() -> None:
                 "paused status reports partial bytes",
                 (llm.llm_model_status()["download"].get("partial") or 0) > 0,
             )
+            r = llm.llm_download_start()  # no name: resumes the paused model
+            check(
+                "nameless start resumes the paused model",
+                r.get("ok") is True
+                and llm.llm_model_status()["download"]["name"] == "unit-model",
+            )
+            check(
+                "resume returns to downloading",
+                wait_for(
+                    lambda: llm.llm_model_status()["download"]["state"] == "downloading"
+                ),
+            )
+            llm.llm_download_pause()
+            wait_for(
+                lambda: llm.llm_model_status()["download"]["state"] == "paused",
+                timeout=10,
+            )
 
             # 5. whisper (sync path): failure keeps progress, retry resumes
             reset_dl()
