@@ -122,31 +122,7 @@ button { font-family: inherit; cursor: pointer; /* no 300ms tap delay */ touch-a
 .msg.user .bubble { background: var(--panel2); border: 1px solid var(--line); }
 .msg.bot .bubble { background: var(--panel); border: 1px solid var(--line); }
 
-/* Reality Engine labels */
-.lbl { font-size: 10px; font-weight: 700; letter-spacing: .08em; padding: 1px 6px; border-radius: 4px; margin-right: 6px; }
-.lbl.FACT { color: var(--fact); background: rgba(94,234,212,.12); }
-.lbl.INFERENCE { color: var(--infer); background: rgba(147,197,253,.12); }
-.lbl.ASSUMPTION { color: var(--assume); background: rgba(251,191,36,.12); }
-.lbl.UNKNOWN { color: var(--unknown); background: rgba(248,113,113,.12); }
-.lbl.PREDICTION { color: var(--pred); background: rgba(196,181,253,.12); }
-
-.meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-.chip {
-  font-size: 10px;
-  color: var(--dim);
-  border: 1px solid var(--line);
-  padding: 2px 7px;
-  border-radius: 20px;
-}
-.chip.pat { color: var(--warn); border-color: rgba(251,191,36,.35); }
-.chip.rum { color: var(--danger); border-color: rgba(248,113,113,.4); }
-.chip.prof { color: var(--danger); border-color: rgba(248,113,113,.4); }
-.chip.int { color: var(--acc); border-color: rgba(94,234,212,.3); }
-.chip.mood { color: var(--violet); border-color: rgba(196,181,253,.4); }
-.brake { margin-top: 7px; font-size: 11px; color: var(--danger); border-left: 2px solid var(--danger); padding-left: 8px; }
-
 /* Phase 5: streaming, message actions, small feedback surfaces */
-.chip.stop { color: var(--danger); border-color: rgba(248,113,113,.4); }
 .msg.bot.streaming .bubble::after {
   content: "▋";
   color: var(--acc);
@@ -208,30 +184,6 @@ button { font-family: inherit; cursor: pointer; /* no 300ms tap delay */ touch-a
 
 /* composer */
 footer { border-top: 1px solid var(--line); background: var(--bg); padding: 10px 16px 12px; }
-/* route strip: read-only, shows the decision Atif Assistant made and why */
-.route {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 8px;
-  font-size: 10px;
-  line-height: 1.4;
-}
-.route[hidden] { display: none; }
-.route-mode {
-  flex: 0 0 auto;
-  letter-spacing: .1em;
-  color: var(--dim);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 2px 8px;
-}
-.route-mode.challenge { color: var(--warn); border-color: rgba(251,191,36,.4); }
-.route-mode.decide { color: var(--acc); border-color: rgba(94,234,212,.35); }
-.route-why { color: var(--dim); opacity: .8; }
-
-.chip.crit { color: var(--violet); border-color: rgba(196,181,253,.35); }
-.chip.repeat { color: var(--warn); border-color: rgba(251,191,36,.3); }
 
 .ghost.small { padding: 3px 9px; font-size: 10px; margin-right: 6px; }
 
@@ -667,10 +619,25 @@ textarea:focus { outline: none; border-color: var(--acc); }
 }
 .basis-sidebar[hidden] { display: none; }
 .basis-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   letter-spacing: .12em;
   color: var(--dim);
 }
+#close-basis {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  color: var(--dim);
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  cursor: pointer;
+}
+#close-basis:hover { color: var(--txt); border-color: var(--acc); }
 .basis-row {
   font-size: 11px;
   color: var(--txt);

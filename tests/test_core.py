@@ -901,6 +901,67 @@ def test_web_sync() -> None:
         print("       missing: " + ", ".join(missing_m))
 
 
+def test_natural_reply_surface() -> None:
+    """The conversation is plain chat; every meta artifact hides behind ⓘ.
+
+    User decisions for v1.3.3: labels are stripped at render time instead of
+    being badged, and the WHY THIS REPLY panel opens only from a per-answer
+    ⓘ (never automatically - an auto-open panel eats 40vh of a phone
+    screen). The panel must still surface MOOD/STATUS/INTENT, and restored
+    history recovers its labels from the raw text. Guards both directions:
+    inline chips sneaking back in, or the panel quietly stopping to open.
+    """
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    css = (root / "web" / "style.css").read_text(encoding="utf-8")
+
+    print("\nnatural replies: plain bubble, meta aside")
+
+    # Stripped (speak + labelize + history recovery), never badge-rendered.
+    check(
+        "reality labels stripped at render time",
+        js.count("FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION") >= 2,
+    )
+    check("no inline meta chips", "meta.appendChild(chip" not in js)
+    check("no red brake boxes in messages", '"brake"' not in js)
+    check("no rumination chip text", "RUMINATION RISK" not in js)
+    check("no self-audit chip text", "SELF-AUDIT" not in js)
+    check("route strip function removed", "showRoute" not in js)
+    check("route strip markup removed", 'id="route"' not in html)
+    check("route strip css removed", ".route-mode" not in css)
+    check(
+        "chip and meta css removed",
+        ".chip {" not in css and ".meta {" not in css,
+    )
+
+    # Every answer carries the opener, and the panel can be dismissed.
+    check("per-answer why button", '"ⓘ"' in js)
+    check(
+        "why button opens the panel",
+        "function showBasis" in js and "showBasis(res)" in js,
+    )
+    check(
+        "close button in markup and js",
+        "close-basis" in html and "close-basis" in js,
+    )
+
+    # The panel renders but never opens by itself.
+    rb = js.split("function renderBasis(", 1)[-1].split("\nfunction ", 1)[0]
+    check("why panel never auto-opens", "hidden = false" not in rb)
+    check("why panel carries mood row", 'addRow("MOOD"' in rb)
+    check("why panel flags stopped answers", 'addRow("STATUS"' in rb)
+
+    # Restored history stores content only - labels come back from the text.
+    check(
+        "labels recoverable from raw text",
+        "function parseLabelsFromText" in js,
+    )
+
+    check("old hint copy retired", "Every claim labelled" not in html)
+    check("new hint promises a tap to details", "one tap away" in html)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4360,6 +4421,7 @@ def main() -> int:
     test_isolation()
     test_remote_web()
     test_web_sync()
+    test_natural_reply_surface()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

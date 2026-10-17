@@ -55,16 +55,29 @@ function setStreamMode(on) {
   sendBtn.setAttribute("aria-label", on ? "Stop the answer" : "Send");
 }
 
-function renderBasis(data) {
+function renderBasis(data, force) {
   const sidebar = document.getElementById("basis-sidebar");
   const body = document.getElementById("basis-body");
   if (!body) return;
-  if (!data || (!data.route && !data.labels?.length && !data.critique?.length && !data.memories_used)) {
+  const has = Boolean(
+    data &&
+      (data.route ||
+        data.labels?.length ||
+        data.critique?.length ||
+        data.memories_used ||
+        data.warnings?.length ||
+        data.patterns?.length ||
+        data.mood ||
+        data.stopped ||
+        data.provider)
+  );
+  if (!has && !force) {
     if (sidebar) sidebar.hidden = true;
     body.innerHTML = "";
     return;
   }
-  if (sidebar) sidebar.hidden = false;
+  // Rendering is not showing: the panel only opens from a ⓘ or "Why this
+  // reply" - it must never shrink the conversation on its own.
   body.innerHTML = "";
 
   const addRow = (title, content) => {
@@ -79,6 +92,11 @@ function renderBasis(data) {
     row.appendChild(c);
     body.appendChild(row);
   };
+
+  if (!has) {
+    addRow("DETAILS", "Nothing recorded for this answer.");
+    return;
+  }
 
   if (data.route) {
     addRow("MODE", `${(ROUTE_LABEL[data.route.mode] || (data.route.mode||"").toUpperCase())}${data.route.confidence ? " · "+Math.round(data.route.confidence*100)+"%" : ""}`);
@@ -132,6 +150,13 @@ function renderBasis(data) {
     addRow("PROFESSIONAL RISK", data.professional_risk.join(", "));
   }
   if (data.rumination) addRow("RUMINATION", "YES");
+  if (data.mood?.mood && data.mood.mood !== "neutral") {
+    addRow("MOOD", String(data.mood.mood).toUpperCase());
+  }
+  if (data.stopped) addRow("STATUS", "stopped early - partial answer");
+  if (!data.route?.intent && data.intent && !String(data.intent).startsWith("UNCLEAR")) {
+    addRow("INTENT", String(data.intent));
+  }
 }
 
 function renderReplyOptions(data) {
@@ -158,14 +183,11 @@ function renderReplyOptions(data) {
     const inEl = document.getElementById("input");
     if (inEl) { inEl.value = "Make it shorter."; inEl.focus(); }
   });
-  mk("Facts only", () => {
+  mk("Just the facts", () => {
     const inEl = document.getElementById("input");
-    if (inEl) { inEl.value = "Answer with only [FACT]-supported points."; inEl.focus(); }
+    if (inEl) { inEl.value = "Stick to what is solidly supported - no speculation."; inEl.focus(); }
   });
-  mk("Show basis", () => {
-    const sb = document.getElementById("basis-sidebar");
-    if (sb) sb.hidden = false;
-  });
+  mk("Why this reply", () => showBasis(lastBasis));
   mk("Give example", () => {
     const inEl = document.getElementById("input");
     if (inEl) { inEl.value = "Give a concrete example."; inEl.focus(); }
@@ -211,41 +233,20 @@ function addUser(text) {
 }
 
 function labelize(text) {
-  // NOTE: with a global regex, String.match() returns only full matches and
-  // capture groups come back undefined. exec() is required to read m[1].
+  // Reality labels stay in the engine and in WHY THIS REPLY - the bubble
+  // itself reads like plain chat. Strip the [FACT]... tokens the same way
+  // speech does, keeping the line structure the model wrote.
   const re = /\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]/gi;
   const out = [];
-  let labelled = false;
   let wrote = false;
-
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    // Separate every non-empty line, labelled or not. Previously a plain line
-    // after a labelled one lost its break, gluing the two together.
+  for (const line of String(text ?? "").split("\n")) {
+    const clean = line.replace(re, "").replace(/\s+$/, "");
+    if (!clean.trim()) continue;
     if (wrote) out.push(document.createElement("br"));
     wrote = true;
-
-    re.lastIndex = 0;
-    const m = re.exec(line);
-    if (!m || !m[1]) {
-      // Preserve unlabelled text so nothing is silently dropped.
-      out.push(document.createTextNode(line));
-      continue;
-    }
-    labelled = true;
-    const span = document.createElement("span");
-    span.className = `lbl ${m[1].toUpperCase()}`;
-    span.textContent = m[1].toUpperCase();
-    out.push(span);
-    out.push(document.createTextNode(line.replace(re, "").trim()));
+    out.push(document.createTextNode(clean));
   }
-
-  // If the model ignored the label format entirely, fall back to plain text
-  // so the user still sees the answer.
-  if (!labelled) {
-    out.length = 0;
-    out.push(document.createTextNode(text));
-  }
+  if (!wrote) out.push(document.createTextNode(String(text ?? "")));
   return out;
 }
 
@@ -258,54 +259,14 @@ function buildBot(res, promptText) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
 
-  if (res.route) showRoute(res.route);
-
   const parts = labelize(res.text);
   if (parts.length) parts.forEach((p) => bubble.appendChild(p));
   else bubble.textContent = res.text;
-
-  const meta = document.createElement("div");
-  meta.className = "meta";
-
-  const chip = (cls, text) => {
-    const c = document.createElement("span");
-    c.className = `chip ${cls}`;
-    c.textContent = text;
-    return c;
-  };
-
-  if (res.stopped) meta.appendChild(chip("stop", "STOPPED"));
-  if (res.rumination) meta.appendChild(chip("rum", "RUMINATION RISK"));
-  if (res.professional_risk?.length) meta.appendChild(chip("prof", "NEEDS PROFESSIONAL"));
-  for (const p of res.patterns || []) {
-    meta.appendChild(chip("pat", `PATTERN: ${p.name}`));
-  }
-  for (const c of res.critique || []) {
-    meta.appendChild(chip("crit", "SELF-AUDIT"));
-  }
-  if (res.intent && !res.intent.startsWith("UNCLEAR")) {
-    meta.appendChild(chip("int", res.intent.split(" - ")[0]));
-  }
-  if (res.asked_count > 1) {
-    meta.appendChild(chip("repeat", `ASKED ${res.asked_count}x`));
-  }
-  if (res.mood && res.mood.mood && res.mood.mood !== "neutral") {
-    meta.appendChild(chip("mood", `MOOD: ${String(res.mood.mood).toUpperCase()}`));
-  }
-  if (res.memories_used) meta.appendChild(chip("", `MEMORY: ${res.memories_used}`));
-  if (res.provider) meta.appendChild(chip("", res.provider.toUpperCase()));
-
   el.appendChild(bubble);
-  if (meta.childNodes.length) el.appendChild(meta);
 
-  for (const w of res.warnings || []) {
-    const b = document.createElement("div");
-    b.className = "brake";
-    b.textContent = w;
-    el.appendChild(b);
-  }
-
-  if (res.message_id) el.appendChild(messageActions(el, res));
+  // No chips, no red boxes, no route strip in the conversation - labels,
+  // mood, warnings and mode all live behind the per-answer ⓘ panel.
+  el.appendChild(messageActions(el, res));
   return el;
 }
 
@@ -316,9 +277,9 @@ function addBot(res, promptText) {
   return el;
 }
 
-/* Per-answer actions: copy / thumbs / regenerate. Only answers that came back
-   with a message id get them, so the feedback row always points at a real
-   database row. */
+/* Per-answer actions: WHY ⓘ (details panel) / copy / thumbs / regenerate.
+   The ⓘ exists for every answer - even without a message id - so restored
+   history and stopped answers can still explain themselves. */
 function messageActions(el, res) {
   const bar = document.createElement("div");
   bar.className = "actions";
@@ -333,19 +294,53 @@ function messageActions(el, res) {
     return b;
   };
 
-  act("COPY", "Copy this answer", async () => {
-    try {
-      await navigator.clipboard.writeText(res.text || "");
-      toast("Copied");
-    } catch {
-      toast("Could not copy");
-    }
-  });
-  act("👍", "Good answer", (ev) => sendSignal(res, "up", ev.currentTarget));
-  act("👎", "Answer was wrong", (ev) => sendSignal(res, "down", ev.currentTarget));
+  act("ⓘ", "Why this reply - labels, memory, warnings", () => showBasis(res));
+  if (res.message_id) {
+    act("COPY", "Copy this answer", async () => {
+      try {
+        await navigator.clipboard.writeText(res.text || "");
+        toast("Copied");
+      } catch {
+        toast("Could not copy");
+      }
+    });
+    act("👍", "Good answer", (ev) => sendSignal(res, "up", ev.currentTarget));
+    act("👎", "Answer was wrong", (ev) => sendSignal(res, "down", ev.currentTarget));
+  }
   if (el.dataset.q) act("REGEN", "Ask this question again", () => regenerate(el));
   return bar;
 }
+
+/* Labels as the model wrote them, recovered from raw text when the payload
+   carries no parsed list (restored history only stores content). */
+function parseLabelsFromText(text) {
+  const out = [];
+  const re = /\[(FACT|INFERENCE|ASSUMPTION|UNKNOWN|PREDICTION)\]\s*([^\n\[]*)/gi;
+  const s = String(text || "");
+  let m = re.exec(s);
+  while (m) {
+    out.push({ label: (m[1] || "").toLowerCase(), text: (m[2] || "").trim() });
+    m = re.exec(s);
+  }
+  return out;
+}
+
+/* Open WHY THIS REPLY for one specific answer. */
+function showBasis(res) {
+  const sb = document.getElementById("basis-sidebar");
+  if (!sb) return;
+  const data = res ? { ...res } : null;
+  if (data && !data.labels?.length) {
+    data.labels = parseLabelsFromText(data.text || "");
+  }
+  renderBasis(data, true);
+  sb.hidden = false;
+}
+
+document.getElementById("close-basis")?.addEventListener("click", () => {
+  const sb = document.getElementById("basis-sidebar");
+  if (sb) sb.hidden = true;
+});
 
 async function sendSignal(res, kind, btn) {
   const mid = res.message_id;
@@ -589,19 +584,6 @@ async function ask(question, opts = {}) {
     streamCtl = null;
     setStreamMode(false);
   }
-}
-
-/* ------------------------------------------------------------ route strip */
-
-const routeBox = document.getElementById("route");
-const routeMode = document.getElementById("route-mode");
-const routeWhy = document.getElementById("route-why");
-
-function showRoute(route) {
-  routeBox.hidden = false;
-  routeMode.textContent = ROUTE_LABEL[route.mode] || route.mode.toUpperCase();
-  routeMode.className = `route-mode ${route.mode}`;
-  routeWhy.textContent = route.reason || "";
 }
 
 /* ---------------------------------------------------------------- wiring */
