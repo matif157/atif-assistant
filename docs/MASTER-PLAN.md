@@ -101,3 +101,8 @@ never push dependence over real people or professional help.
   (style: ACL 2025 few-shot/difference-aware modeling; emotion: prompt enrichment
   + uncertainty-aware ERC; self-improvement: Reflexion-style propose-approve;
   UI: 2026 streaming/feedback/skeleton patterns).
+- v1.1 (2026-10-17, Phase 3): the planned `user_profile` table is realized as
+  the pre-existing generic `profiles` document table (name/data) with
+  `get_profile`/`set_profile` helpers; learned style lives under the document
+  key `style`, user edits under `style_overrides` so learning never clobbers
+  an override.

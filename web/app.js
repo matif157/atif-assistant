@@ -564,6 +564,58 @@ async function loadInsights() {
       }
     }
 
+    // Mirror layer: learned style + editable overrides (Profile card).
+    // Optional like the mood timeline, so an old server cannot break Insights.
+    try {
+      const pd = await (await fetch("/api/profile")).json();
+      const h = document.createElement("div");
+      h.className = "ihead";
+      h.textContent = "PROFILE - HOW ATIF MATCHES YOU";
+      iBody.appendChild(h);
+      const card = document.createElement("div");
+      card.className = "pcard";
+      const learned = pd.style || {};
+      const info = document.createElement("div");
+      info.className = "t";
+      info.textContent = learned.n
+        ? `learned from ${learned.n} messages · about ${Math.round(learned.avg_words || 0)} words each`
+        : "not learned yet - send a few messages first";
+      card.appendChild(info);
+      const fields = [
+        ["length", "REPLY LENGTH", ["auto", "brief", "medium", "detailed"]],
+        ["register", "REGISTER", ["auto", "casual", "mixed", "formal"]],
+        ["language", "LANGUAGE", ["auto", "english", "urdu", "mixed"]],
+      ];
+      const ov = pd.overrides || {};
+      for (const [key, label, opts] of fields) {
+        const row = document.createElement("div");
+        row.className = "prow";
+        const lab = document.createElement("span");
+        lab.textContent = label;
+        const sel = document.createElement("select");
+        for (const o of opts) {
+          const op = document.createElement("option");
+          op.value = o;
+          op.textContent = o.toUpperCase();
+          if ((ov[key] || "auto") === o) op.selected = true;
+          sel.appendChild(op);
+        }
+        sel.addEventListener("change", async () => {
+          const body = {};
+          body[key] = sel.value;
+          const res = await fetch("/api/profile", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) sel.value = ov[key] || "auto";
+        });
+        row.append(lab, sel);
+        card.appendChild(row);
+      }
+      iBody.appendChild(card);
+    } catch { /* profile card optional */ }
+
     // Soul layer: inferred mood moments across turns - a timeline, never a
     // diagnosis. Optional, so a missing endpoint cannot break Insights.
     try {

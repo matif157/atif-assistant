@@ -24,7 +24,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import applog, db, engine, learn, llm, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
+from . import (
+    applog, db, engine, learn, llm, location, ollama, pipeline, plan, router,
+    stt, style, tts, uploads, voice_id,
+)
 from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
 from .llm import (
@@ -577,14 +580,17 @@ async def ask(payload: Ask, background: BackgroundTasks) -> dict:
     repeats = db.question_count(qclass)
     route = router.route(payload.question, repeat_count=repeats)
     db.record_question(qclass, payload.question)
+    # Mirror layer (Phase 3): fold this message into the style profile. One
+    # sqlite write, so it stays inline with the ask.
+    style.observe(payload.question)
 
-    # Trajectory needs the user's previous turns in this session, read before
-    # the current exchange is saved.
+    # Trajectory + few-shot examples need the user's previous turns in this
+    # session, read before the current exchange is saved (oldest first).
     recent = [
         m["content"]
         for m in db.history(session)
         if m.get("role") == "user"
-    ][-2:]
+    ][-4:]
 
     ctx = engine.build_context(payload.question, recent=recent)
     ctx["escalations"] = route.escalations
@@ -822,6 +828,52 @@ def sessions(limit: int = 50) -> dict:
 def mood(limit: int = 50) -> dict:
     """The detected-mood timeline (inference only, newest first)."""
     return {"mood": db.mood_timeline(limit=min(max(limit, 1), 200))}
+
+
+class ProfileIn(BaseModel):
+    """Editable Profile-card overrides. Omitted fields stay untouched."""
+
+    length: str | None = None
+    register: str | None = None
+    language: str | None = None
+
+
+@app.get("/api/profile")
+def profile_card() -> dict:
+    """Learned style + the user's own overrides for the Profile card."""
+    return {
+        "style": db.get_profile("style") or {},
+        "overrides": db.get_profile("style_overrides") or {},
+    }
+
+
+@app.post("/api/profile")
+def update_profile(payload: ProfileIn) -> JSONResponse:
+    allowed = {
+        "length": style.LENGTH_KEYS,
+        "register": style.REGISTER_KEYS,
+        "language": style.LANGUAGE_KEYS,
+    }
+    current = db.get_profile("style_overrides") or {}
+    changed = False
+    for field, keys in allowed.items():
+        value = getattr(payload, field)
+        if value is None:
+            continue
+        value = value.strip().lower()
+        if value not in keys:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"invalid {field}: {value!r} (allowed: {', '.join(keys)})",
+                },
+                status_code=400,
+            )
+        current[field] = value
+        changed = True
+    if changed:
+        db.set_profile("style_overrides", current)
+    return {"ok": True, "overrides": current}
 
 
 @app.post("/api/feedback")

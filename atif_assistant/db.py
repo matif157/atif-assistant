@@ -1196,6 +1196,43 @@ def mood_timeline(limit: int = 50) -> list[dict[str, Any]]:
     return out
 
 
+def get_profile(name: str) -> dict[str, Any] | None:
+    """Read a JSON document from the generic ``profiles`` table.
+
+    This is the Phase-3 "user_profile" store: the table already existed
+    (id/name/data), so the mirror layer reuses it instead of adding a
+    parallel key-value table. Returns None when missing or malformed - a
+    corrupt profile must never break an ask.
+    """
+    conn = connect()
+    row = conn.execute("SELECT data FROM profiles WHERE name=?", (name,)).fetchone()
+    if not row or not row["data"]:
+        return None
+    try:
+        data = json.loads(row["data"])
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def set_profile(name: str, data: dict[str, Any]) -> None:
+    conn = connect()
+    stamp = now()
+    row = conn.execute("SELECT id FROM profiles WHERE name=?", (name,)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE profiles SET data=?, updated_at=? WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), stamp, row["id"]),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO profiles(name, data, created_at, updated_at) "
+            "VALUES (?,?,?,?)",
+            (name, json.dumps(data, ensure_ascii=False), stamp, stamp),
+        )
+    conn.commit()
+
+
 COUNTED_TABLES = (
     "facts",
     "episodes",

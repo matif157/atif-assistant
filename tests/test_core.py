@@ -1144,6 +1144,141 @@ def test_soul_ask() -> None:
             db.reset_db_path()
 
 
+def test_style_mirror() -> None:
+    """Mirror layer (Phase 3): EMA style profile, overrides, bounded block.
+
+    Gates from the master plan: the profile must stay bounded in the prompt,
+    never leak into facts (shape-only labelling), and the user's own edits
+    (Profile card) must survive learning.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db, engine, style
+    from atif_assistant.app import app
+
+    print("\nmirror: style profile, overrides, bounded block")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "style.db")
+        db.init_db()
+        client = TestClient(app)
+        try:
+            check("no profile yet", db.get_profile("style") is None)
+            check("no block without signal", style.render_block(None, ["hello"]) == "")
+            check(
+                "no block below threshold",
+                style.render_block({"n": 1, "avg_words": 5}, ["hello"]) == "",
+            )
+
+            a = style.observe("hi")  # neutral: no formal or casual markers
+            check("first message initializes", a["n"] == 1 and a["avg_words"] == 1.0)
+            check("no register signal yet", "formality" not in a)
+            b = style.observe(
+                "please kindly assist me regarding this request of mine"
+            )
+            check("count increments", b["n"] == 2)
+            check(
+                "avg moves toward the new message but stays between",
+                1.0 < b["avg_words"] < 9.0,
+            )
+            check("formal register learned", b.get("formality", 0) >= 0.6)
+            check("formal label assigned", style.register_of(b) == "formal")
+
+            # EMA is deliberate: several casual messages are needed before the
+            # learned register actually flips.
+            c = style.observe("lol yaar chal bas thx")
+            d = style.observe("haha lol nah cool")
+            e = style.observe("nah cool haha")
+            check(
+                "casual messages pull formality down",
+                e["formality"] < b["formality"],
+            )
+            check("casual label eventually assigned", style.register_of(e) == "casual")
+            u = style.observe("بہت اچھا لگا آج کا دن")
+            check("urdu ratio rises", u["urdu_ratio"] > 0.2)
+
+            # Stored profile is re-readable (persisted across calls).
+            stored = db.get_profile("style")
+            check("profile persisted", stored is not None and stored["n"] == 6)
+
+            block = style.render_block(
+                stored, ["first one", "second msg here", "kya haal hai"]
+            )
+            check("block labels shape-only", "SHAPE" in block)
+            check("block carries length hint", "reply length" in block)
+            check("keeps the most recent examples", "kya haal hai" in block)
+            check("drops older examples", "first one" not in block)
+            check("at most two examples", block.count('\n- "') == 2)
+            check("examples bounded", len(block) <= 700)
+
+            # Overrides pin a dimension; learning keeps running underneath.
+            ov = {"length": "detailed", "register": "auto", "language": "auto"}
+            pinned = style.render_block(stored, ["x"], ov)
+            check("override wins over learned", "reply length: detailed" in pinned)
+            check(
+                "unpinned dimensions still learned",
+                "register: casual" in pinned and "language lean: " in pinned,
+            )
+
+            # Prompt integration: build_context carries the block once learned.
+            ctx = engine.build_context(
+                "what is sqlite", recent=["ok", "please assist me regarding this"]
+            )
+            check(
+                "context carries the mirror block",
+                "MIRROR STYLE" in ctx["context_block"],
+            )
+            check(
+                "mirror block marks shape-only",
+                "never evidence for facts" in ctx["context_block"],
+            )
+
+            # Profile card endpoints: read, pin, reject invalid pins.
+            got = client.get("/api/profile").json()
+            check("profile endpoint returns style", got["style"].get("n", 0) >= 6)
+            check("profile endpoint returns overrides", isinstance(got["overrides"], dict))
+            saved = client.post("/api/profile", json={"length": "detailed"})
+            check("override saved", saved.status_code == 200 and saved.json()["ok"])
+            check(
+                "override persisted",
+                client.get("/api/profile").json()["overrides"].get("length") == "detailed",
+            )
+            check(
+                "separate override doc does not touch learning",
+                (db.get_profile("style") or {}).get("n", 0) == 6,
+            )
+            bad = client.post("/api/profile", json={"length": "enormous"})
+            check("invalid override rejected", bad.status_code == 400)
+            check(
+                "invalid override leaves stored value alone",
+                client.get("/api/profile").json()["overrides"].get("length") == "detailed",
+            )
+
+            # Ask path: the message is observed and the ask still answers.
+            from atif_assistant import learn as learn_mod
+
+            async def fake_complete(messages, **kw):
+                return "[FACT] Stub answer for the mirror test.", "groq"
+
+            orig_engine, orig_learn = engine.complete, learn_mod.complete
+            engine.complete = fake_complete
+            learn_mod.complete = fake_complete
+            try:
+                res = client.post(
+                    "/api/ask",
+                    json={"question": "how do i fix my routine", "session": "sty-s"},
+                ).json()
+                check("ask still answers", bool(res.get("text")))
+                check(
+                    "style observed through ask",
+                    (db.get_profile("style") or {}).get("n", 0) == 7,
+                )
+            finally:
+                engine.complete = orig_engine
+                learn_mod.complete = orig_learn
+        finally:
+            db.reset_db_path()
+
+
 def test_extended_api() -> None:
     """Settings, notes, works, media and social endpoints persist correctly.
 
@@ -3078,6 +3213,7 @@ def main() -> int:
     test_sessions_feedback()
     test_soul()
     test_soul_ask()
+    test_style_mirror()
     test_extended_api()
     test_location()
     test_uploads()

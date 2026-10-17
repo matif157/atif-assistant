@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from . import constitution as C
-from . import db, emotion, radar, router
+from . import db, emotion, radar, router, style
 from .config import RETRIEVAL_LIMIT
 from .llm import ProviderError, complete
 
@@ -226,6 +226,14 @@ def build_context(
     mood_block = emotion.render_block(mood, mood_traj)
     if mood_block:
         parts.append(mood_block)
+
+    # Mirror layer (Phase 3): bounded style block once there is enough signal;
+    # the user's own recent messages serve as few-shot shape examples.
+    style_block = style.render_block(
+        db.get_profile("style"), recent, db.get_profile("style_overrides")
+    )
+    if style_block:
+        parts.append(style_block)
 
     return {
         "memories": memories,
