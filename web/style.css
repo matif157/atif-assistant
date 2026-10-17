@@ -342,7 +342,7 @@ textarea:focus { outline: none; border-color: var(--acc); }
   color: var(--dim);
 }
 .upload-body input,
-.settings-body input,
+.settings-body input:not([type="checkbox"]),
 .settings-body select {
   background: var(--panel);
   border: 1px solid var(--line);

@@ -49,6 +49,20 @@
       <div class="setup-eta" id="setup-eta" hidden></div>
     </div>
 
+    <div class="setup-row" id="setup-lock-row" hidden>
+      <div class="setup-row-head">
+        <strong>APP LOCK</strong>
+        <span class="setup-state" id="setup-lock-state">off</span>
+      </div>
+      <div class="setup-hint">
+        Require your fingerprint each time Atif opens. It keeps other people
+        out of the app; it does not encrypt your data.
+      </div>
+      <div class="form-actions">
+        <button class="ghost" id="setup-lock-btn">TURN ON FINGERPRINT LOCK</button>
+      </div>
+    </div>
+
     <div class="form-actions setup-actions">
       <button class="ghost" id="setup-skip">SET UP LATER</button>
       <button id="setup-start">START</button>
@@ -304,6 +318,12 @@
         <option value="local">On-device (offline, works in Urdu)</option>
       </select>
       <small id="stt-engine-note" class="hint"></small>
+    </label>
+    <label id="lock-setting-row" hidden>APP LOCK (fingerprint)
+      <span style="display:flex; align-items:center; gap:.5rem; letter-spacing:normal; text-transform:none; font-size:12px; color:var(--txt)">
+        <input type="checkbox" id="set-applock"> Require fingerprint to open Atif
+      </span>
+      <small class="hint">Keeps other people out of the app; it does not encrypt your data.</small>
     </label>
     <div class="form-actions">
       <button class="ghost" id="download-urdu-model" hidden>DOWNLOAD URDU MODEL</button>

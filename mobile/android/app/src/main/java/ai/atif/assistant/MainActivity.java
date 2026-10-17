@@ -5,16 +5,22 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
+import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.view.View;
 import android.webkit.JavascriptInterface;
@@ -39,10 +45,14 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
 
 /**
  * Thin WebView shell around the embedded Python server. The server listens on
@@ -82,6 +92,15 @@ public class MainActivity extends Activity {
     private String lastLlamaBin = "";
     private String lastWhisperBin = "";
 
+    // App lock (opt-in fingerprint gate; off unless enabled at onboarding)
+    private View lockView;
+    private TextView lockHint;
+    private android.hardware.biometrics.BiometricPrompt lockPrompt;
+    private CancellationSignal lockCancel;
+    private volatile boolean lockShowing;
+    /** elapsedRealtime when the activity last stopped; 0 = never backgrounded. */
+    private long stoppedAt;
+
     private static final String SERVER_URL = "http://127.0.0.1:8770/";
     private static final int STT_RATE = 16000; // whisper expects 16 kHz mono PCM16
     private static final int STT_MAX_MS = 8000;
@@ -106,6 +125,8 @@ public class MainActivity extends Activity {
         bootErrorView = findViewById(R.id.boot_error);
         bootStatus = findViewById(R.id.boot_status);
         bootErrorDetail = findViewById(R.id.boot_error_detail);
+        lockView = findViewById(R.id.lock_screen);
+        lockHint = findViewById(R.id.lock_hint);
 
         web = findViewById(R.id.web);
         WebSettings s = web.getSettings();
@@ -116,6 +137,27 @@ public class MainActivity extends Activity {
         // white flash between "interface loaded" and the CSS landing.
         web.setBackgroundColor(0xFF0B0E14);
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(
+                    WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                boolean local = "http".equals(uri.getScheme())
+                        && "127.0.0.1".equals(uri.getHost())
+                        && uri.getPort() == 8770;
+                if (local) {
+                    return false; // our own pages load in place
+                }
+                // Anything else (links in documents, pasted URLs...) leaves
+                // the WebView: an external site must never run against the
+                // AndroidVoice bridge, which can start the microphone.
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                } catch (Throwable t) {
+                    android.util.Log.w("Atif", "no handler for " + uri);
+                }
+                return true;
+            }
+
             @Override
             public void onPageFinished(WebView view, String url) {
                 pageLoaded = true;
@@ -155,6 +197,9 @@ public class MainActivity extends Activity {
             }
         });
 
+        Button lockBtn = findViewById(R.id.lock_unlock);
+        lockBtn.setOnClickListener(v -> startBiometric());
+
         requestAudioPermission();
         tts = new TextToSpeech(this, status -> { /* locale set per utterance */ });
 
@@ -162,6 +207,183 @@ public class MainActivity extends Activity {
         // splash shows live status; on timeout or failure the error screen
         // appears - the WebView never renders a dead connection page.
         startBoot();
+
+        // Boot runs behind the lock (the engine is local, nothing is shown);
+        // the gate only decides when the UI becomes visible.
+        if (appLockEnabled()) {
+            showLock(false);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Cold start is already covered by onCreate; re-prompt only when the
+        // app comes back from the background long enough to re-lock.
+        if (appLockEnabled() && stoppedAt > 0
+                && (SystemClock.elapsedRealtime() - stoppedAt) > 8000) {
+            showLock(true);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        stoppedAt = SystemClock.elapsedRealtime();
+        super.onStop();
+    }
+
+    // --- app lock ------------------------------------------------------------
+
+    private SharedPreferences lockPrefs() {
+        return getSharedPreferences("atif_lock", MODE_PRIVATE);
+    }
+
+    private boolean appLockEnabled() {
+        return lockPrefs().getBoolean("app_lock", false);
+    }
+
+    /** Hardware we can actually prompt for (fingerprint / strong biometric). */
+    private boolean hasLockHardware() {
+        if (Build.VERSION.SDK_INT < 28) {
+            return false; // framework BiometricPrompt needs Android 9
+        }
+        PackageManager pm = getPackageManager();
+        if (Build.VERSION.SDK_INT >= 29) {
+            // "android.hardware.biometric_strong" (PackageManager's constant
+            // name for it is not in every platform SDK).
+            return pm.hasSystemFeature("android.hardware.biometric_strong")
+                    || pm.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT);
+        }
+        return pm.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT);
+    }
+
+    /**
+     * Show the lock gate (or re-prompt). Never bricks: when the device has
+     * nothing to authenticate with, or the prompt itself fails, the app
+     * unlocks honestly instead of locking the user out forever.
+     */
+    private void showLock(boolean rePrompt) {
+        if (lockShowing && !rePrompt) {
+            return;
+        }
+        if (lockView == null || !hasLockHardware()) {
+            unlock();
+            return;
+        }
+        lockShowing = true;
+        lockView.setVisibility(View.VISIBLE);
+        if (lockHint != null) {
+            lockHint.setText(
+                    "Unlock with your fingerprint to open Atif Assistant.");
+        }
+        startBiometric();
+    }
+
+    private void startBiometric() {
+        if (Build.VERSION.SDK_INT < 28 || lockView == null) {
+            unlock();
+            return;
+        }
+        try {
+            cancelPrompt();
+            java.util.concurrent.Executor exec = getMainExecutor();
+            lockPrompt = new android.hardware.biometrics.BiometricPrompt.Builder(this)
+                    .setTitle("Atif Assistant")
+                    .setSubtitle("Confirm it's you to open the app")
+                    .setNegativeButton("Cancel", exec, (btn, tag) -> {
+                        // Stay on the lock screen; UNLOCK re-prompts.
+                        showLockHint("Locked. Tap UNLOCK and try again.");
+                    })
+                    .build();
+            lockCancel = new CancellationSignal();
+            lockPrompt.authenticate(makeCrypto(), lockCancel, exec,
+                    new android.hardware.biometrics.BiometricPrompt
+                            .AuthenticationCallback() {
+                        @Override
+                        public void onAuthenticationSucceeded(
+                                android.hardware.biometrics.BiometricPrompt
+                                        .AuthenticationResult result) {
+                            unlock();
+                        }
+
+                        @Override
+                        public void onAuthenticationError(int code, CharSequence msg) {
+                            if (code == 1 /* HW_UNAVAILABLE */
+                                    || code == 11 /* NO_BIOMETRICS */
+                                    || code == 14 /* NO_DEVICE_CREDENTIAL */) {
+                                // Nothing usable to verify identity with -
+                                // skip the gate rather than brick the app.
+                                unlock();
+                            } else {
+                                showLockHint("Locked. Tap UNLOCK and try again.");
+                            }
+                        }
+
+                        @Override
+                        public void onAuthenticationFailed() {
+                            // Wrong finger; the system prompt offers retries.
+                        }
+                    });
+        } catch (Throwable t) {
+            // Prompt infrastructure broken on this device: availability wins
+            // over the lock - never leave the user staring at a dead gate.
+            android.util.Log.w("Atif", "biometric prompt failed: " + t);
+            unlock();
+        }
+    }
+
+    /**
+     * A throwaway AndroidKeyStore AES key purely to satisfy the prompt's
+     * CryptoObject requirement; it protects nothing and gates nothing.
+     */
+    private android.hardware.biometrics.BiometricPrompt.CryptoObject makeCrypto() {
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            if (!ks.containsAlias("atif_applock")) {
+                KeyGenerator gen = KeyGenerator.getInstance(
+                        KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                gen.init(new KeyGenParameterSpec.Builder("atif_applock",
+                        KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                        .setBlockModes(KeyProperties.BLOCK_MODE_CBC)
+                        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
+                        .setUserAuthenticationRequired(false)
+                        .build());
+                gen.generateKey();
+            }
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS7Padding");
+            cipher.init(Cipher.ENCRYPT_MODE, ks.getKey("atif_applock", null));
+            return new android.hardware.biometrics.BiometricPrompt.CryptoObject(cipher);
+        } catch (Throwable t) {
+            return null; // modern releases accept a null-crypto prompt
+        }
+    }
+
+    private void showLockHint(final String text) {
+        runOnUiThread(() -> {
+            if (lockView != null && lockShowing && lockHint != null) {
+                lockHint.setText(text);
+            }
+        });
+    }
+
+    private void unlock() {
+        cancelPrompt();
+        lockShowing = false;
+        runOnUiThread(() -> {
+            if (lockView != null) {
+                lockView.setVisibility(View.GONE);
+            }
+        });
+    }
+
+    private void cancelPrompt() {
+        try {
+            if (lockCancel != null) {
+                lockCancel.cancel();
+            }
+        } catch (Throwable ignored) { /* already gone */ }
+        lockCancel = null;
     }
 
     /**
@@ -489,6 +711,22 @@ public class MainActivity extends Activity {
                 }
             });
         }
+
+        /** True when this device can show a fingerprint gate (Android 9+). */
+        @JavascriptInterface
+        public boolean appLockAvailable() {
+            return hasLockHardware();
+        }
+
+        @JavascriptInterface
+        public boolean appLockEnabled() {
+            return MainActivity.this.appLockEnabled();
+        }
+
+        @JavascriptInterface
+        public void setAppLock(boolean on) {
+            lockPrefs().edit().putBoolean("app_lock", on).apply();
+        }
     }
 
     /**
@@ -709,6 +947,12 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (lockShowing) {
+            // Locked: send the app to the background rather than revealing
+            // the UI behind the gate.
+            moveTaskToBack(true);
+            return;
+        }
         if (web != null && web.canGoBack()) {
             web.goBack();
         } else {

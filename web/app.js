@@ -3114,6 +3114,7 @@ function syncSettingsForm() {
 
 document.getElementById("btn-settings").addEventListener("click", () => {
   syncSettingsForm();
+  syncAppLockToggle();
   loadProviders();
   loadSpeechStatus();
   loadVoiceprints();
@@ -3165,6 +3166,26 @@ if (setVoice) setVoice.addEventListener("change", () => (settings.voice = setVoi
     setThemeEl.addEventListener("change", () => {
       settings.theme = setThemeEl.value;
       applyTheme(settings.theme);
+    });
+  }
+}
+
+/* App lock lives in native SharedPreferences, not server settings, so it is
+   read/written through the bridge and never saved with the other options. */
+function syncAppLockToggle() {
+  const row = document.getElementById("lock-setting-row");
+  const cb = document.getElementById("set-applock");
+  const bridge = appLockBridge();
+  if (!row || !cb || !bridge) return;
+  row.hidden = false;
+  cb.checked = Boolean(bridge.appLockEnabled());
+}
+{
+  const lockCb = document.getElementById("set-applock");
+  if (lockCb) {
+    lockCb.addEventListener("change", () => {
+      const bridge = appLockBridge();
+      if (bridge) bridge.setAppLock(lockCb.checked);
     });
   }
 }
@@ -3444,6 +3465,31 @@ function renderSetupSet() {
   }
 }
 
+/* App lock: an Android-only opt-in fingerprint gate. The bridge exists only
+   inside the APK WebView, and only when the device has a biometric sensor. */
+function appLockBridge() {
+  return window.AndroidVoice
+    && typeof window.AndroidVoice.appLockAvailable === "function"
+    && window.AndroidVoice.appLockAvailable()
+    ? window.AndroidVoice
+    : null;
+}
+
+function renderSetupLock() {
+  const row = document.getElementById("setup-lock-row");
+  if (!row) return;
+  const bridge = appLockBridge();
+  if (!bridge) return; // browser/desktop: the row stays hidden
+  row.hidden = false;
+  const on = Boolean(bridge.appLockEnabled());
+  setupState(document.getElementById("setup-lock-state"),
+    on ? "on" : "off", on ? "ok" : "");
+  const btn = document.getElementById("setup-lock-btn");
+  if (btn) {
+    btn.textContent = on ? "TURN OFF FINGERPRINT LOCK" : "TURN ON FINGERPRINT LOCK";
+  }
+}
+
 // Speed from the previous poll, so a phone on a flaky link sees an honest
 // countdown instead of a fake one.
 function setupEtaText(want, got, downloading) {
@@ -3558,6 +3604,7 @@ async function maybeShowSetup() {
   if (setupInfo && setupInfo.recommended) setupSet = setupInfo.recommended;
   setupOverlay.hidden = false;
   renderSetupSet();
+  renderSetupLock();
   refreshSetup();
 }
 
@@ -3624,6 +3671,15 @@ if (setupPauseBtn) {
     } catch { /* offline */ }
     clearTimeout(setupPollTimer);
     refreshSetup();
+  });
+}
+
+if (document.getElementById("setup-lock-btn")) {
+  document.getElementById("setup-lock-btn").addEventListener("click", () => {
+    const bridge = appLockBridge();
+    if (!bridge) return;
+    bridge.setAppLock(!bridge.appLockEnabled());
+    renderSetupLock();
   });
 }
 
