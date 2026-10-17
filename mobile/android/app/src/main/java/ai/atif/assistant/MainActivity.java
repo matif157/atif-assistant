@@ -220,6 +220,11 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
+        // Never reuse the HTTP cache for the app shell. FileResponse timestamps
+        // come from the zip epoch (1980), so heuristics treat stale HTML/JS as
+        // fresh for years - an APK update then appears not to take effect.
+        // Loopback loads cost nothing, and the service worker stays network-first.
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setMediaPlaybackRequiresUserGesture(false);
         // Dark under the first paint: matches the splash and the page, so no
         // white flash between "interface loaded" and the CSS landing.
@@ -548,7 +553,9 @@ public class MainActivity extends Activity {
                     return;
                 }
                 web.setVisibility(View.VISIBLE);
-                web.loadUrl(SERVER_URL);
+                // ?v= busts any leftover cached entry for this document on
+                // upgrade; the server rewrites asset URLs with the same token.
+                web.loadUrl(SERVER_URL + "?v=" + BuildConfig.VERSION_CODE);
                 // Never a silent dark screen: if the first page takes long,
                 // the status line says so instead of freezing.
                 bootStatus.postDelayed(() -> {

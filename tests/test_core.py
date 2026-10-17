@@ -781,6 +781,33 @@ def test_remote_web() -> None:
         'register("/static/sw.js")' not in app_js,
     )
 
+    # Cache discipline: with a cacheable shell the WebView keeps rendering the
+    # pre-update HTML forever (zip-epoch Last-Modified = heuristic freshness of
+    # years), which looks exactly like "the fix did not ship". The phone loads
+    # /?v=<versionCode> and the server rewrites asset urls with the same token.
+    page = client.get("/?v=7")
+    check("index disables caching", "no-store" in page.headers.get("cache-control", ""))
+    check(
+        "index rewrites asset urls with the version token",
+        "/static/app.js?v=7" in page.text and "/static/style.css?v=7" in page.text,
+    )
+    check(
+        "unversioned index still serves",
+        client.get("/").status_code == 200 and "ATIF ASSISTANT" in client.get("/").text,
+    )
+    asset = client.get("/static/app.js")
+    check("static assets disable caching", "no-store" in asset.headers.get("cache-control", ""))
+
+    main_java = (
+        Path(__file__).resolve().parent.parent
+        / "mobile/android/app/src/main/java/ai/atif/assistant/MainActivity.java"
+    ).read_text()
+    check("app loads the shell with LOAD_NO_CACHE", "LOAD_NO_CACHE" in main_java)
+    check(
+        "app busts the document url per version",
+        '?v=" + BuildConfig.VERSION_CODE' in main_java,
+    )
+
     # start_url must sit inside the worker's scope, or installing to the
     # homescreen produces a shortcut that opens with no offline shell.
     import json

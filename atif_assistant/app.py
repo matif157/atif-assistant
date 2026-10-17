@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -61,6 +62,20 @@ from .llm import (
 )
 
 app = FastAPI(title="Atif Assistant", version="0.1.0")
+
+
+@app.middleware("http")
+async def no_store(request: Request, call_next):
+    """Never let a client cache an app response.
+
+    FileResponse timestamps come from the zip epoch (1980), so browsers apply
+    heuristic freshness of years to ``/`` and ``/static/*`` - after an app
+    update the WebView keeps rendering the old HTML and JS and the update looks
+    like it never landed. Every response is loopback-cheap; store nothing.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("cache-control", "no-store")
+    return response
 
 
 @app.middleware("http")
@@ -1583,8 +1598,20 @@ def delete_decision(decision_id: int) -> JSONResponse:
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+def index(v: str = "") -> Response:
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    # The phone loads /?v=<versionCode>; rewriting asset URLs with the same
+    # token gives every release fresh cache keys even for clients that never
+    # revalidate. Keep this to token-safe characters (the value comes from a
+    # query string).
+    token = "".join(ch for ch in v if ch.isalnum() or ch in "._-")[:32]
+    if token:
+        html = re.sub(
+            r'(["\'])(/static/[^"\'?]*)\1',
+            lambda m: f'{m.group(1)}{m.group(2)}?v={token}{m.group(1)}',
+            html,
+        )
+    return Response(html, media_type="text/html; charset=utf-8")
 
 
 @app.get("/sw.js")
