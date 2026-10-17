@@ -46,6 +46,37 @@ function haptic() {
   }
 }
 
+/* Uncaught errors are invisible on device (logcat only carries WebView
+   chatter), so every one of them is shown as a toast and mirrored to
+   GET /api/app-log, where the UI and adb can read it back. Reporting
+   itself is wrapped - a broken toast must not rethrow. */
+function reportUiError(kind, message, detail) {
+  try {
+    const line = `${kind}: ${message}`;
+    toast(line);
+    fetch("/api/app-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: line, detail: String(detail || "") }),
+    }).catch(() => {});
+  } catch { /* reporting never throws */ }
+}
+window.addEventListener("error", (ev) => {
+  reportUiError(
+    "ui error",
+    ev.message || "unknown",
+    (ev.error && ev.error.stack) || `${ev.filename || ""}:${ev.lineno || 0}`
+  );
+});
+window.addEventListener("unhandledrejection", (ev) => {
+  const r = ev.reason;
+  reportUiError(
+    "ui promise",
+    r && r.message ? r.message : String(r),
+    (r && r.stack) || ""
+  );
+});
+
 function setStreamMode(on) {
   streaming = on;
   chat.setAttribute("aria-busy", on ? "true" : "false");

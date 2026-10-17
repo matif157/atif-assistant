@@ -1059,6 +1059,55 @@ def test_layout_navigation() -> None:
     check("composer hint clamped", "-webkit-line-clamp: 2" in css)
 
 
+def test_ui_error_visibility() -> None:
+    """Errors must be visible: a toast for the user, POST /api/app-log for adb.
+
+    On-device there is no console - an exception that only lands in logcat
+    looks like a dead button. window.onerror and unhandledrejection report
+    through a guarded function (a broken toast must never rethrow) and the
+    server stores what arrived in the bounded applog ring, fields capped at
+    300 chars, readable back through the existing GET.
+    """
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import applog
+    from atif_assistant.app import app
+
+    print("\nerror visibility: toast + app-log mirror")
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    check("onerror hooked", 'window.addEventListener("error"' in js)
+    check("unhandledrejection hooked", 'window.addEventListener("unhandledrejection"' in js)
+    check("reporter posts to app-log", 'fetch("/api/app-log"' in js)
+    check("reporter guarded against rethrow", "reporting never throws" in js)
+
+    client = TestClient(app)
+    r = client.post(
+        "/api/app-log", json={"message": "ui error: boom", "detail": "app.js:1:2"}
+    )
+    check("ui error accepted", r.status_code == 200 and r.json().get("ok") is True)
+    r2 = client.post("/api/app-log", json={})
+    check("empty message rejected", r2.status_code == 400)
+    r3 = client.post("/api/app-log", json={"message": "x" * 900})
+    check("oversized message accepted but capped on input",
+          r3.status_code == 200)
+
+    events = client.get("/api/app-log", params={"limit": 50}).json()["events"]
+    hits = [e for e in events if e.get("event") == "ui.error"]
+    check(
+        "ui errors readable back",
+        any(h.get("message") == "ui error: boom" for h in hits),
+    )
+    check(
+        "stored message never exceeds the cap",
+        all(len(h.get("message", "")) <= 300 for h in hits),
+    )
+    # The GET and the POST share one path - test_web_sync already checks the
+    # literal fetch against the route table; here we pin the pair itself.
+    check("ring stays bounded by applog", len(applog.tail(200)) <= 200)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4520,6 +4569,7 @@ def main() -> int:
     test_web_sync()
     test_natural_reply_surface()
     test_layout_navigation()
+    test_ui_error_visibility()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

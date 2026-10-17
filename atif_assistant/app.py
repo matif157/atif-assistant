@@ -491,6 +491,26 @@ def app_log(limit: int = 50) -> dict:
     return {"events": applog.tail(limit)}
 
 
+@app.post("/api/app-log")
+def app_log_report(payload: dict | None = None) -> dict:
+    """Front-end errors from window.onerror / unhandledrejection.
+
+    The UI posts what it saw (as a toast first, so the user learns about it
+    too) and this lands it in the same bounded ring as the engine events.
+    Fields are capped - the client is never trusted to size the buffer.
+    The 400 path returns a JSONResponse, which bypasses response validation.
+    """
+    body = payload or {}
+    message = str(body.get("message") or "")[:300]
+    detail = str(body.get("detail") or "")[:300]
+    if not message:
+        return JSONResponse(
+            {"ok": False, "reason": "no message"}, status_code=400
+        )
+    applog.log("ui.error", message=message, detail=detail)
+    return {"ok": True}
+
+
 @app.post("/api/llm/model")
 def llm_model_download(payload: dict | None = None) -> JSONResponse:
     """Start fetching the offline model in the background; poll GET /api/llm.
