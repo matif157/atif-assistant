@@ -285,6 +285,11 @@ async function ask(question, opts = {}) {
   voiceInputPending = false;
   const speaker = opts.speaker || pendingSpeaker || null;
   pendingSpeaker = null;
+  // Nothing should hang forever: a wedged provider or dead engine must not
+  // leave the typing indicator up with the send button disabled. 240s covers
+  // a cold on-device model start plus generation.
+  const askCtl = ("AbortController" in window) ? new AbortController() : null;
+  const askTimer = askCtl ? setTimeout(() => askCtl.abort(), 240000) : 0;
   try {
     const res = await fetch("/api/ask", {
       method: "POST",
@@ -298,6 +303,7 @@ async function ask(question, opts = {}) {
         speaker: speaker ? speaker.name : null,
         speaker_score: speaker ? speaker.score : null,
       }),
+      signal: askCtl ? askCtl.signal : undefined,
     });
     if (!res.ok) throw new Error(`server returned ${res.status}`);
     const data = await res.json();
@@ -323,9 +329,12 @@ async function ask(question, opts = {}) {
     return data;
   } catch (e) {
     removeTyping();
-    const detail = e instanceof SyntaxError
-      ? "Malformed response from server."
-      : String(e.message || e);
+    const timedOut = e && (e.name === "AbortError" || e.code === 20);
+    const detail = timedOut
+      ? "the engine took too long to answer (4 minutes) - try again"
+      : e instanceof SyntaxError
+        ? "Malformed response from server."
+        : String(e.message || e);
     addBot({ text: `Request failed: ${detail}`, warnings: [] });
     lastBasis = null;
     renderBasis(null);
@@ -334,6 +343,7 @@ async function ask(question, opts = {}) {
     // a null, so the failure can be shown instead of looping silently.
     return { text: null, error: detail };
   } finally {
+    clearTimeout(askTimer);
     sendBtn.disabled = false;
   }
 }
@@ -4424,19 +4434,36 @@ document.getElementById("install-app").addEventListener("click", async () => {
 
 /* ---------------------------------------------------------------- wiring */
 
+/* Health: the dot and status line must stay honest for the whole session,
+   not just the first load - one failed fetch at boot used to leave "offline"
+   forever, and a dead engine never turned the dot off. */
+function applyHealth(h) {
+  localSttReady = Boolean(h.speech && h.speech.offline_in && h.speech.offline_in.available);
+  const ready = h.providers && h.providers.find((p) => p.ready);
+  dot.className = ready ? "dot on" : "dot off";
+  statusline.textContent = ready
+    ? `${ready.name} · ${h.counts.facts}f ${h.counts.episodes}e ${h.counts.patterns}p`
+    : "no model key";
+}
+
+async function healthTick() {
+  try {
+    const h = await (await fetch("/api/health")).json();
+    applyHealth(h);
+    return true;
+  } catch {
+    dot.className = "dot off";
+    statusline.textContent = "engine offline";
+    return false;
+  }
+}
+
 /* boot */
 (async function init() {
   await loadSettings();
   loadVoices();
+  await healthTick();
   try {
-    const r = await fetch("/api/health");
-    const h = await r.json();
-    localSttReady = Boolean(h.speech && h.speech.offline_in && h.speech.offline_in.available);
-    const ready = h.providers.find((p) => p.ready);
-    dot.className = "dot on";
-    statusline.textContent = ready ? `${ready.name} · ${h.counts.facts}f ${h.counts.episodes}e ${h.counts.patterns}p` : "no model key";
-    if (!ready) dot.className = "dot off";
-
     if (session) {
       const hr = await fetch(`/api/history/${session}`);
       const { messages } = await hr.json();
@@ -4447,11 +4474,16 @@ document.getElementById("install-app").addEventListener("click", async () => {
         }
       }
     }
-  } catch {
-    dot.className = "dot off";
-    statusline.textContent = "offline";
-  }
+  } catch { /* no history: start clean */ }
 })();
+
+// Keep the status fresh and recover automatically when the engine comes
+// back (server auto-restart, model download finished, transient hiccup).
+setInterval(healthTick, 15000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) healthTick();
+});
+window.addEventListener("focus", healthTick);
 
 /* PWA */
 if ("serviceWorker" in navigator) {

@@ -43,7 +43,6 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Thin WebView shell around the embedded Python server. The server listens on
@@ -73,9 +72,13 @@ public class MainActivity extends Activity {
     private TextView bootStatus;
     private TextView bootErrorDetail;
     private volatile String bootError;
+    /** Set by the server thread when start() throws; the wait loop reads it. */
+    private volatile String bootPyErr;
     private volatile boolean pageLoaded;
     /** Bumped on every RETRY so stale boot threads stop touching the UI. */
     private volatile int bootGen;
+    /** Silent post-load restarts used this boot (capped at 3). */
+    private int serverRestarts;
     private String lastLlamaBin = "";
     private String lastWhisperBin = "";
 
@@ -170,6 +173,8 @@ public class MainActivity extends Activity {
     private void startBoot() {
         final int gen = ++bootGen;
         bootError = null;
+        bootPyErr = null;
+        serverRestarts = 0;
         pageLoaded = false;
         if (bootSplash != null) {
             bootSplash.setVisibility(View.VISIBLE);
@@ -185,33 +190,18 @@ public class MainActivity extends Activity {
         // llama-server / whisper-cli ship as JNI libs (jniLibs/<abi>/lib*.so)
         // so the installer extracts them into nativeLibraryDir, which is one
         // of the few app-owned locations Android still allows execve() from.
-        final String dataDir = getFilesDir().getAbsolutePath();
+        // Writing them into filesDir instead would hit the API 29+ W^X block
+        // (Permission denied from the app, even though run-as can exec it).
         lastLlamaBin = resolveNativeLib("libllama-server.so");
         lastWhisperBin = resolveNativeLib("libwhisper-cli.so");
-
-        final AtomicReference<String> pyErr = new AtomicReference<>();
-        Thread server = new Thread(() -> {
-            try {
-                Python.getInstance().getModule("run_server")
-                        .callAttr("start", dataDir, lastLlamaBin, lastWhisperBin);
-            } catch (Throwable t) {
-                String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
-                pyErr.set(msg);
-                android.util.Log.e("Atif", "server boot failed: " + msg, t);
-                if (gen == bootGen) {
-                    showBootError("The offline engine failed to start.\n" + msg);
-                }
-            }
-        }, "python-server");
-        server.setDaemon(true);
-        server.start();
+        startPythonServer(gen);
 
         new Thread(() -> {
             setBootStatus("Waiting for the offline engine...");
             long deadline = System.currentTimeMillis() + BOOT_TIMEOUT_MS;
             boolean up = false;
             while (System.currentTimeMillis() < deadline && gen == bootGen) {
-                if (pyErr.get() != null) {
+                if (bootPyErr != null) {
                     return; // error screen already shown by the server thread
                 }
                 if (portOpen()) {
@@ -229,8 +219,8 @@ public class MainActivity extends Activity {
                 return; // a RETRY superseded this attempt
             }
             if (!up) {
-                String reason = pyErr.get() != null
-                        ? "The offline engine failed to start.\n" + pyErr.get()
+                String reason = bootPyErr != null
+                        ? "The offline engine failed to start.\n" + bootPyErr
                         : "The offline engine did not respond within "
                                 + (BOOT_TIMEOUT_MS / 1000)
                                 + " seconds. It may still be busy, or the device "
@@ -258,6 +248,63 @@ public class MainActivity extends Activity {
                 }, 8000);
             });
         }, "boot-wait").start();
+    }
+
+    /**
+     * Spawn the Python server thread. Before the page has loaded, a crash is
+     * the boot error screen; after it, the app silently restarts the server
+     * (up to 3 times) so a wedged uvicorn does not brick an open session -
+     * the web UI's health poll turns the status dot back on when it returns.
+     */
+    private void startPythonServer(final int gen) {
+        final String dataDir = getFilesDir().getAbsolutePath();
+        final String llamaBin = lastLlamaBin;
+        final String whisperBin = lastWhisperBin;
+        Thread server = new Thread(() -> {
+            try {
+                Python.getInstance().getModule("run_server")
+                        .callAttr("start", dataDir, llamaBin, whisperBin);
+            } catch (Throwable t) {
+                String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
+                bootPyErr = msg;
+                android.util.Log.e("Atif", "server thread failed: " + msg, t);
+                if (gen != bootGen) {
+                    return; // superseded by a RETRY
+                }
+                if (pageLoaded) {
+                    scheduleServerRestart(gen, msg);
+                } else {
+                    showBootError("The offline engine failed to start.\n" + msg);
+                }
+            }
+        }, "python-server");
+        server.setDaemon(true);
+        server.start();
+    }
+
+    /** Restart the engine in the background after a post-load crash. */
+    private void scheduleServerRestart(final int gen, final String why) {
+        serverRestarts++;
+        if (serverRestarts > 3 || gen != bootGen) {
+            if (gen == bootGen) {
+                showBootError("The offline engine stopped and could not be "
+                        + "restarted after 3 attempts.\n" + why);
+            }
+            return;
+        }
+        android.util.Log.w("Atif", "server died (" + why + "), restart "
+                + serverRestarts + " of 3");
+        new Thread(() -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (gen == bootGen) {
+                startPythonServer(gen);
+            }
+        }, "server-restart").start();
     }
 
     /** Update the splash status line; safe from any thread. */
