@@ -49,6 +49,7 @@ IMPORTERS = {
     "photos": importer_photos,
 }
 from .llm import (
+    complete,
     invalidate_probe_cache,
     llm_download_pause,
     llm_download_start,
@@ -1054,8 +1055,54 @@ def wtxt_stage(payload: dict) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=503)
 
 
+# Phase 8c: suggested replies for watched chats. The draft is a suggestion
+# the user edits/copies - never something sent on their behalf.
+_DRAFT_MODES = {"humor", "warm", "brief"}
+_DRAFT_STYLE = {
+    "humor": "playful and witty - a light friendly tease or a clever line; "
+             "never mean, never at their expense, never sarcastic at them",
+    "warm": "warm and caring, like a close friend",
+    "brief": "short, direct and to the point",
+}
+
+
+def _draft_messages(chat: str, text: str, mode: str) -> list[dict]:
+    style = _DRAFT_STYLE.get(mode, _DRAFT_STYLE["humor"])
+    system = (
+        "You are drafting a WhatsApp reply the user will send THEMSELVES - "
+        "it is only a suggestion they can edit or ignore, so never claim it "
+        "was already sent. "
+        f"Reply style: {style}. "
+        "Match the language and script of the incoming message exactly "
+        "(Roman Urdu in, Roman Urdu out; Urdu script in, Urdu script out; "
+        "English in, English out). At most two short sentences. No quotes, no "
+        "signature, no explanation - output ONLY the reply text."
+    )
+    user = f"Chat: {chat}\nIncoming message: {text}\nDraft the reply:"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+async def _autodraft(inbox_id: int, chat: str, text: str, mode: str) -> None:
+    """Write one suggested reply in the background. A failure leaves the
+    inbox row without a draft - never an error at the push endpoint."""
+    try:
+        reply, _provider = await complete(
+            _draft_messages(chat, text, mode),
+            temperature=0.7,
+            max_tokens=220,
+        )
+        reply = (reply or "").strip().strip('"').strip()
+        if reply:
+            db.set_inbox_draft(inbox_id, reply[:1000])
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @app.post("/api/inbox/whatsapp")
-def inbox_whatsapp(payload: dict) -> JSONResponse:
+def inbox_whatsapp(payload: dict, background: BackgroundTasks) -> JSONResponse:
     """Push endpoint for the Android notification listener (Phase 8).
 
     Called by MessageListenerService inside the app process whenever WhatsApp
@@ -1085,6 +1132,11 @@ def inbox_whatsapp(payload: dict) -> JSONResponse:
         )
         if iid is None:
             return JSONResponse({"ok": True, "dup": True})
+        watched = db.autoreply_config().get("watched")
+        w = watched.get(chat) if isinstance(watched, dict) else None
+        if isinstance(w, dict) and w.get("enabled", True):
+            mode = w.get("mode") if w.get("mode") in _DRAFT_MODES else "humor"
+            background.add_task(_autodraft, iid, chat, text, mode)
         return JSONResponse({"ok": True, "dup": False, "id": iid})
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=503)
@@ -1097,6 +1149,58 @@ def inbox_list(limit: int = 50, chat: str | None = None) -> JSONResponse:
     for it in items:
         it["watched"] = bool(watched.get(it["chat"]))
     return JSONResponse({"items": items})
+
+
+@app.get("/api/autoreply")
+def autoreply_get() -> JSONResponse:
+    watched = db.autoreply_config().get("watched")
+    return JSONResponse({"watched": watched if isinstance(watched, dict) else {}})
+
+
+@app.post("/api/autoreply/watch")
+def autoreply_watch(payload: dict) -> JSONResponse:
+    try:
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid payload"}, status_code=400)
+        chat = str(payload.get("chat") or "").strip()[:200]
+        if not chat:
+            return JSONResponse({"error": "chat required"}, status_code=400)
+        mode = str(payload.get("mode") or "off").strip().lower()
+        if mode not in _DRAFT_MODES and mode != "off":
+            return JSONResponse(
+                {"error": "mode must be humor, warm, brief or off"},
+                status_code=400,
+            )
+        cfg = db.set_autoreply_watch(chat, "" if mode == "off" else mode)
+        return JSONResponse({"ok": True, "watched": cfg.get("watched") or {}})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
+@app.get("/api/inbox/drafts")
+def inbox_drafts(limit: int = 20) -> JSONResponse:
+    return JSONResponse({"items": db.pending_drafts(limit=limit)})
+
+
+@app.post("/api/inbox/{inbox_id}/notified")
+def inbox_notified(inbox_id: int) -> JSONResponse:
+    if db.inbox_row(inbox_id) is None:
+        return JSONResponse({"error": "no such message"}, status_code=404)
+    db.set_inbox_notified(inbox_id)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/inbox/{inbox_id}/stage")
+def inbox_stage(inbox_id: int) -> JSONResponse:
+    """Stage one live message as a learned candidate (propose, not fact)."""
+    row = db.inbox_row(inbox_id)
+    if row is None:
+        return JSONResponse({"error": "no such message"}, status_code=404)
+    source = f"inbox:{row['msg_key']}"
+    if db.has_learned_source(source):
+        return JSONResponse({"staged": 0, "skipped": 1, "total": 1})
+    db.add_learned(row["text"], kind="whatsapp", source=source, confidence=0.7)
+    return JSONResponse({"staged": 1, "skipped": 0, "total": 1})
 
 
 @app.get("/api/import/{source}/preview")

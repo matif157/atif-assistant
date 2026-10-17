@@ -1515,6 +1515,89 @@ def test_inbox() -> None:
             db.reset_db_path()
 
 
+def test_autodraft() -> None:
+    """Phase 8c: per-chat auto-draft - watched chats get a suggested reply
+    (humor mode etc), the draft flows to /api/inbox/drafts until marked
+    notified, and staging keeps the propose-then-approve contract."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    import atif_assistant.app as app_mod
+    from atif_assistant.app import app
+
+    print("\nautodraft (watched chats suggest replies)")
+    with tempfile.TemporaryDirectory() as tmp:
+        db.use_test_db(Path(tmp) / "autodraft.db")
+        db.init_db()
+        client = TestClient(app)
+        real_complete = app_mod.complete
+        seen: dict = {}
+
+        async def fake_complete(messages, temperature=0.4, max_tokens=1800):
+            seen["messages"] = messages
+            seen["temperature"] = temperature
+            return "Bilkul, kal 4 baje milte hain", "fake"
+
+        app_mod.complete = fake_complete
+        try:
+            bad = client.post("/api/autoreply/watch", json={"chat": "", "mode": "humor"})
+            check("empty chat rejected", bad.status_code == 400)
+            bad_mode = client.post("/api/autoreply/watch", json={"chat": "Ali", "mode": "sassy"})
+            check("unknown mode rejected", bad_mode.status_code == 400)
+            watched = client.post(
+                "/api/autoreply/watch", json={"chat": "Ali Khan", "mode": "humor"}
+            )
+            check("watch recorded", watched.json()["watched"] == {"Ali Khan": {"enabled": True, "mode": "humor"}})
+            got = client.get("/api/autoreply")
+            check("watch readable", got.json()["watched"]["Ali Khan"]["mode"] == "humor")
+            off = client.post("/api/autoreply/watch", json={"chat": "Ali Khan", "mode": "off"})
+            check("off removes watch", off.json()["watched"] == {})
+            client.post("/api/autoreply/watch", json={"chat": "Ali Khan", "mode": "humor"})
+
+            r1 = client.post(
+                "/api/inbox/whatsapp",
+                json={"chat": "Ali Khan", "text": "Kal kya plan hai?", "package": "com.whatsapp"},
+            )
+            iid = r1.json()["id"]
+            row = db.inbox_row(iid)
+            check("watched chat got a draft", row["draft"] == "Bilkul, kal 4 baje milte hain")
+            check("prompt carries the message", "Kal kya plan hai?" in seen["messages"][1]["content"])
+            check("prompt sets humor style", "witty" in seen["messages"][0]["content"])
+            check("prompt forbids claiming a send", "never claim" in seen["messages"][0]["content"])
+
+            r2 = client.post(
+                "/api/inbox/whatsapp",
+                json={"chat": "Unwatched", "text": "Hello!", "package": "com.whatsapp"},
+            )
+            check("unwatched chat has no draft", db.inbox_row(r2.json()["id"])["draft"] is None)
+
+            drafts = client.get("/api/inbox/drafts")
+            check("draft listed once", [d["id"] for d in drafts.json()["items"]] == [iid])
+            marked = client.post(f"/api/inbox/{iid}/notified")
+            check("marked notified", marked.json()["ok"] is True)
+            check("drafts empty after notify", client.get("/api/inbox/drafts").json()["items"] == [])
+            check("notified row keeps its draft", db.inbox_row(iid)["notified"] == 1)
+
+            missing = client.post("/api/inbox/99999/notified")
+            check("unknown notified id 404", missing.status_code == 404)
+
+            st = client.post(f"/api/inbox/{iid}/stage")
+            check("message staged as candidate", st.json() == {"staged": 1, "skipped": 0, "total": 1})
+            check(
+                "staged message searchable",
+                bool(db.search_memory("Kal kya plan hai")),
+            )
+            again = client.post(f"/api/inbox/{iid}/stage")
+            check("re-stage skips", again.json() == {"staged": 0, "skipped": 1, "total": 1})
+            miss_stage = client.post("/api/inbox/99999/stage")
+            check("unknown stage id 404", miss_stage.status_code == 404)
+        finally:
+            app_mod.complete = real_complete
+            db.reset_db_path()
+
+
 def test_whatsapp_txt() -> None:
     """Phase 8: WhatsApp .txt chat exports - both official formats parse,
     stage as LEARNED candidates with content-key dedupe, and land in the
@@ -4034,6 +4117,7 @@ def main() -> int:
     test_importers()
     test_whatsapp_txt()
     test_inbox()
+    test_autodraft()
     test_todos_reminders()
     test_extended_api()
     test_location()

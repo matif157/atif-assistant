@@ -1873,6 +1873,106 @@ async function stageTxtItems() {
 }
 document.getElementById("wtxt-stage")?.addEventListener("click", stageTxtItems);
 
+/* Phase 8c: live inbox - per-chat auto-reply drafts the user copies and
+   sends themselves; nothing is ever sent on their behalf. */
+let inboxWatched = {};
+
+async function loadInbox() {
+  const list = document.getElementById("inbox-list");
+  const chatsEl = document.getElementById("inbox-chats");
+  if (!list || !chatsEl) return;
+  try {
+    const [ib, ar] = await Promise.all([
+      (await fetch("/api/inbox?limit=50")).json(),
+      (await fetch("/api/autoreply")).json(),
+    ]);
+    inboxWatched = (ar && ar.watched) || {};
+    const items = (ib && ib.items) || [];
+    const modes = ["off", "humor", "warm", "brief"];
+    const names = [...new Set(items.map((i) => i.chat).concat(Object.keys(inboxWatched)))];
+    chatsEl.innerHTML = "";
+    for (const chat of names) {
+      const cur = inboxWatched[chat] && inboxWatched[chat].mode ? inboxWatched[chat].mode : "off";
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:.5rem;font-size:12px";
+      const label = document.createElement("span");
+      label.textContent = chat;
+      const sel = document.createElement("select");
+      for (const m of modes) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m === "off" ? "auto-reply: off" : `auto-reply: ${m}`;
+        if (m === cur) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", async () => {
+        try {
+          const r = await fetch("/api/autoreply/watch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat, mode: sel.value }),
+          });
+          const d = await r.json();
+          if (r.ok) inboxWatched = d.watched || {};
+        } catch { /* keep previous selection */ }
+      });
+      row.appendChild(label);
+      row.appendChild(sel);
+      chatsEl.appendChild(row);
+    }
+    list.innerHTML = "";
+    if (!items.length) {
+      list.innerHTML = '<span class="hint">Nothing yet - grant notification access in Settings, then incoming messages appear here.</span>';
+    }
+    for (const it of items) {
+      const card = document.createElement("div");
+      card.style.cssText = "border-top:1px solid var(--line);padding-top:.35rem";
+      const head = document.createElement("div");
+      head.className = "hint";
+      head.textContent = `${it.chat} · ${String(it.created_at || "").replace("T", " ").slice(0, 16)}`;
+      const body = document.createElement("div");
+      body.style.cssText = "font-size:13px;word-break:break-word";
+      body.textContent = it.text;
+      card.appendChild(head);
+      card.appendChild(body);
+      if (it.draft) {
+        const wrap = document.createElement("div");
+        wrap.style.cssText = "margin-top:.3rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap";
+        const dtxt = document.createElement("em");
+        dtxt.textContent = it.draft;
+        const copy = document.createElement("button");
+        copy.className = "ghost small";
+        copy.textContent = "COPY DRAFT";
+        copy.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(it.draft || "");
+            copy.textContent = "COPIED";
+            setTimeout(() => (copy.textContent = "COPY DRAFT"), 1200);
+          } catch { /* clipboard denied */ }
+        });
+        const stage = document.createElement("button");
+        stage.className = "ghost small";
+        stage.textContent = "STAGE";
+        stage.title = "Save the incoming message as a learned candidate for review";
+        stage.addEventListener("click", async () => {
+          try {
+            await fetch(`/api/inbox/${it.id}/stage`, { method: "POST" });
+            stage.textContent = "STAGED";
+          } catch { /* transient */ }
+        });
+        wrap.appendChild(dtxt);
+        wrap.appendChild(copy);
+        wrap.appendChild(stage);
+        card.appendChild(wrap);
+      }
+      list.appendChild(card);
+    }
+  } catch (e) {
+    list.innerHTML = `<span class="hint">Inbox unavailable: ${e.message}</span>`;
+  }
+}
+document.getElementById("inbox-refresh")?.addEventListener("click", loadInbox);
+
 document.getElementById("btn-import")?.addEventListener("click", () => {
   const dataSheet = document.getElementById("data-sheet");
   if (dataSheet) { dataSheet.hidden = false; showDataTab("import"); loadWhatsAppStatus(); }
@@ -3200,7 +3300,7 @@ document.getElementById("close-data")?.addEventListener("click", () => {
   if (dataSheet) dataSheet.hidden = true;
 });
 document.getElementById("tab-upload")?.addEventListener("click", () => showDataTab("upload"));
-document.getElementById("tab-import")?.addEventListener("click", () => { showDataTab("import"); loadWhatsAppStatus(); });
+document.getElementById("tab-import")?.addEventListener("click", () => { showDataTab("import"); loadWhatsAppStatus(); loadInbox(); });
 document.getElementById("tab-media")?.addEventListener("click", () => { showDataTab("media"); loadLibrary("media-body", true); });
 
 document.getElementById("btn-upload")?.addEventListener("click", () => {

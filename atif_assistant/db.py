@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS inbox (
     msg_key     TEXT NOT NULL,
     post_time   TEXT,
     draft       TEXT,
+    notified    INTEGER,
     created_at  TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_msg_key ON inbox(msg_key);
@@ -371,6 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_learned_status ON learned(status);
 # which is why the evidence table can grow a digest without a new build.
 _ADDED_COLUMNS = (
     ("evidence", "digest", "TEXT"),
+    ("inbox", "notified", "INTEGER"),
 )
 
 
@@ -808,6 +810,54 @@ def set_inbox_draft(inbox_id: int, draft: str | None) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def set_inbox_notified(inbox_id: int) -> bool:
+    conn = connect()
+    cur = conn.execute("UPDATE inbox SET notified=1 WHERE id=?", (inbox_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def pending_drafts(limit: int = 20) -> list[dict[str, Any]]:
+    """Drafts the app has not notified about yet (Phase 8c delivery)."""
+    conn = connect()
+    limit = max(1, min(int(limit), 100))
+    rows = conn.execute(
+        "SELECT * FROM inbox WHERE draft IS NOT NULL"
+        " AND (notified IS NULL OR notified=0)"
+        " ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def autoreply_config() -> dict[str, Any]:
+    cfg = get_profile("auto_reply")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def set_autoreply_watch(chat: str, mode: str) -> dict[str, Any]:
+    """Watch one chat with a reply mode; empty mode removes the watch."""
+    cfg = autoreply_config()
+    watched = cfg.get("watched")
+    if not isinstance(watched, dict):
+        watched = {}
+    if mode:
+        watched[chat] = {"enabled": True, "mode": mode}
+    else:
+        watched.pop(chat, None)
+    cfg["watched"] = watched
+    set_profile("auto_reply", cfg)
+    return cfg
+
+
+def has_learned_source(source: str) -> bool:
+    conn = connect()
+    row = conn.execute(
+        "SELECT 1 FROM learned WHERE source=? LIMIT 1", (source,)
+    ).fetchone()
+    return row is not None
 
 
 def learned_row(learned_id: int) -> dict[str, Any] | None:

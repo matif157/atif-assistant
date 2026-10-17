@@ -294,6 +294,15 @@
       <button id="wtxt-stage" class="btn primary" hidden>Stage selected as candidates</button>
       <span id="wtxt-stage-meta" class="muted"></span>
     </div>
+    <div id="inbox-panel" style="margin:.6rem .75rem .25rem .75rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem">
+        <strong style="font-size:12px;letter-spacing:.1em">LIVE INBOX (WhatsApp)</strong>
+        <button id="inbox-refresh" class="ghost small">REFRESH</button>
+      </div>
+      <p class="hint">Messages the live reader caught. Pick a chat to auto-draft a reply - the draft is a suggestion you edit and copy yourself; Atif never sends anything on your behalf.</p>
+      <div id="inbox-chats" style="display:flex;flex-direction:column;gap:.35rem;margin:.4rem 0"></div>
+      <div id="inbox-list" style="max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:.4rem;border:1px solid var(--line);border-radius:8px;padding:.4rem"></div>
+    </div>
     <div id="src-pick" style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem .75rem .25rem .75rem">
       <button class="ghost small src-btn" data-src="contacts">CONTACTS</button>
       <button class="ghost small src-btn" data-src="calendar">CALENDAR</button>
