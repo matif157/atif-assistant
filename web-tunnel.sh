@@ -31,12 +31,28 @@ if [ -z "${ATIF_ASSISTANT_WEB_PASSWORD:-}" ]; then
   echo "                   anyone with the URL gets full access." >&2
 fi
 
+# A URL counts as "the tunnel" only if it actually proxies to our server:
+# the password gate answers /api/health with 401 (or 200 when no password
+# is set). Banner/help URLs in the logs never do.
+probe_ok() {
+  local c
+  c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "${1%/}/api/health" || true)"
+  [ "$c" = "401" ] || [ "$c" = "200" ]
+}
+
 wait_for_url() { # $1 = log file, $2 = grep pattern, $3 = pid, $4 = tries
-  local i=0
+  local i=0 cand
+  URL=""
   while [ "$i" -lt "$4" ]; do
     sleep 1
-    URL="$(grep -oE "$2" "$1" | grep -v '^https://api\.' | head -1)"
-    [ -n "$URL" ] && return 0
+    while read -r cand; do
+      [ -n "$cand" ] || continue
+      case "$cand" in *api.trycloudflare.com) continue ;; esac
+      if probe_ok "$cand"; then
+        URL="$cand"
+        return 0
+      fi
+    done < <(grep -oE "$2" "$1" | sort -u)
     kill -0 "$3" 2>/dev/null || return 1
     i=$((i + 1))
   done
@@ -63,7 +79,7 @@ ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
     -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
     -R "80:127.0.0.1:${PORT}" nokey@localhost.run >"$LOG2" 2>&1 &
 SSH_PID=$!
-if wait_for_url "$LOG2" 'https://[a-z0-9.-]+\.(lhr\.life|localhost\.run|loca\.lt)' "$SSH_PID" 25; then
+if wait_for_url "$LOG2" 'https://[a-z0-9.-]+\.(lhr\.life|localhost\.run|loca\.lt)' "$SSH_PID" 30; then
   echo "Atif Assistant ->  public URL:  ${URL}" >&2
   echo "Atif Assistant ->  (SSH tunnel via localhost.run — Ctrl+C stops)" >&2
   wait "$SSH_PID"
