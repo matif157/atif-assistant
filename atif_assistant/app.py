@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -23,11 +24,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import applog, db, engine, learn, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
+from . import applog, db, engine, learn, llm, location, ollama, pipeline, plan, router, stt, tts, uploads, voice_id
 from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
 from .llm import (
     invalidate_probe_cache,
+    llm_download_pause,
     llm_download_start,
     llm_model_status,
     probe_providers,
@@ -158,7 +160,82 @@ def _startup() -> None:
     # Bring the local offline model host up in the background if it is installed
     # and not already running, so offline chat works without a terminal.
     ollama.ensure_autostart()
+    _resume_partial_downloads()
     return None
+
+
+def _ram_gb() -> float | None:
+    """Physical RAM in GiB, or None where the OS will not say."""
+    try:  # Android and Linux expose this world-readable
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return round(int(line.split()[1]) / 1048576, 1)
+    except OSError:
+        pass
+    try:  # macOS has no SC_PHYS_PAGES; raises ValueError there
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page > 0:
+            return round(pages * page / (1024 ** 3), 1)
+    except (ValueError, OSError, AttributeError):
+        pass
+    return None
+
+
+def _resume_partial_downloads() -> None:
+    """Continue downloads a previous session started, after any restart.
+
+    Only fires when a .part file exists (the user really began that download)
+    and the user has not pressed pause (that intent is stored as
+    ``models.auto_resume``). Never starts a download nobody asked for.
+    """
+    try:
+        if db.get_setting("models.auto_resume", "on") == "off":
+            return
+        for name in llm.LLM_MODEL_URLS:
+            if llm._part_file(name).is_file():
+                llm.llm_download_start(name)
+        for name in stt.MODEL_URLS:
+            if (stt.model_dir() / f"{name}.part").is_file():
+                stt.stt_download_start(name)
+    except Exception:  # noqa: BLE001 - resume must never block boot
+        pass
+
+
+@app.get("/api/setup")
+def setup_info() -> dict:
+    """First-run facts: device RAM tier, free storage, and the two model sets.
+
+    The Quick set exists for low-RAM phones and flaky connections; the Full
+    set is the accuracy choice. The UI shows the recommendation but never
+    forces it.
+    """
+    ram = _ram_gb()
+    recommended = "quick" if (ram is not None and ram < 3.5) else "full"
+    try:
+        free = shutil.disk_usage(DATA_DIR).free
+    except OSError:
+        free = 0
+    sets = {
+        "quick": {
+            "llm": "qwen2.5-0.5b", "llm_mib": 469,
+            "stt": "ggml-base.bin", "stt_mib": 141,
+            "total_mib": 610, "label": "Quick set - about 610 MB",
+        },
+        "full": {
+            "llm": "qwen2.5-1.5b", "llm_mib": 1066,
+            "stt": "ggml-small.bin", "stt_mib": 465,
+            "total_mib": 1531, "label": "Full set - about 1.5 GB",
+        },
+    }
+    return {
+        "device": {"ram_gb": ram},
+        "storage": {"free_bytes": free},
+        "sets": sets,
+        "recommended": recommended,
+        "warn_bytes": int(sets[recommended]["total_mib"] * 1048576 * 1.1),
+    }
 
 
 @app.get("/api/health")
@@ -337,13 +414,20 @@ def download_speech_model(payload: dict | None = None) -> JSONResponse:
 
     ``{"background": true}`` returns immediately and lets the client poll
     GET /api/speech for progress - a phone-side fetch of the 466 MB model must
-    not hold one HTTP request open for minutes.
+    not hold one HTTP request open for minutes. ``{"action": "pause"}`` stops
+    an in-flight download and keeps its partial file for a later resume.
     """
     body = payload or {}
+    if body.get("action") == "pause":
+        result = stt.stt_download_pause()
+        if result.get("reason") == "pausing":
+            db.set_setting("models.auto_resume", "off")
+        return JSONResponse(result)
     name = body.get("name") or stt.PREFERRED_MODEL
     if name not in stt.MODEL_URLS:
         return JSONResponse({"error": f"unknown model {name!r}"}, status_code=400)
     if body.get("background"):
+        db.set_setting("models.auto_resume", "on")
         result = stt.stt_download_start(name)
         if not result.get("ok"):
             return JSONResponse(result, status_code=400)
@@ -372,8 +456,19 @@ def app_log(limit: int = 50) -> dict:
 
 @app.post("/api/llm/model")
 def llm_model_download(payload: dict | None = None) -> JSONResponse:
-    """Start fetching the offline model in the background; poll GET /api/llm."""
-    name = (payload or {}).get("name")
+    """Start fetching the offline model in the background; poll GET /api/llm.
+
+    ``{"action": "pause"}`` stops the download but never deletes the bytes
+    already fetched - the next start resumes from there.
+    """
+    body = payload or {}
+    if body.get("action") == "pause":
+        result = llm_download_pause()
+        if result.get("reason") == "pausing":
+            db.set_setting("models.auto_resume", "off")
+        return JSONResponse(result)
+    name = body.get("name")
+    db.set_setting("models.auto_resume", "on")
     result = llm_download_start(name)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)

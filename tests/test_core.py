@@ -1905,6 +1905,354 @@ def test_stt() -> None:
     db.reset_db_path()
 
 
+def test_model_downloads() -> None:
+    """Model downloads: mirror fallback, resume, pause - progress is sacred.
+
+    The bugs this guards: a dead huggingface.co mirror bricking first run,
+    the downloader deleting its own .part file after six failures (so a phone
+    on a flaky link restarted 1.5 GB from zero every time), and no way to
+    pause a mobile-data download.
+    """
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import app as app_mod, db, llm, stt
+    from atif_assistant.app import app
+
+    print("\nmodel downloads (mirrors, resume, pause)")
+
+    payload = bytes((i * 7 + 3) % 256 for i in range(1_100_000))
+
+    class Handler(BaseHTTPRequestHandler):
+        routes: dict = {}
+        seen: list = []  # (path, range-header, served-start)
+        stop = threading.Event()
+
+        def log_message(self, *args) -> None:  # noqa: D102 - fixture stays quiet
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802 - http.server naming
+            route = Handler.routes.get(self.path)
+            if route is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            data, mode = route["data"], route["mode"]
+            rng = self.headers.get("Range")
+            start = 0
+            if rng and "=" in rng:
+                try:
+                    start = int(rng.split("=", 1)[1].split("-")[0] or 0)
+                except ValueError:
+                    start = 0
+            Handler.seen.append((self.path, rng, start))
+            try:
+                if mode == "half":
+                    # Claim the full length, deliver half, hang up: exactly
+                    # what a flaky mobile link looks like.
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data[: len(data) // 2])
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
+                if mode == "slow":
+                    # Trick the payload out for ~20 s so a pause can land
+                    # while the download is still running.
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    pos = 0
+                    while not Handler.stop.is_set():
+                        chunk = data[pos:pos + 8192]
+                        if not chunk:
+                            pos, chunk = 0, data[:8192]
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                        pos += len(chunk)
+                        time.sleep(0.15)
+                    return
+                body = data[start:]
+                self.send_response(206 if start else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    dead = "http://127.0.0.1:9/gguf"  # nothing listens there: instant refusal
+
+    orig = {
+        "llm": {
+            k: getattr(llm, k)
+            for k in ("DATA_DIR", "LLM_MODEL_URLS", "LLM_MODEL_EXPECTED", "_DL_ATTEMPTS")
+        },
+        "stt": {
+            k: getattr(stt, k)
+            for k in ("_MODEL_DIR", "MODEL_URLS", "MODEL_EXPECTED", "_DL_ATTEMPTS")
+        },
+    }
+
+    def wait_for(fn, timeout=15.0) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if fn():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def reset_dl() -> None:
+        with llm._LLM_DL_LOCK:
+            llm._LLM_DL.update(
+                {"state": "idle", "name": None, "bytes": 0, "total": 0,
+                 "reason": None, "partial": 0, "pause": False}
+            )
+        with stt._STT_DL_LOCK:
+            stt._STT_DL.update(
+                {"state": "idle", "name": None, "bytes": 0, "total": 0,
+                 "reason": None, "partial": 0, "pause": False}
+            )
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            db.use_test_db(Path(tmp) / "dl.db")
+            db.init_db()
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir()
+            llm.DATA_DIR = data_dir
+            llm._DL_ATTEMPTS = 2
+            llm.LLM_MODEL_URLS = {"unit-model": [f"{base}/unit"], "guarded": [dead]}
+            llm.LLM_MODEL_EXPECTED = {"unit-model": len(payload), "guarded": 100}
+            stt._MODEL_DIR = Path(tmp) / "whisper"
+            stt._DL_ATTEMPTS = 2
+            stt.MODEL_URLS = {"ggml-unit.bin": [f"{base}/whisper"]}
+            stt.MODEL_EXPECTED = {"ggml-unit.bin": len(payload)}
+            dest = data_dir / "models" / "unit-model.gguf"
+            part = data_dir / "models" / "unit-model.gguf.part"
+
+            # 1. dead first mirror, working second mirror
+            reset_dl()
+            Handler.routes["/unit"] = {"data": payload, "mode": "ok"}
+            llm.LLM_MODEL_URLS["unit-model"] = [dead, f"{base}/unit"]
+            check("llm download starts", llm.llm_download_start("unit-model").get("ok") is True)
+            check(
+                "survives a dead first mirror",
+                wait_for(lambda: llm.llm_model_status()["download"]["state"] == "ready"),
+            )
+            check(
+                "model arrives complete",
+                dest.is_file() and dest.stat().st_size == len(payload),
+            )
+
+            # 2. dropped connection: fail, but never lose the bytes fetched
+            reset_dl()
+            dest.unlink(missing_ok=True)
+            part.unlink(missing_ok=True)
+            Handler.routes["/unit"] = {"data": payload, "mode": "half"}
+            llm.LLM_MODEL_URLS["unit-model"] = [f"{base}/unit"]
+            llm.llm_download_start("unit-model")
+            check(
+                "failed download reports an error",
+                wait_for(lambda: llm.llm_model_status()["download"]["state"] == "error"),
+            )
+            st = llm.llm_model_status()["download"]
+            check(
+                "partial file survives the failure",
+                part.is_file() and part.stat().st_size > 0 and st.get("partial", 0) > 0,
+            )
+            check(
+                "failure reason mentions saved progress",
+                "progress saved" in (st.get("reason") or ""),
+            )
+            check("no finished model after failure", not dest.exists())
+
+            # 3. a later start resumes the partial instead of restarting
+            reset_dl()
+            Handler.routes["/unit"] = {"data": payload, "mode": "ok"}
+            half = len(payload) // 2
+            part.write_bytes(payload[:half])
+            Handler.seen.clear()
+            llm.llm_download_start("unit-model")
+            check(
+                "resumes from the saved partial",
+                wait_for(lambda: llm.llm_model_status()["download"]["state"] == "ready"),
+            )
+            check(
+                "resume asked only for the missing bytes",
+                any(p == "/unit" and s == half for p, _rg, s in Handler.seen),
+            )
+            check(
+                "resumed file is byte-complete",
+                dest.is_file() and dest.read_bytes() == payload,
+            )
+
+            # 4. pause mid-download keeps the partial file
+            reset_dl()
+            dest.unlink(missing_ok=True)
+            part.unlink(missing_ok=True)
+            Handler.routes["/unit"] = {"data": payload, "mode": "slow"}
+            llm.llm_download_start("unit-model")
+            check(
+                "download begins on the slow mirror",
+                wait_for(
+                    lambda: llm.llm_model_status()["download"]["bytes"] > 0, timeout=10
+                ),
+            )
+            check("pause is accepted", llm.llm_download_pause().get("ok") is True)
+            check(
+                "worker stops in the paused state",
+                wait_for(
+                    lambda: llm.llm_model_status()["download"]["state"] == "paused",
+                    timeout=10,
+                ),
+            )
+            check(
+                "pause keeps the partial file",
+                part.is_file() and part.stat().st_size > 0,
+            )
+            check(
+                "paused status reports partial bytes",
+                (llm.llm_model_status()["download"].get("partial") or 0) > 0,
+            )
+
+            # 5. whisper (sync path): failure keeps progress, retry resumes
+            reset_dl()
+            stt_dest = stt._MODEL_DIR / "ggml-unit.bin"
+            stt_tmp = stt._MODEL_DIR / "ggml-unit.bin.part"
+            stt_dest.unlink(missing_ok=True)
+            stt_tmp.unlink(missing_ok=True)
+            Handler.routes["/whisper"] = {"data": payload, "mode": "half"}
+            r = stt.download_model("ggml-unit.bin")
+            check(
+                "failed whisper fetch keeps its partial",
+                r.get("ok") is False
+                and r.get("partial", 0) > 0
+                and stt_tmp.is_file()
+                and stt_tmp.stat().st_size > 0,
+            )
+            Handler.routes["/whisper"] = {"data": payload, "mode": "ok"}
+            Handler.seen.clear()
+            r2 = stt.download_model("ggml-unit.bin")
+            check(
+                "second whisper fetch resumes and finishes",
+                r2.get("ok") is True
+                and stt_dest.is_file()
+                and stt_dest.read_bytes() == payload,
+            )
+            check(
+                "whisper resume used a Range request",
+                any(s > 0 for p, rg, s in Handler.seen if p == "/whisper" and rg),
+            )
+
+            # 6. whisper background worker rotates mirrors too
+            reset_dl()
+            stt_dest.unlink(missing_ok=True)
+            stt_tmp.unlink(missing_ok=True)
+            stt.MODEL_URLS["ggml-unit.bin"] = [dead, f"{base}/whisper"]
+            check(
+                "whisper background download starts",
+                stt.stt_download_start("ggml-unit.bin").get("ok") is True,
+            )
+            check(
+                "whisper worker rotates past the dead mirror",
+                wait_for(lambda: stt.stt_download_status()["state"] == "ready"),
+            )
+            check(
+                "whisper model complete",
+                stt_dest.is_file() and stt_dest.stat().st_size == len(payload),
+            )
+
+            # 7. first-run setup facts
+            client = TestClient(app)
+            s = client.get("/api/setup").json()
+            check(
+                "/api/setup offers quick and full sets",
+                set(s.get("sets", {})) == {"quick", "full"}
+                and s["sets"]["quick"]["total_mib"] == 610
+                and s["sets"]["full"]["total_mib"] == 1531,
+            )
+            check("setup recommends a known set", s.get("recommended") in {"quick", "full"})
+            check(
+                "setup reports free storage",
+                isinstance(s.get("storage", {}).get("free_bytes"), int),
+            )
+            check(
+                "setup warns above the set size",
+                (s.get("warn_bytes") or 0)
+                > s["sets"][s["recommended"]]["total_mib"] * 1048576,
+            )
+
+            # 8. pause endpoints
+            with llm._LLM_DL_LOCK:
+                llm._LLM_DL.update(
+                    {"state": "downloading", "name": "unit-model", "pause": False}
+                )
+            r = client.post("/api/llm/model", json={"action": "pause"})
+            check(
+                "llm pause endpoint pauses",
+                r.status_code == 200 and r.json().get("reason") == "pausing",
+            )
+            check(
+                "pausing disables auto-resume",
+                db.get_setting("models.auto_resume") == "off",
+            )
+            reset_dl()
+            r = client.post("/api/speech/model", json={"action": "pause"})
+            check(
+                "whisper pause answers without a running download",
+                r.status_code == 200 and r.json().get("reason") == "not downloading",
+            )
+
+            # 9. boot auto-resume: honours pause, resumes interrupted work
+            calls: list = []
+            orig_ls, orig_ss = llm.llm_download_start, stt.stt_download_start
+            llm.llm_download_start = lambda name=None: (
+                calls.append(("llm", name)),
+                {"ok": True},
+            )[1]
+            stt.stt_download_start = lambda name=None: (
+                calls.append(("stt", name)),
+                {"ok": True},
+            )[1]
+            guard_part = llm._part_file("guarded")
+            try:
+                guard_part.parent.mkdir(parents=True, exist_ok=True)
+                guard_part.write_bytes(b"partial")
+                db.set_setting("models.auto_resume", "off")
+                app_mod._resume_partial_downloads()
+                check("paused downloads stay paused across a restart", calls == [])
+                db.delete_setting("models.auto_resume")
+                app_mod._resume_partial_downloads()
+                check(
+                    "interrupted downloads resume on boot",
+                    ("llm", "guarded") in calls,
+                )
+            finally:
+                llm.llm_download_start = orig_ls
+                stt.stt_download_start = orig_ss
+                guard_part.unlink(missing_ok=True)
+    finally:
+        for key, value in orig["llm"].items():
+            setattr(llm, key, value)
+        for key, value in orig["stt"].items():
+            setattr(stt, key, value)
+        reset_dl()
+        Handler.stop.set()
+        server.shutdown()
+        server.server_close()
+
+    db.reset_db_path()
+
+
 def test_language() -> None:
     """Reply language follows the question when set to auto (Urdu fix).
 
@@ -2358,6 +2706,7 @@ def main() -> int:
     test_plan()
     test_tts()
     test_stt()
+    test_model_downloads()
     test_voice()
     test_ollama()
     test_crud()

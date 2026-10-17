@@ -59,4 +59,15 @@ def start(files_dir, llama_bin="", whisper_bin="", host="127.0.0.1", port=8770):
         whisper_bin=bool(whisper_bin),
     )
 
-    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
+    except Exception as exc:  # noqa: BLE001 - port conflict, bad env, ...
+        # Let the caller retry (boot timeout / RETRY button): a failed boot
+        # must not leave the guard stuck at "started" forever.
+        with _lock:
+            _started = False
+        try:
+            log("server.boot_failed", error=str(exc)[:200], type=type(exc).__name__)
+        except Exception:  # noqa: BLE001
+            pass
+        raise

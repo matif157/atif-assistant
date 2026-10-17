@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+import time
 import urllib.request
 import wave
 from pathlib import Path
@@ -114,7 +115,12 @@ def status() -> dict[str, Any]:
 
 
 def download_model(name: str | None = None) -> dict[str, Any]:
-    """Fetch a speaker-embedding model into the shared model directory."""
+    """Fetch a speaker-embedding model into the shared model directory.
+
+    Same rule as the LLM and whisper downloaders: the .part file is never
+    deleted on failure, so a retry resumes with a Range request instead of
+    starting over.
+    """
     name = name or DEFAULT_MODEL
     if name not in MODEL_URLS:
         return {"ok": False, "reason": f"unknown model {name!r}"}
@@ -125,24 +131,51 @@ def download_model(name: str | None = None) -> dict[str, Any]:
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310
-            with open(tmp, "wb") as fh:
-                while True:
-                    chunk = resp.read(1 << 16)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-        if tmp.stat().st_size == 0:
-            tmp.unlink(missing_ok=True)
-            return {"ok": False, "reason": "downloaded file was empty"}
-        tmp.replace(dest)
-    except Exception as exc:  # noqa: BLE001
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    except OSError as exc:
         return {"ok": False, "reason": str(exc)}
-    return {"ok": True, "model": name, "path": str(dest), "bytes": dest.stat().st_size}
+    last_reason = "download failed"
+    for attempt in range(4):
+        try:
+            have = tmp.stat().st_size if tmp.is_file() else 0
+            headers = {"User-Agent": "atif-assistant"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+                resuming = have > 0 and getattr(resp, "status", 200) == 206
+                clen = int(resp.headers.get("Content-Length") or 0)
+                if have and not resuming:
+                    have = 0  # server ignored Range: restart clean
+                total = clen + (have if resuming else 0)
+                with open(tmp, "ab" if have else "wb") as fh:
+                    while True:
+                        chunk = resp.read(1 << 16)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            got = tmp.stat().st_size if tmp.is_file() else 0
+            if got == 0:
+                return {"ok": False, "reason": "downloaded file was empty", "model": name}
+            if total and got < total * 0.99:
+                raise OSError(f"connection ended early ({got} of {total} bytes)")
+            tmp.replace(dest)
+            return {
+                "ok": True,
+                "model": name,
+                "path": str(dest),
+                "bytes": dest.stat().st_size,
+            }
+        except Exception as exc:  # noqa: BLE001 - keep the bytes, retry
+            last_reason = str(exc)[:200] or type(exc).__name__
+            if attempt < 3:
+                time.sleep(1.5)
+                continue
+        break
+    partial = tmp.stat().st_size if tmp.is_file() else 0
+    reason = last_reason
+    if partial:
+        reason = f"{last_reason} - progress saved ({partial} bytes), retry to resume"
+    return {"ok": False, "reason": reason, "model": name, "partial": partial}
 
 
 def decode_wav(data: bytes) -> tuple[Any, int] | tuple[None, int]:

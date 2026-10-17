@@ -687,19 +687,46 @@ LLM_MODEL_DEFAULT = "qwen2.5-1.5b"
 
 # Public (ungated) GGUF. Meta's Llama 3.2 mirrors are all license-gated with
 # HTTP 401, so a phone-side one-tap download must use an open repo; Qwen2.5
-# is the strongest small instruct model that is genuinely fetchable without
-# an account. Q4_K_M = ~1.1 GB on disk, ~1.7 GB RAM while running.
-LLM_MODEL_URLS = {
-    "qwen2.5-1.5b": (
+# is the strongest small instruct model that is genuinely fetchable without an
+# account. Q4_K_M = ~1.1 GB on disk, ~1.7 GB RAM while running; the 0.5B is
+# the quick set for low-RAM devices and flaky connections.
+#
+# Ordered mirror chain: Hugging Face first, hf-mirror as the proxy fallback,
+# ModelScope (in Asia) last. A flaky link walks down the chain instead of
+# dying on the first host.
+LLM_MODEL_URLS: dict[str, list[str]] = {
+    "qwen2.5-1.5b": [
         "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF"
-        "/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    ),
+        "/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "https://hf-mirror.com/Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+        "/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "https://www.modelscope.cn/api/v1/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/repo"
+        "?FilePath=qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    ],
+    "qwen2.5-0.5b": [
+        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+        "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+        "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "https://www.modelscope.cn/api/v1/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF/repo"
+        "?FilePath=qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    ],
 }
 
 # Exact byte length from the source repo. A model file is only trusted when
 # it reaches this size (99% tolerance) - a dropped connection used to leave a
 # half-written file that looked installed.
-LLM_MODEL_EXPECTED = {"qwen2.5-1.5b": 1_117_320_736}
+LLM_MODEL_EXPECTED = {
+    "qwen2.5-1.5b": 1_117_320_736,
+    "qwen2.5-0.5b": 491_400_032,
+}
+
+# UI-facing sizes (MiB) for the Quick/Full set labels.
+LLM_MODEL_MIB = {"qwen2.5-1.5b": 1066, "qwen2.5-0.5b": 469}
+
+# Minimum download attempts before giving up (each rotates the mirror).
+# Tests lower this to keep failure paths fast.
+_DL_ATTEMPTS = 6
 
 
 def llm_model_ok(path: Path | None, name: str | None = None) -> bool:
@@ -711,13 +738,16 @@ def llm_model_ok(path: Path | None, name: str | None = None) -> bool:
         return path.stat().st_size >= 100_000_000
     return path.stat().st_size >= int(expected * 0.99)
 
+
 _LLM_DL_LOCK = threading.Lock()
 _LLM_DL: dict[str, Any] = {
-    "state": "idle",  # idle | downloading | ready | error
+    "state": "idle",  # idle | downloading | paused | ready | error
     "name": None,
     "bytes": 0,
     "total": 0,
     "reason": None,
+    "partial": 0,  # bytes already on disk in .part (never thrown away)
+    "pause": False,
 }
 
 
@@ -725,8 +755,15 @@ def llm_model_status() -> dict[str, Any]:
     """Binary, model file, server and download state for the UI."""
     with _LLM_DL_LOCK:
         download = dict(_LLM_DL)
+        download.pop("pause", None)
     proc = _LLAMACPP.get("proc")
     model = llamacpp_model_file()
+    # Report partial bytes even when idle/paused (after a process death) so
+    # the UI can offer "resume from X MB" instead of starting from zero.
+    if download.get("state") in ("idle", "paused", "error") and download.get("name"):
+        part = _part_file(str(download["name"]))
+        if part.is_file():
+            download["partial"] = part.stat().st_size
     return {
         "binary": llamacpp_bin() is not None,
         "model": {
@@ -746,6 +783,10 @@ def llm_model_status() -> dict[str, Any]:
     }
 
 
+def _part_file(name: str) -> Path:
+    return DATA_DIR / "models" / f"{name}.gguf.part"
+
+
 def llm_download_start(name: str | None = None) -> dict[str, Any]:
     """Start the model download in the background; never blocks the caller."""
     name = name or LLM_MODEL_DEFAULT
@@ -758,7 +799,14 @@ def llm_download_start(name: str | None = None) -> dict[str, Any]:
         if _LLM_DL["state"] == "downloading":
             return {"ok": True, "reason": "already running"}
         _LLM_DL.update(
-            {"state": "downloading", "name": name, "bytes": 0, "total": 0, "reason": None}
+            {
+                "state": "downloading",
+                "name": name,
+                "bytes": 0,
+                "total": 0,
+                "reason": None,
+                "pause": False,
+            }
         )
     threading.Thread(
         target=_llm_download_worker, args=(name,), daemon=True
@@ -766,21 +814,59 @@ def llm_download_start(name: str | None = None) -> dict[str, Any]:
     return {"ok": True, "started": True}
 
 
+def llm_download_pause() -> dict[str, Any]:
+    """Ask the running download to stop, keeping the partial file."""
+    with _LLM_DL_LOCK:
+        if _LLM_DL["state"] != "downloading":
+            return {"ok": True, "reason": "not downloading"}
+        _LLM_DL["pause"] = True
+    return {"ok": True, "reason": "pausing"}
+
+
+def _llm_urls(name: str) -> list[str]:
+    """Mirror chain for a model: custom override (settings/env) first, then
+    the built-in Hugging Face → hf-mirror → ModelScope chain."""
+    urls = list(LLM_MODEL_URLS[name])
+    try:
+        from . import db
+
+        custom = db.get_setting("model.custom_url", "") or os.environ.get(
+            "ATIF_ASSISTANT_LLM_MODEL_URL", ""
+        )
+    except Exception:  # noqa: BLE001 - settings must never break a download
+        custom = os.environ.get("ATIF_ASSISTANT_LLM_MODEL_URL", "")
+    if custom:
+        urls.insert(0, custom)
+    return urls
+
+
 def _llm_download_worker(name: str) -> None:
-    """Fetch the GGUF with resume: a dropped connection retries from where it
-    stopped instead of starting (or worse, finishing) over."""
-    url = LLM_MODEL_URLS[name]
+    """Fetch the GGUF with resume + mirror fallback.
+
+    Three rules, all learned from a phone on a flaky connection:
+      * the .part file is NEVER deleted - every failed session keeps its
+        bytes so the next one continues instead of starting over;
+      * each attempt rotates to the next mirror in the chain, so one dead
+        host cannot kill the download;
+      * a stall (no data for 60 s) aborts the attempt instead of hanging.
+    """
+    import time
+    import urllib.request
+
+    urls = _llm_urls(name)
     expected = LLM_MODEL_EXPECTED.get(name, 0)
     dest = DATA_DIR / "models" / f"{name}.gguf"
     tmp = dest.with_suffix(".gguf.part")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    import time
-    import urllib.error
-    import urllib.request
-
     last_error = "download failed"
-    for attempt in range(6):
+    attempts = max(_DL_ATTEMPTS, len(urls) * 2)
+    for attempt in range(attempts):
+        url = urls[attempt % len(urls)]
         try:
+            with _LLM_DL_LOCK:
+                if _LLM_DL["pause"]:
+                    _LLM_DL.update({"state": "paused", "reason": "paused by user"})
+                    return
             have = tmp.stat().st_size if tmp.is_file() else 0
             if expected and have >= expected * 0.99:
                 tmp.rename(dest)  # a prior attempt finished; nothing to fetch
@@ -791,18 +877,24 @@ def _llm_download_worker(name: str) -> None:
             if have:
                 headers["Range"] = f"bytes={have}-"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 resuming = have > 0 and getattr(resp, "status", 200) == 206
                 clen = int(resp.headers.get("Content-Length") or 0)
                 if have and not resuming:
                     have = 0  # server ignored Range: restart clean
                 total = expected or (clen + (have if resuming else 0))
                 with _LLM_DL_LOCK:
-                    _LLM_DL["total"] = total
+                    _LLM_DL.update({"total": total, "bytes": have})
                 done = have
                 mode = "ab" if have else "wb"
                 with open(tmp, mode) as fh:
                     while True:
+                        with _LLM_DL_LOCK:
+                            if _LLM_DL["pause"]:
+                                _LLM_DL.update(
+                                    {"state": "paused", "reason": "paused by user"}
+                                )
+                                return
                         chunk = resp.read(1024 * 256)
                         if not chunk:
                             break
@@ -810,16 +902,16 @@ def _llm_download_worker(name: str) -> None:
                         done += len(chunk)
                         with _LLM_DL_LOCK:
                             _LLM_DL["bytes"] = done
-                got = tmp.stat().st_size if tmp.is_file() else 0
-                if expected and got < expected * 0.99:
-                    raise OSError(
-                        f"connection ended early ({got} of {expected} bytes)"
-                    )
-                if not expected and total and got < total * 0.99:
-                    raise OSError(f"connection ended early ({got} of {total} bytes)")
+            got = tmp.stat().st_size if tmp.is_file() else 0
+            if expected and got < expected * 0.99:
+                raise OSError(
+                    f"connection ended early ({got} of {expected} bytes)"
+                )
+            if not expected and total and got < total * 0.99:
+                raise OSError(f"connection ended early ({got} of {total} bytes)")
             tmp.rename(dest)
             with _LLM_DL_LOCK:
-                _LLM_DL.update({"state": "ready", "reason": "installed"})
+                _LLM_DL.update({"state": "ready", "reason": "installed", "partial": 0})
             try:
                 from . import applog
 
@@ -827,18 +919,22 @@ def _llm_download_worker(name: str) -> None:
             except Exception:  # noqa: BLE001
                 pass
             return
-        except Exception as exc:  # noqa: BLE001 - retry, then fail soft
+        except Exception as exc:  # noqa: BLE001 - rotate mirror, then fail soft
             last_error = str(exc)[:200] or type(exc).__name__
-            if attempt < 5:
+            if attempt < attempts - 1:
                 time.sleep(1.5)
                 continue
         break
-    tmp.unlink(missing_ok=True)
+    # Keep every byte: the next start resumes from here instead of zero.
+    partial = tmp.stat().st_size if tmp.is_file() else 0
+    reason = last_error
+    if partial:
+        reason = f"{last_error} — progress saved ({partial // 1048576} MB), tap resume"
     with _LLM_DL_LOCK:
-        _LLM_DL.update({"state": "error", "reason": last_error})
+        _LLM_DL.update({"state": "error", "reason": reason, "partial": partial})
     try:
         from . import applog
 
-        applog.log("llm.model_failed", name=name, error=last_error)
+        applog.log("llm.model_failed", name=name, error=last_error, partial=partial)
     except Exception:  # noqa: BLE001
         pass
