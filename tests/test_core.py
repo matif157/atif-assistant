@@ -1286,6 +1286,127 @@ def test_phone_voice_engine() -> None:
           "Speaker engine could not start" in js)
 
 
+def test_offline_llm_errors() -> None:
+    """Phase C: a dying llama-server is explained, OOM is latched, and the
+    UI offers the model that fits instead of a silent "Server: stopped".
+    """
+    from atif_assistant import llm
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    src = Path(llm.__file__).read_text(encoding="utf-8")
+
+    print("\non-device LLM errors: OOM reason + latch + quick-model offer")
+
+    # Server half: death is explained once and reported with an oom flag.
+    check("death reason helper", "_llamacpp_death_reason" in src)
+    check("death recorded exactly once", "_record_llamacpp_death" in src)
+    check("status carries the oom flag",
+          '"oom": bool(_LLAMACPP.get("oom"))' in src)
+    check("oom latch holds the same model file",
+          '_LLAMACPP.get("death_model") == str(model)' in src)
+    check("chat surfaces the death reason",
+          '_LLAMACPP.get("error") or "llama-server did not start"' in src)
+    check("provider probe reports the death reason",
+          '"starting" if state == "starting" else state' in src)
+
+    class _Proc:
+        def __init__(self, rc: int) -> None:
+            self._rc = rc
+
+        def poll(self) -> int:
+            return self._rc
+
+    with tempfile.TemporaryDirectory() as td:
+        tdir = Path(td)
+        log = tdir / "llama-server.log"
+        orig_path = llm._llamacpp_log_path
+        orig_applog = None
+        orig_state = dict(llm._LLAMACPP)
+        orig_bin = llm.llamacpp_bin
+        orig_model = llm.llamacpp_model_file
+        try:
+            llm._llamacpp_log_path = lambda: log
+
+            log.write_text("main: loading model\nout of memory\n", encoding="utf-8")
+            reason, oom = llm._llamacpp_death_reason(_Proc(1))
+            check("log OOM line detected", oom is True and "memory" in reason)
+            log.write_text("ggml_backend_cpu: nothing wrong here\n", encoding="utf-8")
+            reason, oom = llm._llamacpp_death_reason(_Proc(1))
+            check("clean log is not called OOM", oom is False and "exited" in reason)
+            log.write_text("", encoding="utf-8")
+            _, oom = llm._llamacpp_death_reason(_Proc(-9))
+            check("signal 9 counts as memory pressure", oom is True)
+            reason, oom = llm._llamacpp_death_reason(_Proc(0))
+            check("bare exit still gets a reason", oom is False and "exited" in reason)
+
+            # Latch: the same model that died of OOM is never respawned.
+            fake_bin = tdir / "llama-server"
+            fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_bin.chmod(0o755)
+            fake_model = tdir / "qwen2.5-1.5b.gguf"
+            fake_model.write_text("x", encoding="utf-8")
+            llm.llamacpp_bin = lambda: fake_bin
+            llm.llamacpp_model_file = lambda: fake_model
+            llm._LLAMACPP.clear()
+            llm._LLAMACPP.update({
+                "proc": None,
+                "model_id": None,
+                "error": "ran out of memory loading the model",
+                "oom": True,
+                "death_model": str(fake_model),
+            })
+            check("oom model is latched, never respawned",
+                  llm.ensure_llamacpp_started() == "unavailable")
+            st = llm.llm_model_status()
+            check("latched reason reaches the UI",
+                  st.get("error") == "ran out of memory loading the model")
+            check("status reports the oom flag", st.get("oom") is True)
+
+            # A different model file lifts the latch - spawn is attempted
+            # again (sandboxed: no real log, no real app-log row).
+            fake_small = tdir / "qwen2.5-0.5b.gguf"
+            fake_small.write_text("x", encoding="utf-8")
+            llm.llamacpp_model_file = lambda: fake_small
+            import atif_assistant.applog as applog
+
+            orig_applog = applog.log
+            applog.log = lambda *a, **k: None
+            state = llm.ensure_llamacpp_started()
+            check("smaller model lifts the latch",
+                  state in ("starting", "running"))
+            proc = llm._LLAMACPP.get("proc")
+            if proc is not None:
+                try:
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            llm._llamacpp_log_path = orig_path
+            llm.llamacpp_bin = orig_bin
+            llm.llamacpp_model_file = orig_model
+            if orig_applog is not None:
+                import atif_assistant.applog as applog
+
+                applog.log = orig_applog
+            llm._LLAMACPP.clear()
+            llm._LLAMACPP.update(orig_state)
+
+    # UI half: the reason is shown and the fitting model is one tap away.
+    check("UI reads the error instead of a bland stopped",
+          's.error && s.server !== "running"' in js)
+    check("UI names the memory shortage", "Not enough memory to load" in js)
+    check("quick-model button label",
+          "DOWNLOAD SMALLER MODEL (~470 MB)" in js)
+    check("quick model is the 0.5B", 'llmBtnTarget = "qwen2.5-0.5b"' in js)
+    check("download button carries the chosen name",
+          "body: JSON.stringify(name ? { name } : {})" in js)
+    check("setup warns without the LLM engine",
+          "this build has no on-device LLM engine" in js)
+    check("setup models line keeps the speech-only note",
+          "no on-device llama-server in this build" in js)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4750,6 +4871,7 @@ def main() -> int:
     test_ui_error_visibility()
     test_call_error_channel()
     test_phone_voice_engine()
+    test_offline_llm_errors()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

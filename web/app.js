@@ -4259,6 +4259,9 @@ const llmProgressEl = document.getElementById("llm-progress");
 const llmSectionEl = document.getElementById("llm-section");
 let llmPollTimer = null;
 const llmMb = (b) => (b / 1048576).toFixed(0);
+// Which model the download button will start: "" = the default, or a quick
+// model after an out-of-memory death (the 1.5B never loads twice).
+let llmBtnTarget = "";
 
 function scheduleLlmPoll(ms) {
   clearTimeout(llmPollTimer);
@@ -4275,6 +4278,7 @@ async function refreshLlmStatus() {
     return;
   }
   const d = s.download || {};
+  llmBtnTarget = "";
   // The section only exists on builds that ship llama-server (Android).
   if (llmSectionEl) {
     llmSectionEl.hidden =
@@ -4319,6 +4323,22 @@ async function refreshLlmStatus() {
       dlLlmBtn.hidden = false;
       dlLlmBtn.textContent = "RETRY DOWNLOAD";
     }
+  } else if (s.error && s.server !== "running" && s.model && s.model.present) {
+    // The server died and knows why - report the reason, never a bland
+    // "Server: stopped". When the cause is memory, the honest fix is the
+    // model that fits: one tap starts the 0.5B download.
+    if (s.oom && s.binary) {
+      llmBtnTarget = "qwen2.5-0.5b";
+      llmStatusEl.textContent =
+        `Not enough memory to load ${s.model.file} on this phone. The smaller 0.5B model (~470 MB) runs where the 1.5B does not.`;
+      if (dlLlmBtn) {
+        dlLlmBtn.hidden = false;
+        dlLlmBtn.textContent = "DOWNLOAD SMALLER MODEL (~470 MB)";
+      }
+    } else {
+      llmStatusEl.textContent = s.error;
+      if (dlLlmBtn) dlLlmBtn.hidden = true;
+    }
   } else if (s.model && s.model.present) {
     llmStatusEl.textContent = `Model ready (${s.model.file}, ${llmMb(s.model.size)} MB). Server: ${s.server}.`;
     if (dlLlmBtn) dlLlmBtn.hidden = true;
@@ -4337,11 +4357,13 @@ async function refreshLlmStatus() {
 if (dlLlmBtn) {
   dlLlmBtn.addEventListener("click", async () => {
     dlLlmBtn.disabled = true;
+    const name = llmBtnTarget;
+    llmBtnTarget = "";
     try {
       await fetch("/api/llm/model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: "{}",
+        body: JSON.stringify(name ? { name } : {}),
       });
     } catch {
       /* status poll reports the failure */
@@ -4530,6 +4552,12 @@ async function refreshSetup() {
   const d = s.download || {};
   const hasLlm = Boolean(llm && llm.binary);
   const ldl = (llm && llm.download) || {};
+  // The endpoint answered but this build ships no llama-server: every
+  // models line carries the note so a speech-only download never reads
+  // as a finished install.
+  const noBinNote = llm && !llm.binary
+    ? " - speech only: no on-device llama-server in this build"
+    : "";
   const set = setupActiveSet();
   const speechReady = (s.models_present || []).includes(set.stt);
   const llmReady = !hasLlm || Boolean(llm.model && llm.model.present);
@@ -4566,22 +4594,22 @@ async function refreshSetup() {
   }
 
   if (phase === "downloading") {
-    setupState(setupModelsState, wantMb
+    setupState(setupModelsState, (wantMb
       ? `downloading ${gotMb}/${wantMb} MB${eta ? " · " + eta : ""}`
-      : "downloading...");
+      : "downloading...") + noBinNote);
   } else if (phase === "paused") {
-    setupState(setupModelsState, gotMb
+    setupState(setupModelsState, (gotMb
       ? `paused at ${gotMb} MB - resumes where it stopped`
-      : "paused - progress saved");
+      : "paused - progress saved") + noBinNote);
     if (setupDlBtn) setupDlBtn.textContent = `RESUME (${set.total_mib} MB)`;
   } else if (phase === "error") {
     const bad = parts.find((p) => p.state === "error") || {};
-    setupState(setupModelsState, "failed: " + (bad.reason || "network error"), "err");
+    setupState(setupModelsState, "failed: " + (bad.reason || "network error") + noBinNote, "err");
     if (setupDlBtn) setupDlBtn.textContent = `RETRY (${set.total_mib} MB)`;
   } else if (phase === "ready") {
-    setupState(setupModelsState, "ready", "ok");
+    setupState(setupModelsState, "ready" + noBinNote, "ok");
   } else {
-    setupState(setupModelsState, "not installed");
+    setupState(setupModelsState, "not installed" + noBinNote);
     if (setupDlBtn) setupDlBtn.textContent = `DOWNLOAD (${set.total_mib} MB)`;
   }
 
@@ -4637,6 +4665,12 @@ if (setupDlBtn) {
           body: JSON.stringify({ name: set.llm }),
         });
         if (!r2.ok) throw new Error("model download: HTTP " + r2.status);
+      } else {
+        // No llama-server in this build: say so out loud instead of
+        // quietly downloading the speech half and calling the set done.
+        setupState(setupModelsState,
+          "speech model only: this build has no on-device LLM engine (rebuild with ./build_native.sh)",
+          "err");
       }
     } catch (e) {
       setupState(setupModelsState,

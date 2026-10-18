@@ -173,11 +173,69 @@ def llamacpp_model_file() -> Path | None:
 
 
 _LLAMACPP_LOCK = threading.Lock()
-_LLAMACPP: dict[str, Any] = {"proc": None, "model_id": None, "error": None}
+_LLAMACPP: dict[str, Any] = {
+    "proc": None,
+    "model_id": None,
+    "error": None,
+    "oom": False,
+    "death_model": None,
+}
 
 
 def _llamacpp_log_path() -> Path:
     return DATA_DIR / "llama-server.log"
+
+
+_OOM_MARKERS = (
+    "out of memory",
+    "failed to allocate",
+    "cannot allocate",
+    "bad_alloc",
+    "mmap failed",
+    "insufficient memory",
+    "no memory",
+)
+
+
+def _llamacpp_death_reason(proc: Any) -> tuple[str, bool]:
+    """Why a llama-server process died: (human reason, out-of-memory?).
+
+    On an older phone the kernel OOM killer takes the process down without
+    any llama-server error line of its own, so a kill-shaped exit code counts
+    as memory pressure too. Otherwise the tail of the server log carries
+    llama.cpp's own allocation failure or crash line.
+    """
+    rc = proc.poll()
+    tail = ""
+    try:
+        with open(_llamacpp_log_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 8192))
+            tail = fh.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - a missing log is not a second failure
+        pass
+    if rc in (-9, 9, 137) or any(m in tail.lower() for m in _OOM_MARKERS):
+        return ("ran out of memory loading the model", True)
+    last = ""
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if line:
+            last = line
+            break
+    if last:
+        return (f"llama-server exited: {last[:180]}", False)
+    return (f"llama-server exited (code {rc})", False)
+
+
+def _record_llamacpp_death() -> None:
+    """Explain a dead server exactly once, so status and chat can show why."""
+    proc = _LLAMACPP.get("proc")
+    if proc is None or proc.poll() is None or _LLAMACPP.get("error"):
+        return
+    reason, oom = _llamacpp_death_reason(proc)
+    _LLAMACPP["error"] = reason
+    _LLAMACPP["oom"] = oom
+    _LLAMACPP["death_model"] = str(llamacpp_model_file() or "")
 
 
 def ensure_llamacpp_started() -> str:
@@ -186,12 +244,21 @@ def ensure_llamacpp_started() -> str:
         proc = _LLAMACPP.get("proc")
         if proc is not None and proc.poll() is None:
             return "running"
+        _record_llamacpp_death()
         binary = llamacpp_bin()
         model = llamacpp_model_file()
         if binary is None or model is None:
             _LLAMACPP["error"] = (
                 "llama-server binary missing" if binary is None else "model not downloaded"
             )
+            return "unavailable"
+        # Respawning an out-of-memory model just to watch it die again burns
+        # battery and RAM on the very phone that could not run it. Latch until
+        # a different model file (the smaller download) is in place.
+        if (
+            _LLAMACPP.get("oom")
+            and _LLAMACPP.get("death_model") == str(model)
+        ):
             return "unavailable"
         try:
             log = open(_llamacpp_log_path(), "ab", buffering=0)
@@ -214,6 +281,7 @@ def ensure_llamacpp_started() -> str:
             _LLAMACPP["proc"] = proc
             _LLAMACPP["model_id"] = None
             _LLAMACPP["error"] = None
+            _LLAMACPP["oom"] = False
             try:
                 from . import applog
 
@@ -253,6 +321,7 @@ async def _wait_llamacpp(timeout: float) -> bool:
     while asyncio.get_event_loop().time() < deadline:
         proc = _LLAMACPP.get("proc")
         if proc is None or proc.poll() is not None:
+            _record_llamacpp_death()
             return False
         if await llamacpp_is_up():
             return True
@@ -741,12 +810,17 @@ async def _probe_one(name: str) -> dict[str, Any]:
                 "configured": True,
                 "error": "model not downloaded",
             }
-        ensure_llamacpp_started()
+        state = ensure_llamacpp_started()
         ok = await llamacpp_is_up(timeout=2.0)
         return {
             "ready": ok,
             "configured": True,
-            "error": None if ok else "starting",
+            "error": None
+            if ok
+            else (
+                _LLAMACPP.get("error")
+                or ("starting" if state == "starting" else state)
+            ),
         }
     if name == "ollama":
         ok = await ollama_is_up()
@@ -963,6 +1037,7 @@ _LLM_DL: dict[str, Any] = {
 
 def llm_model_status() -> dict[str, Any]:
     """Binary, model file, server and download state for the UI."""
+    _record_llamacpp_death()
     with _LLM_DL_LOCK:
         download = dict(_LLM_DL)
         download.pop("pause", None)
@@ -987,6 +1062,7 @@ def llm_model_status() -> dict[str, Any]:
             else ("stopped" if proc is not None else "never")
         ),
         "error": _LLAMACPP.get("error"),
+        "oom": bool(_LLAMACPP.get("oom")),
         "download": download,
         "options": sorted(LLM_MODEL_URLS),
         "default": LLM_MODEL_DEFAULT,
