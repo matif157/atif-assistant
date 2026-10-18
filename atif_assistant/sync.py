@@ -229,12 +229,14 @@ def _cycle_once() -> dict[str, Any]:
     key = db.sync_secret()
     pushed = pulled = errors = 0
     last_error = None
+    more_left = False
     with httpx.Client(timeout=PEER_TIMEOUT) as client:
         for url in peers:
             state = db.sync_state_get(url)
             peer_id = state.get("peer_id")
             sent_upto = int(state.get("sent_upto") or 0)
             recv_upto = int(state.get("recv_upto") or 0)
+            peer_more = False
             try:
                 for _ in range(MAX_ROUNDS):
                     out = db.sync_outbox(peer_id, sent_upto, BATCH)
@@ -271,9 +273,10 @@ def _cycle_once() -> dict[str, Any]:
                     )
                     pushed += len(out["rows"])
                     pulled += len(theirs)
-                    more = bool(out.get("full")) or bool(data.get("more"))
-                    if not more:
+                    peer_more = bool(out.get("full")) or bool(data.get("more"))
+                    if not peer_more:
                         break
+                more_left = more_left or peer_more
             except Exception as exc:  # noqa: BLE001 - one peer never blocks the rest
                 errors += 1
                 last_error = f"{url}: {type(exc).__name__}: {exc}"[:220]
@@ -286,6 +289,7 @@ def _cycle_once() -> dict[str, Any]:
         pulled=pulled,
         errors=errors,
         error=last_error,
+        more=more_left,
     )
     try:
         from . import applog
@@ -299,7 +303,7 @@ def _cycle_once() -> dict[str, Any]:
         )
     except Exception:  # noqa: BLE001 - logging must never break a cycle
         pass
-    return {"pushed": pushed, "pulled": pulled, "errors": errors}
+    return {"pushed": pushed, "pulled": pulled, "errors": errors, "more": more_left}
 
 
 def _worker() -> None:
@@ -308,7 +312,12 @@ def _worker() -> None:
         _wake.wait(timeout=interval())
         _wake.clear()
         try:
-            _cycle_once()
+            res = _cycle_once()
+            if isinstance(res, dict) and res.get("more"):
+                # Drain a backlog (the first pairing's history) instead of
+                # waiting a full interval between 400-row chunks.
+                time.sleep(1.0)
+                _wake.set()
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             _last_cycle["error"] = f"{type(exc).__name__}: {exc}"[:220]
             time.sleep(interval())

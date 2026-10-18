@@ -3439,7 +3439,47 @@ def test_sync() -> None:
                 ),
             )
 
+            # ---- one-time backfill: history that predates sync ships too
+            db.use_test_db(Path(tmp) / "c.db")
+            db.init_db()
+            db.save_message("sessSYNCC0001", "user", "old history line")
+            cid = db.sync_device_id()
+            conn = db.connect()
+            conn.execute("DELETE FROM sync_log")
+            conn.execute("DELETE FROM settings WHERE key='sync.backfilled'")
+            conn.commit()
+            db.init_db()
+            crows = db.sync_outbox(None, 0)["rows"]
+            check("backfill restores pre-existing rows", len(crows) == 1)
+            check(
+                "backfill logs the old message",
+                any(
+                    r["tbl"] == "messages" and "old history line" in str(r["payload"])
+                    for r in crows
+                ),
+            )
+            check(
+                "backfill never logs sync identity",
+                not any(r["row_key"].startswith("settings:sync.") for r in crows),
+            )
+            n = db.sync_log_len()
+            db.init_db()
+            check("backfill runs only once", db.sync_log_len() == n)
+            db.use_test_db(Path(tmp) / "d.db")
+            db.init_db()
+            db.sync_apply_rows(cid, crows)
+            check(
+                "a fresh instance receives the backfilled history",
+                [m["content"] for m in db.history("sessSYNCC0001", limit=5)]
+                == ["old history line"],
+            )
+            check(
+                "fresh instance marks its backfill done",
+                db.get_setting("sync.backfilled") == "1",
+            )
+
             # ---- configuration endpoints
+            db.use_test_db(Path(tmp) / "b.db")
             c.post("/api/sync/config", json={"enabled": True, "add_peer": "http://127.0.0.1:9/"})
             s2 = c.get("/api/sync").json()
             check(

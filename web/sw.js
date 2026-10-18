@@ -1,4 +1,4 @@
-const CACHE = "atif-assistant-v32";
+const CACHE = "atif-assistant-v33";
 // Shell only. App JS/CSS must never be served stale, or fixes appear not to
 // work. The index is network-first so updates land immediately.
 const SHELL = ["/", "/static/style.css", "/static/app.js", "/static/icon.svg"];

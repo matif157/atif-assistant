@@ -656,6 +656,71 @@ def _ensure_sync_identity(conn: sqlite3.Connection) -> None:
         (_secrets.token_hex(16), now()),
     )
     conn.commit()
+    if (
+        conn.execute(
+            "SELECT value FROM settings WHERE key='sync.backfilled'"
+        ).fetchone()
+        is None
+    ):
+        _sync_backfill(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('sync.backfilled', '1', ?)",
+            (now(),),
+        )
+        conn.commit()
+
+
+def _sync_backfill(conn: sqlite3.Connection) -> None:
+    """Log rows that existed before sync triggers (one-time, ``sync.backfilled``).
+
+    Pairing an already-used instance must bring its whole history, not just
+    changes made after the upgrade. Each row keeps its own mtime as the sync
+    timestamp so last-write-wins stays honest, and ``sync.*`` settings are
+    never part of it - they are this instance's identity.
+    """
+    me_row = conn.execute(
+        "SELECT value FROM settings WHERE key='sync.device_id'"
+    ).fetchone()
+    me = str(me_row[0]) if me_row else "self"
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for tbl, cols in SYNCED_TABLES.items():
+        if tbl == "settings":
+            for r in conn.execute("SELECT * FROM settings").fetchall():
+                if str(r["key"]).startswith("sync."):
+                    continue
+                payload = {c: r[c] for c in cols if c in r.keys()}
+                rows.append(
+                    (
+                        me,
+                        tbl,
+                        "upsert",
+                        f"settings:{r['key']}",
+                        str(payload.get("updated_at") or now()),
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                    )
+                )
+            continue
+        for r in conn.execute(f"SELECT * FROM {tbl}").fetchall():
+            payload = {c: r[c] for c in cols if c in r.keys()}
+            if "id" in r.keys():
+                payload["id"] = r["id"]
+            ts = str(payload.get("updated_at") or payload.get("created_at") or now())
+            rows.append(
+                (
+                    me,
+                    tbl,
+                    "upsert",
+                    f"{me}:{tbl}:{r['id']}",
+                    ts,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                )
+            )
+    if rows:
+        conn.executemany(
+            "INSERT INTO sync_log(origin, tbl, op, row_key, ts, payload) VALUES (?,?,?,?,?,?)",
+            rows,
+        )
+        conn.commit()
 
 
 def _fts_index(kind: str, ref_id: int, title: str, body: str) -> None:
