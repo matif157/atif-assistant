@@ -3155,6 +3155,34 @@ def _sync_resolve_message_id(
     return None
 
 
+def _sync_row_matches(
+    conn: sqlite3.Connection,
+    tbl: str,
+    local_id: int | str,
+    cols: list[str],
+    payload: dict[str, Any],
+) -> bool:
+    """True when the local row already equals the incoming payload.
+
+    A resend after a lost cursor (phone killed mid-cycle) is normal, and
+    last-write-wins ties on equal timestamps: re-applying a row word-for-word
+    would rewrite nothing but relog the row, doubling sync traffic forever
+    with every interruption.
+    """
+    where = "key" if tbl == "settings" else "id"
+    hit = conn.execute(
+        f"SELECT {','.join(cols)} FROM {tbl} WHERE {where}=?", (local_id,)
+    ).fetchone()
+    if hit is None:
+        return False
+    for c in cols:
+        got = hit[c]
+        want = payload.get(c)
+        if got != want and str(got) != str(want):
+            return False
+    return True
+
+
 def sync_apply_rows(peer_id: str, rows: list[dict[str, Any]]) -> dict[str, int]:
     """Merge a peer's changes. Last-write-wins, tombstones beat stale rows,
     equivalent rows bind instead of duplicating. Never raises per row; the
@@ -3277,9 +3305,15 @@ def sync_apply_rows(peer_id: str, rows: list[dict[str, Any]]) -> dict[str, int]:
                     if local_ts > ts:
                         counts["skipped"] += 1
                         continue
-                    if local_ts == ts and not (peer_id > my_id):
-                        counts["skipped"] += 1
-                        continue
+                    if local_ts == ts:
+                        # Equal ts: the tie-break only decides between
+                        # *different* writes; a byte-identical resend is a
+                        # no-op and must not relog (cursor-loss retries).
+                        if _sync_row_matches(conn, tbl, local, cols, payload) or not (
+                            peer_id > my_id
+                        ):
+                            counts["skipped"] += 1
+                            continue
                 if tbl == "settings":
                     sets = [c for c in cols if c != "key"]
                     if sets:

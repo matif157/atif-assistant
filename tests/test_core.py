@@ -3317,6 +3317,15 @@ def test_sync() -> None:
                     for f in db.list_feedback()
                 ),
             )
+            # A lost cursor would resend rows B already has: the tie-break
+            # must recognise a byte-identical no-op and leave the log alone.
+            base = next(r for r in a_out["rows"] if r["tbl"] == "messages")
+            before = db.sync_log_len()
+            again = db.sync_apply_rows("zzzz-peer", [base])
+            check(
+                "an identical resend neither applies nor relogs",
+                again["skipped"] == 1 and db.sync_log_len() == before,
+            )
 
             # ---- B writes; A receives through the live endpoint
             db.save_message("sessSYNCBBB02", "user", "hello from B")
