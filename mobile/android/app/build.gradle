@@ -102,6 +102,13 @@ chaquopy {
             install "uvicorn==0.54.0"
             install "httpx==0.28.1"
             install "pypdf==6.20.1"
+            // VOICE PROFILES numeric layer: numpy resolves from Chaquopy's
+            // Android wheel index. The sherpa-onnx ENGINE itself is NOT
+            // pip-installable here (its Android wheels only target Python
+            // 3.14; native source builds are blocked by design), so the
+            // phone binds the official prebuilt C library from jniLibs with
+            // ctypes instead - see build_native.sh and voice_id.py.
+            install "numpy==1.26.2"
         }
     }
 }

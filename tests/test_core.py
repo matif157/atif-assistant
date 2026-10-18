@@ -1179,6 +1179,113 @@ def test_call_error_channel() -> None:
           is not None)
 
 
+def test_phone_voice_engine() -> None:
+    """VOICE PROFILES ships on the phone via the prebuilt C API, not pip.
+
+    sherpa-onnx has no Android wheel for the app's Python (3.12) and Chaquopy
+    blocks native source builds, so the APK stages the official prebuilt
+    libs (build_native.sh, jniLibs) and voice_id binds them with ctypes.
+    Guards both halves of that contract - staging and binding - plus the
+    numpy pip line the bindings depend on and the UI's split messages
+    (model missing vs engine missing vs engine broken).
+    """
+    import os as _os
+    import re
+
+    from atif_assistant import voice_id
+
+    root = Path(__file__).resolve().parent.parent
+    gradle = (root / "mobile" / "android" / "app" / "build.gradle").read_text(
+        encoding="utf-8"
+    )
+    native_sh = (root / "mobile" / "android" / "build_native.sh").read_text(
+        encoding="utf-8"
+    )
+    apk_sh = (root / "mobile" / "android" / "build_apk.sh").read_text(encoding="utf-8")
+    run_server = (
+        root / "mobile" / "android" / "app" / "src" / "main" / "python"
+        / "run_server.py"
+    ).read_text(encoding="utf-8")
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    print("\nphone voice engine: prebuilt C API + ctypes binding")
+
+    # The pip half: numpy yes (Chaquopy index has the Android wheel), the
+    # sherpa-onnx package no (it cannot install on our Python for Android).
+    check("numpy installed on the phone", 'install "numpy==1.26.2"' in gradle)
+    check("sherpa-onnx pip line stays out", "sherpa-onnx==" not in gradle)
+    check("gradle comment names the ctypes path", "ctypes" in gradle)
+
+    # The staging half: wheel pinned by url + sha, libs into jniLibs.
+    check("native script fetches the android wheel",
+          "sherpa_onnx_core-1.13.8-py3-none-android_24_arm64_v8a.whl" in native_sh)
+    check("wheel pinned by sha256", "6bbde45a9f2efcc8647429cbb8e06718bfd4c2a55f831eb5482ffb5ab227af07" in native_sh)
+    check("stages the C API lib", "libsherpa-onnx-c-api.so" in native_sh)
+    check("stages its onnxruntime dependency", "libonnxruntime.so" in native_sh)
+    check("stages the shared C++ runtime", "libc++_shared.so" in native_sh)
+    check("arm64-only guard", '[ "$ABI" = "arm64-v8a" ]' in native_sh)
+    check("apk build warns when the engine is missing",
+          "no sherpa-onnx speaker engine staged" in apk_sh)
+
+    # The env contract: run_server points voice_id at the JNI directory.
+    check("run_server exports the lib directory",
+          'os.environ["ATIF_ASSISTANT_SHERPA_LIBS"] = sherpa_dir' in run_server)
+    check("run_server checks the C API lib", "libsherpa-onnx-c-api.so" in run_server)
+
+    # The binding half: ctypes symbols must match c-api.h exactly.
+    src = Path(voice_id.__file__).read_text(encoding="utf-8")
+    check("ctypes extractor class", "class _NativeExtractor" in src)
+    check("ctypes stream class", "class _NativeStream" in src)
+    for symbol in (
+        "SherpaOnnxCreateSpeakerEmbeddingExtractor",
+        "SherpaOnnxDestroySpeakerEmbeddingExtractor",
+        "SherpaOnnxSpeakerEmbeddingExtractorDim",
+        "SherpaOnnxSpeakerEmbeddingExtractorCreateStream",
+        "SherpaOnnxSpeakerEmbeddingExtractorIsReady",
+        "SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding",
+        "SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding",
+        "SherpaOnnxOnlineStreamAcceptWaveform",
+        "SherpaOnnxOnlineStreamInputFinished",
+        "SherpaOnnxDestroyOnlineStream",
+    ):
+        check(f"C API symbol {symbol}", symbol in src)
+    check("config struct order matches c-api.h",
+          re.search(
+              r"_fields_ = \[\s*\n\s*\(\"model\", ctypes\.c_char_p\),[\s\S]{0,120}?"
+              r"\(\"provider\", ctypes\.c_char_p\),",
+              src,
+        )
+        is not None)
+    check("python package still wins when importable",
+          "import sherpa_onnx as _sherpa_onnx" in src)
+
+    # status() must name which half is missing (the UI splits on these).
+    st = voice_id.status()
+    check("status reports package presence", isinstance(st.get("package"), bool))
+    check("status reports native presence", isinstance(st.get("native"), bool))
+    check("host without env has no native engine", st.get("native") is False)
+    # Pointing the env at the Android libs must fail GENTLY off-device
+    # (wrong architecture / not an ELF the host can load).
+    jni = root / "mobile" / "android" / "app" / "src" / "main" / "jniLibs" / "arm64-v8a"
+    if (jni / "libsherpa-onnx-c-api.so").is_file():
+        _os.environ["ATIF_ASSISTANT_SHERPA_LIBS"] = str(jni)
+        try:
+            check("android libs never crash the host", voice_id._native_lib() is None)
+        finally:
+            _os.environ.pop("ATIF_ASSISTANT_SHERPA_LIBS", None)
+    check("native lib loader is cached per directory", "_native_cache" in src)
+
+    # The UI half: three honest messages, the old catch-all gone.
+    check("old catch-all message removed",
+          "Speaker engine not ready (needs the sherpa-onnx package)." not in js)
+    check("model-missing message kept",
+          "Voice identification needs a model." in js)
+    check("engine-missing message split",
+          "Speaker engine is missing on this build" in js)
+    check("engine-broken message split",
+          "Speaker engine could not start" in js)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4642,6 +4749,7 @@ def main() -> int:
     test_layout_navigation()
     test_ui_error_visibility()
     test_call_error_channel()
+    test_phone_voice_engine()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

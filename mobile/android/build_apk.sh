@@ -82,6 +82,10 @@ if [ ! -f app/src/main/jniLibs/arm64-v8a/libllama-server.so ]; then
   echo "NOTE: no llama-server staged (on-device model will be unavailable)." >&2
   echo "      Build it with:  ./build_native.sh" >&2
 fi
+if [ ! -f app/src/main/jniLibs/arm64-v8a/libsherpa-onnx-c-api.so ]; then
+  echo "NOTE: no sherpa-onnx speaker engine staged (voice identification off)." >&2
+  echo "      Stage it with:  ./build_native.sh" >&2
+fi
 
 # ------------------------------------------------------------- 5. Build
 if [ "$RELEASE" = "1" ]; then

@@ -55,6 +55,11 @@ def _boot(files_dir, llama_bin, whisper_bin, host, port) -> None:
         os.environ["ATIF_ASSISTANT_LLAMACPP_BIN"] = llama_bin
     if whisper_bin:
         os.environ["ATIF_ASSISTANT_WHISPER_BIN"] = whisper_bin
+    # The sherpa-onnx speaker engine (voice_id's ctypes path) rides in the
+    # same nativeLibraryDir as the JNI binaries; absent on desktop.
+    sherpa_dir = os.path.dirname(whisper_bin or llama_bin or "")
+    if sherpa_dir and os.path.isfile(os.path.join(sherpa_dir, "libsherpa-onnx-c-api.so")):
+        os.environ["ATIF_ASSISTANT_SHERPA_LIBS"] = sherpa_dir
 
     # Warm the on-device llama-server (binary + model present) so the first
     # question does not pay the model-load cost. Purely best effort: no

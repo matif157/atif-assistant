@@ -4753,8 +4753,13 @@ function renderVoiceprints(data) {
   }
   if (voiceModelBtn) voiceModelBtn.hidden = Boolean(engine.available);
   if (voiceStatus && !engine.available) {
+    // Three honest states, never one catch-all: model not downloaded yet,
+    // engine libraries not shipped on this build, or engine shipped but the
+    // model would not load.
     voiceStatus.textContent = engine.model_present
-      ? "Speaker engine not ready (needs the sherpa-onnx package)."
+      ? engine.package || engine.native
+        ? "Speaker engine could not start - reopen the app, or re-download the model."
+        : "Speaker engine is missing on this build (sherpa-onnx not installed)."
       : "Voice identification needs a model. Download it below.";
   }
 }

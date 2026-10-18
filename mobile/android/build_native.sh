@@ -106,3 +106,38 @@ if [ -f "$STRIP" ]; then
 fi
 ls -lh "$OUT"
 log "Done: whisper-cli staged for $ABI"
+
+# ------------------------------------------------- speaker embedding engine
+# sherpa-onnx cannot be pip-installed for Chaquopy's Python (its Android
+# wheels exist only for cp314; Chaquopy blocks native source builds by
+# design), so the official prebuilt C API libs are staged here instead and
+# voice_id.py binds them with ctypes when the Python package is absent
+# (ATIF_ASSISTANT_SHERPA_LIBS, exported by run_server from this directory).
+# The wheel is arm64-only, so this section runs for arm64-v8a only.
+if [ "$ABI" = "arm64-v8a" ]; then
+  log "Staging sherpa-onnx speaker engine into $OUT"
+  WHL_NAME="sherpa_onnx_core-1.13.8-py3-none-android_24_arm64_v8a.whl"
+  WHL_URL="https://files.pythonhosted.org/packages/81/bd/20952589f89451094a48935a8098dbf36eb252335f7023662c9bd2123c1c/$WHL_NAME"
+  WHL_SHA="6bbde45a9f2efcc8647429cbb8e06718bfd4c2a55f831eb5482ffb5ab227af07"
+  mkdir -p .native
+  if [ ! -f ".native/$WHL_NAME" ] ||
+     [ "$(shasum -a 256 ".native/$WHL_NAME" | cut -d" " -f1)" != "$WHL_SHA" ]; then
+    log "Fetching $WHL_NAME"
+    curl -fsSL --retry 3 -o ".native/$WHL_NAME.part" "$WHL_URL"
+    mv ".native/$WHL_NAME.part" ".native/$WHL_NAME"
+  fi
+  WHL_TMP="$(mktemp -d)"
+  unzip -o -q ".native/$WHL_NAME" \
+    "sherpa_onnx/lib/libsherpa-onnx-c-api.so" \
+    "sherpa_onnx/lib/libonnxruntime.so" -d "$WHL_TMP"
+  cp "$WHL_TMP"/sherpa_onnx/lib/*.so "$OUT/"
+  # The prebuilt lib links the shared C++ runtime; llama/whisper use the
+  # static runtime, so this file exists only for the speaker engine.
+  cp "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+    "$OUT/"
+  rm -rf "$WHL_TMP"
+  ls -lh "$OUT"
+  log "Done: sherpa-onnx speaker engine staged for $ABI"
+else
+  log "Skipping sherpa-onnx speaker engine (prebuilt is arm64-only) for $ABI"
+fi
