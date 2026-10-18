@@ -437,9 +437,12 @@ def sync_status() -> dict:
 
 
 @app.post("/api/sync/config")
-def sync_config(payload: dict | None = None) -> dict:
-    """Enable auto-sync, add/remove a peer URL, or rotate the shared key."""
-    return sync.configure(payload or {})
+def sync_config(payload: dict | None = None) -> JSONResponse:
+    """Enable auto-sync, add/remove a peer URL, or set the shared key."""
+    try:
+        return JSONResponse(sync.configure(payload or {}))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.post("/api/sync/now")

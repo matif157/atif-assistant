@@ -3470,12 +3470,31 @@ def test_sync() -> None:
                 c.post("/api/sync/swap", json=empty, headers={"X-Sync-Key": bkey}).status_code == 403,
             )
 
+            # ---- pairing: both sides end up with ONE shared key
+            shared = "shared-key-0123456789abcdef"
+            r = c.post("/api/sync/config", json={"key": shared})
+            check(
+                "a pasted key is accepted",
+                r.status_code == 200 and c.get("/api/sync").json()["secret"] == shared,
+            )
+            check(
+                "the shared key opens the swap",
+                c.post("/api/sync/swap", json=empty, headers={"X-Sync-Key": shared}).status_code == 200,
+            )
+            r = c.post("/api/sync/config", json={"key": "short"})
+            check(
+                "a too-short key is rejected and the old one kept",
+                r.status_code == 400
+                and c.get("/api/sync").json()["secret"] == shared,
+            )
+
             # ---- UI + server wiring
             html = (Path("web") / "index.html").read_text(encoding="utf-8")
             js = (Path("web") / "app.js").read_text(encoding="utf-8")
             runsh = Path("run.sh").read_text(encoding="utf-8")
             for eid in (
                 "sync-enable", "sync-now", "sync-copy-key", "sync-new-key",
+                "sync-key-input", "sync-key-set",
                 "sync-peer-input", "sync-peer-add", "sync-peer-list",
                 "sync-key-line", "sync-urls", "sync-status",
             ):

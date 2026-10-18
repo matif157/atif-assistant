@@ -4655,6 +4655,8 @@ const syncStatusLine = document.getElementById("sync-status");
 const syncNowBtn = document.getElementById("sync-now");
 const syncCopyKeyBtn = document.getElementById("sync-copy-key");
 const syncNewKeyBtn = document.getElementById("sync-new-key");
+const syncKeyInput = document.getElementById("sync-key-input");
+const syncKeySetBtn = document.getElementById("sync-key-set");
 const syncPeerAddBtn = document.getElementById("sync-peer-add");
 let syncPollTimer = 0;
 
@@ -4780,6 +4782,19 @@ if (syncNewKeyBtn) {
     if (window.confirm("Create a new sync key? Paired devices stop syncing until they copy this one.")) {
       postSyncConfig({ rotate: true });
     }
+  });
+}
+if (syncKeySetBtn) {
+  syncKeySetBtn.addEventListener("click", () => {
+    const key = ((syncKeyInput && syncKeyInput.value) || "").trim();
+    if (key.length < 16) {
+      if (syncStatusLine) {
+        syncStatusLine.textContent = "A shared key is at least 16 characters - copy it from the other device.";
+      }
+      return;
+    }
+    if (syncKeyInput) syncKeyInput.value = "";
+    postSyncConfig({ key });
   });
 }
 if (syncPeerAddBtn) {

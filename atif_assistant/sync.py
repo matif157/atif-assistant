@@ -173,6 +173,13 @@ def configure(body: dict[str, Any]) -> dict[str, Any]:
         url = body["remove_peer"].strip().rstrip("/")
         peers = [p for p in _peers() if p != url]
         db.set_setting("sync.peers", json.dumps(peers))
+    if body.get("key") is not None:
+        # Pasted from the other device: both instances authenticate with the
+        # SAME key (each cycle signs X-Sync-Key with its own sync.secret).
+        key = str(body.get("key")).strip()
+        if not 16 <= len(key) <= 128 or not key.isprintable():
+            raise ValueError("sync key must be 16-128 printable characters")
+        db.set_setting("sync.secret", key)
     if body.get("rotate"):
         db.set_setting("sync.secret", secrets.token_hex(16))
     return status()
