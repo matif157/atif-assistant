@@ -1407,6 +1407,56 @@ def test_offline_llm_errors() -> None:
           "no on-device llama-server in this build" in js)
 
 
+def test_why_panel_rows() -> None:
+    """Phase D: the WHY panel answers engine, speech, and style - including
+    why the reply came out emotional (the mood's own cues).
+    """
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    rb = js.split("function renderBasis(", 1)[-1].split("\nfunction ", 1)[0]
+
+    print("\nWHY panel: ENGINE / SPEECH / WHY THIS STYLE rows")
+
+    # ENGINE: which engine produced the words, in user terms.
+    check("engine row exists", 'addRow("ENGINE"' in rb)
+    check("engine names the on-device model file",
+          "llmLastStatus.model" in rb and "on-device llama.cpp - " in rb)
+    check("engine explains the offline fallback",
+          "built-in offline reply (no model call)" in rb)
+
+    # SPEECH: how the turn was heard and how the reply was spoken.
+    check("speech row exists", 'addRow("SPEECH"' in rb)
+    check("speech row reads turn snapshots",
+          "data.speech_via" in rb and "data.spoken_via" in rb)
+    for via in (
+        "Whisper (offline)",
+        "Android speech",
+        "Browser speech",
+        "device voice",
+        "server voice",
+        "browser voice",
+    ):
+        check(f"speech channel named: {via}", via in js)
+    check("finalize snapshots the speech engines",
+          "data.speech_via = lastSpeechVia" in js)
+    check("next turn defaults back to typed",
+          js.count('lastSpeechVia = "typed"') >= 2)
+
+    # WHY THIS STYLE: route reason + social turn + the mood with its cues -
+    # the "why was it emotional" answer, spelled out.
+    check("style row exists", 'addRow("WHY THIS STYLE"' in rb)
+    check("style row leads with the route reason",
+          "if (data.route.reason) styleBits.push(data.route.reason)" in rb)
+    check("style row flags the social turn",
+          "social turn - Urdu-first, light reply" in rb)
+    check("style row shows the mood and trajectory",
+          "data.mood_trajectory" in rb and "mood ${mood.mood}" in rb)
+    check("style row lists the emotional cues",
+          " from: ${cues}" in rb)
+    check("plain WHY row still carries route reason",
+          'addRow("WHY", data.route.reason || "")' in rb)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4872,6 +4922,7 @@ def main() -> int:
     test_call_error_channel()
     test_phone_voice_engine()
     test_offline_llm_errors()
+    test_why_panel_rows()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

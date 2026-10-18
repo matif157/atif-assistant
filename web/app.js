@@ -12,6 +12,11 @@ const dot = document.getElementById("dot");
 // the basis-sidebar commit) which broke chat, the call and hands-free at once.
 let session = localStorage.getItem("atif-assistant.session") || null;
 let lastBasis = null;
+// WHY panel: how the turn was heard, how the reply was spoken, and the last
+// /api/llm snapshot (which model file answered - the ENGINE row).
+let lastSpeechVia = "typed";
+let lastSpeakVia = "";
+let llmLastStatus = null;
 
 /* Exactly one answer may be in flight. `streamCtl` is also the STOP handle:
    while it is set, the send button aborts the stream instead of sending. */
@@ -136,12 +141,52 @@ function renderBasis(data, force) {
     if (data.route.escalations?.length) {
       addRow("ESCALATIONS", data.route.escalations.join("\n"));
     }
+    // The one line the user asked for: why this shape of reply - the route's
+    // reason, the social/pleasantry handling, and why the mood came out
+    // emotional (with the cues that proved it).
+    const styleBits = [];
+    if (data.route.reason) styleBits.push(data.route.reason);
+    if (data.route.social) {
+      styleBits.push("social turn - Urdu-first, light reply");
+    }
+    const mood = data.mood;
+    if (mood && mood.mood && mood.mood !== "neutral") {
+      const cues = (mood.cues || []).filter(Boolean).join(", ");
+      let moodBit = `mood ${mood.mood}`;
+      if (data.mood_trajectory) moodBit += ` (${data.mood_trajectory})`;
+      if (cues) moodBit += ` from: ${cues}`;
+      styleBits.push(moodBit);
+    }
+    addRow("WHY THIS STYLE", styleBits.join(" · "));
   }
   addRow("PROVIDER", (data.provider||"").toUpperCase());
+  // ENGINE says where the words were computed, in the user's terms: the
+  // on-device model file, the local server, or the built-in fallback.
+  {
+    const p = (data.provider || "").toLowerCase();
+    const file =
+      (llmLastStatus && llmLastStatus.model && llmLastStatus.model.file) || "";
+    const engine =
+      p === "llamacpp"
+        ? (file ? `on-device llama.cpp - ${file}` : "on-device llama.cpp")
+        : p === "ollama"
+          ? "Ollama - local server"
+          : p === "offline"
+            ? "built-in offline reply (no model call)"
+            : data.provider || "";
+    addRow("ENGINE", engine);
+  }
   if (data.memories_used) addRow("MEMORIES USED", String(data.memories_used));
   if (data.asked_count > 1) addRow("ASKED COUNT", String(data.asked_count));
   if (data.speaker?.name) {
     addRow("SPEAKER (advisory)", `${data.speaker.name}${data.speaker.score!=null ? " · "+Math.round(data.speaker.score*100)+"%" : ""}`);
+  }
+  // SPEECH: how this turn was heard and how the reply went out - the two
+  // engines the user actually touches, named honestly.
+  {
+    const heard = data.speech_via || lastSpeechVia || "typed";
+    const spoken = data.spoken_via || lastSpeakVia || "";
+    addRow("SPEECH", `heard: ${heard} · spoken: ${spoken || "not spoken"}`);
   }
 
   if (data.labels?.length) {
@@ -498,6 +543,14 @@ async function ask(question, opts = {}) {
     chat.scrollTop = chat.scrollHeight;
     botEl = null;
     lastBasis = data;
+    // Snapshot this turn's speech engines into the basis so re-opening the
+    // panel tells the same story, then default the next turn to typed.
+    if (data) {
+      data.speech_via = lastSpeechVia;
+      data.spoken_via = lastSpeakVia;
+      lastSpeechVia = "typed";
+      lastSpeakVia = "";
+    }
     renderBasis(data);
     renderReplyOptions(data);
     if (!opts.suppressSpeak && data.text && (settings.speak === "on" || spokeQuestion)) {
@@ -546,6 +599,8 @@ async function ask(question, opts = {}) {
     lastBasis = null;
     renderBasis(null);
     renderReplyOptions(null);
+    lastSpeechVia = "typed";
+    lastSpeakVia = "";
     // Callers (the voice call and hands-free loop) need the reason, not just
     // a null, so the failure can be shown instead of looping silently.
     return { text: null, error: detail };
@@ -2393,7 +2448,10 @@ async function speak(text, opts = {}) {
     } catch {
       nativeOk = false;
     }
-    if (nativeOk) return;
+    if (nativeOk) {
+      lastSpeakVia = "device voice";
+      return;
+    }
     // No voice for this language (Urdu on most devices) or engine not ready:
     // fall through to the server clip / web engine chain below.
     speechEndResolve = null;
@@ -2408,7 +2466,10 @@ async function speak(text, opts = {}) {
     opts.server === true || !hasWeb || urdu || (voices.length > 0 && !hasVoiceFor(lang));
   if (needServer) {
     const played = await playServerClip(clean, done, lang);
-    if (played) return;
+    if (played) {
+      lastSpeakVia = "server voice";
+      return;
+    }
     // Cancelled (barge-in) or already released - do not start another engine.
     if (myToken !== speechToken || ended) return;
   }
@@ -2426,6 +2487,7 @@ async function speak(text, opts = {}) {
     u.onend = done;
     u.onerror = done;
     window.speechSynthesis.speak(u);
+    lastSpeakVia = "browser voice";
   } catch {
     done();
   }
@@ -2477,6 +2539,7 @@ function setupRecognizer() {
     const text = e.results[0][0].transcript;
     input.value = text;
     input.focus();
+    lastSpeechVia = "Browser speech";
     // A spoken question should be answered out loud, even if SPEAK REPLIES is
     // off, so the voice assistant actually talks back.
     voiceInputPending = true;
@@ -2516,6 +2579,7 @@ function toggleMic() {
       if (text) {
         input.value = text;
         input.focus();
+        lastSpeechVia = "Android speech";
       }
     };
     try {
@@ -2632,6 +2696,7 @@ async function transcribeLocal(blob) {
     throw new Error(err.error || `HTTP ${res.status}`);
   }
   const data = await res.json();
+  lastSpeechVia = "Whisper (offline)";
   return { text: (data.text || "").trim(), speaker: data.speaker || null };
 }
 
@@ -3063,8 +3128,10 @@ function callListen() {
       if (!callActive || callEnding) return;
       clearTimeout(callListenTimer);
       const said = (text || "").trim();
-      if (said) callSubmit(said);
-      else callStrike("I didn't catch that - try again.", false);
+      if (said) {
+        lastSpeechVia = "Android speech";
+        callSubmit(said);
+      } else callStrike("I didn't catch that - try again.", false);
     };
     // Every native failure (mic, model, recogniser) arrives here with a
     // reason - never again as a silent empty result that loops forever.
@@ -3122,6 +3189,7 @@ function callListen() {
     if (finalText.trim()) {
       callGotResult = true;
       callErrorStreak = 0;
+      lastSpeechVia = "Browser speech";
       stopCallRecognition();
       callSubmit(finalText.trim());
     }
@@ -3367,8 +3435,10 @@ function handsFreeListen() {
     window.onAndroidSpeechResult = (text) => {
       if (!handsFreeActive) return;
       const said = (text || "").trim();
-      if (said) handsFreeSubmit(said);
-      else handsFreeResume();
+      if (said) {
+        lastSpeechVia = "Android speech";
+        handsFreeSubmit(said);
+      } else handsFreeResume();
     };
     // Same contract as the call: native failures carry a reason; show it in
     // the hint line and keep the loop alive instead of retrying blind.
@@ -3408,6 +3478,7 @@ function handsFreeListen() {
     const said = (e.results[0][0].transcript || "").trim();
     if (said) {
       handsFreeGotResult = true;
+      lastSpeechVia = "Browser speech";
       handsFreeSubmit(said);
     } else {
       handsFreeResume();
@@ -4273,6 +4344,7 @@ async function refreshLlmStatus() {
   let s;
   try {
     s = await (await fetch("/api/llm")).json();
+    llmLastStatus = s;
   } catch {
     scheduleLlmPoll(3000);
     return;
