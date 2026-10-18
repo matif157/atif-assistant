@@ -1457,6 +1457,175 @@ def test_why_panel_rows() -> None:
           'addRow("WHY", data.route.reason || "")' in rb)
 
 
+def test_offline_voice_pack() -> None:
+    """Phase E: the offline neural voice - two piper models served through
+    /api/tts, an engine for desktop (sherpa package) and phone (prebuilt C
+    API), and a download that resumes rather than restarts. speak() prefers
+    it in normal chat but a live call still keeps the instant device voice.
+    """
+    root = Path(__file__).resolve().parent.parent
+    import struct
+
+    from atif_assistant import tts
+
+    import ctypes
+
+    print("\noffline voice pack (Phase E: neural server voice)")
+
+    # The pack: exact archives, their sizes, and the official release they
+    # come from - the phone should never fetch these from anywhere else.
+    check("two voice archives", len(tts.TTS_ARCHIVES) == 2)
+    names = [n for n, _, _ in tts.TTS_ARCHIVES]
+    check("urdu piper model listed",
+          any("ur_PK-fasih-medium" in n for n in names))
+    check("english piper model listed",
+          any("en_US-amy-low" in n for n in names))
+    check("sizes are pinned",
+          all(isinstance(size, int) and size > 1_000_000 for _, size, _ in tts.TTS_ARCHIVES))
+    check("pack total is the sum of the archives",
+          tts.TTS_PACK_BYTES == sum(s for _, s, _ in tts.TTS_ARCHIVES))
+    check("release base is the official sherpa-onnx tag",
+          tts._TTS_RELEASE.startswith("https://github.com/k2-fsa/sherpa-onnx/releases/")
+          and tts._TTS_RELEASE.endswith("/tts-models/"))
+    check("language map covers ur and en",
+          set(tts._TTS_VOICE) == {"ur", "en"})
+    check("each voice entry names a real onnx file",
+          all(entry[1].endswith(".onnx") for entry in tts._TTS_VOICE.values()))
+
+    tts_src = (root / "atif_assistant" / "tts.py").read_text(encoding="utf-8")
+
+    # Engines: sherpa Python where it exists, staged C API on the phone.
+    check("python engine tried before native",
+          "_build_python_engine(v) or _build_native_engine(v)" in tts_src)
+    check("native engine reuses the staged native libs",
+          "from . import voice_id" in tts_src)
+    for symbol in (
+        "SherpaOnnxCreateOfflineTts",
+        "SherpaOnnxDestroyOfflineTts",
+        "SherpaOnnxOfflineTtsGenerate",
+        "SherpaOnnxDestroyOfflineTtsGeneratedAudio",
+    ):
+        check(f"c-api entry point bound: {symbol}", symbol in tts_src)
+    check("extract runs under the data filter", 'filter="data"' in tts_src)
+    check("worker keeps partial bytes in .part files", ".part" in tts_src)
+
+    # ctypes mirrors: field order is the ABI - it must match c-api.h exactly.
+    check("vits config field order",
+          [f[0] for f in tts._NVitsModelConfig._fields_] == [
+              "model", "lexicon", "tokens", "data_dir",
+              "noise_scale", "noise_scale_w", "length_scale", "dict_dir",
+          ])
+    check("model config field order",
+          [f[0] for f in tts._NOfflineTtsModelConfig._fields_] == [
+              "vits", "num_threads", "debug", "provider",
+              "matcha", "kokoro", "kitten", "zipvoice", "pocket", "supertonic",
+          ])
+    check("tts config field order",
+          [f[0] for f in tts._NOfflineTtsConfig._fields_] == [
+              "model", "rule_fsts", "max_num_sentences", "rule_fars",
+              "silence_scale",
+          ])
+    check("generated audio layout",
+          [f[0] for f in tts._NGeneratedAudio._fields_] == [
+              "samples", "n", "sample_rate",
+          ])
+    check("pocket carries the capacity int",
+          tts._NPocketModelConfig._fields_[-1] == (
+              "voice_embedding_cache_capacity", ctypes.c_int32
+          ))
+
+    # Float samples -> int16, clamped so a hot model cannot wrap around.
+    pcm = struct.unpack("<5h", tts._pcm16([0.0, 1.0, -1.0, 2.0, -2.0]))
+    check("pcm is clamped to int16",
+          pcm == (0, 32767, -32767, 32767, -32767))
+
+    # The status surface the settings row reads.
+    st = tts.status()
+    for key in ("engine", "voice_model", "voice_pack_bytes", "download"):
+        check(f"status exposes {key}", key in st)
+    check("status counts the whole pack",
+          st["voice_pack_bytes"] == tts.TTS_PACK_BYTES)
+    check("download status reports a state",
+          st["download"].get("state") in (
+              "idle", "downloading", "paused", "ready", "error"))
+
+    # Synthesize order: Gemini, then the neural pack, then espeak - and with
+    # no pack at all the reply still lands with a real answer or reason.
+    syn_src = tts_src.split("def synthesize(", 1)[-1].split("\ndef ", 1)[0]
+    i_gem = syn_src.index("_via_gemini")
+    i_voice = syn_src.index("_via_sherpa")
+    i_esp = syn_src.index("_via_espeak")
+    check("order: server key, neural pack, espeak fallback",
+          i_gem < i_voice < i_esp)
+
+    orig_dir = tts.TTS_DIR
+    orig_worker = tts._tts_download_worker
+    orig_files = tts.voice_files
+    with tempfile.TemporaryDirectory() as tmp:
+        tts.TTS_DIR = Path(tmp)
+        tts.voice_files = lambda lang: None
+        try:
+            r = tts.synthesize("hello", "en")
+            check("no pack still answers or explains",
+                  r["audio"] is not None or bool(r.get("reason")))
+            check("missing pack reason is honest",
+                  r["audio"] is not None
+                  or "voice" in (r["reason"] or "").lower()
+                  or "gemini" in (r["reason"] or "").lower())
+            # Download control: a stub worker so nothing fetches for real.
+            tts._tts_download_worker = lambda: None
+            started = tts.tts_download_start()
+            check("download start reports ok", started.get("ok") is True)
+            check("download start flips to downloading",
+                  tts.tts_download_status()["state"] == "downloading")
+            check("pause is honored while downloading",
+                  tts.tts_download_pause().get("ok") is True)
+        finally:
+            tts.voice_files = orig_files
+            tts._tts_download_worker = orig_worker
+            with tts._TTS_DL_LOCK:
+                tts._TTS_DL.update(
+                    {"state": "idle", "reason": None, "pause": False,
+                     "bytes": 0, "partial": 0})
+            tts.TTS_DIR = orig_dir
+
+    check("voice lookup restored for later tests",
+          tts.voice_files is orig_files)
+    check("engine cache keyed by voice directory",
+          isinstance(tts._TTS_CACHE, dict))
+
+    # Server routes the row talks to.
+    app_src = (root / "atif_assistant" / "app.py").read_text(encoding="utf-8")
+    check("GET /api/tts route", '@app.get("/api/tts")' in app_src)
+    check("POST /api/tts/model route", '@app.post("/api/tts/model")' in app_src)
+    check("boot resumes a partial voice pack",
+          "tts.tts_download_start()" in app_src)
+
+    # UI: the row, its loader, and the speak() ordering that makes the pack
+    # the default voice without slowing down a live call.
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    check("voice download row", 'id="download-tts-voice"' in html)
+    check("voice status line", 'id="tts-voice-status"' in html)
+
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    check("status loader defined", "async function loadTtsVoiceStatus" in js)
+    check("status cached for speak()", "ttsVoiceStatus = t" in js)
+    check("row reads GET /api/tts", 'fetch("/api/tts")' in js)
+    check("row posts /api/tts/model", 'fetch("/api/tts/model"' in js)
+    check("row refreshes with the settings sheet",
+          "    loadTtsVoiceStatus,\n" in js)
+    speak_src = js.split("function speak(", 1)[-1].split("\nfunction ", 1)[0]
+    i_live = speak_src.index("Boolean(callActive || handsFreeActive)")
+    i_first = speak_src.index("if (!live && serverWants)")
+    i_native = speak_src.index("window.AndroidVoice.speak(clean, lang")
+    check("live check precedes the server-first attempt", i_live < i_first)
+    check("server voice tried before the device voice", i_first < i_native)
+    check("server choice needs the pack or a key",
+          "ttsVoiceStatus.voice_model || ttsVoiceStatus.server" in speak_src)
+    check("language fallback still covers voiceless languages",
+          "opts.server === true || !hasWeb || urdu" in speak_src)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -3767,8 +3936,10 @@ def test_tts() -> None:
 
     orig_key = tts.llm.provider_key
     orig_espeak = tts.ESPEAK
+    orig_voice_files = tts.voice_files
     tts.llm.provider_key = lambda name: ""
     tts.ESPEAK = None  # pretend espeak-ng is not installed
+    tts.voice_files = lambda lang: None  # ...and no neural pack is downloaded
     try:
         r = tts.synthesize("hello")
         check(
@@ -3778,11 +3949,13 @@ def test_tts() -> None:
     finally:
         tts.llm.provider_key = orig_key
         tts.ESPEAK = orig_espeak
+        tts.voice_files = orig_voice_files
 
     if orig_espeak:
         # The offline voice must rescue spoken replies when the server voice is
         # unavailable, which is what makes Urdu work with no network.
         tts.llm.provider_key = lambda name: ""
+        tts.voice_files = lambda lang: None
         try:
             r = tts.synthesize("hello", "en")
             check(
@@ -3792,6 +3965,7 @@ def test_tts() -> None:
             check("offline speech is a wav", bytes(r["audio"])[:4] == b"RIFF")
         finally:
             tts.llm.provider_key = orig_key
+            tts.voice_files = orig_voice_files
 
     with tempfile.TemporaryDirectory() as tmp:
         db.use_test_db(Path(tmp) / "tts.db")
@@ -4923,6 +5097,7 @@ def main() -> int:
     test_phone_voice_engine()
     test_offline_llm_errors()
     test_why_panel_rows()
+    test_offline_voice_pack()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()

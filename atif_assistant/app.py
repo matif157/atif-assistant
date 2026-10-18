@@ -236,6 +236,11 @@ def _resume_partial_downloads() -> None:
         for name in stt.MODEL_URLS:
             if (stt.model_dir() / f"{name}.part").is_file():
                 stt.stt_download_start(name)
+        if any(
+            (tts.TTS_DIR / f"{name}.part").is_file()
+            for name, _, _ in tts.TTS_ARCHIVES
+        ):
+            tts.tts_download_start()
     except Exception:  # noqa: BLE001 - resume must never block boot
         pass
 
@@ -395,6 +400,29 @@ def make_speech(payload: TtsIn) -> Response:
         media_type="audio/wav",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/api/tts")
+def tts_engine_status() -> dict:
+    """Engine, voice-pack and download state for the offline voice row."""
+    return tts.status()
+
+
+@app.post("/api/tts/model")
+def download_tts_voice(payload: dict | None = None) -> JSONResponse:
+    """Download the offline voice pack (Urdu + English piper models).
+
+    Returns immediately; the client polls GET /api/tts. ``{"action": "pause"}``
+    keeps every fetched byte for a later resume.
+    """
+    body = payload or {}
+    if body.get("action") == "pause":
+        result = tts.tts_download_pause()
+        if result.get("reason") == "pausing":
+            db.set_setting("models.auto_resume", "off")
+        return JSONResponse(result)
+    db.set_setting("models.auto_resume", "on")
+    return JSONResponse(tts.tts_download_start())
 
 
 @app.post("/api/stt")

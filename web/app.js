@@ -17,6 +17,9 @@ let lastBasis = null;
 let lastSpeechVia = "typed";
 let lastSpeakVia = "";
 let llmLastStatus = null;
+// Snapshot of GET /api/tts: tells speak() whether the downloaded offline
+// voice (or a Gemini key) is on the server before any turn is spoken.
+let ttsVoiceStatus = null;
 
 /* Exactly one answer may be in flight. `streamCtl` is also the STOP handle:
    while it is set, the send button aborts the stream instead of sending. */
@@ -2436,6 +2439,28 @@ async function speak(text, opts = {}) {
     done();
   }, Math.min(Math.max(words * 700 + 9000, 12000), 150000));
 
+  // Server voice first in normal chat: that is the downloaded offline
+  // neural voice (or Gemini with a key), identical on all three frontends.
+  // A live call or hands-free loop keeps the device voice first - instant
+  // turn-taking beats studio quality when the other side is waiting.
+  const live = Boolean(callActive || handsFreeActive);
+  const hasWeb = "speechSynthesis" in window;
+  const urdu = lang.startsWith("ur");
+  const serverWants = Boolean(
+    ttsVoiceStatus && (ttsVoiceStatus.voice_model || ttsVoiceStatus.server),
+  );
+  let serverTried = false;
+  if (!live && serverWants) {
+    serverTried = true;
+    const played = await playServerClip(clean, done, lang);
+    if (played) {
+      lastSpeakVia = "server voice";
+      return;
+    }
+    // Cancelled (barge-in) or already released - do not start another engine.
+    if (myToken !== speechToken || ended) return;
+  }
+
   // Inside the Android app the native engine reports completion back through
   // window.onAndroidSpeechEnd, so a call turn ends the moment speech does -
   // the safety timer above is only the fallback for a silent device.
@@ -2458,12 +2483,11 @@ async function speak(text, opts = {}) {
     speechEndId = null;
   }
 
-  const hasWeb = "speechSynthesis" in window;
-  const urdu = lang.startsWith("ur");
   // A typical device has no Urdu voice, so speaking Urdu locally comes out as
   // English gibberish. Use the server whenever the language has no local voice.
   const needServer =
-    opts.server === true || !hasWeb || urdu || (voices.length > 0 && !hasVoiceFor(lang));
+    !serverTried &&
+    (opts.server === true || !hasWeb || urdu || (voices.length > 0 && !hasVoiceFor(lang)));
   if (needServer) {
     const played = await playServerClip(clean, done, lang);
     if (played) {
@@ -4202,6 +4226,7 @@ document.getElementById("btn-settings").addEventListener("click", () => {
     syncAppLockToggle,
     loadProviders,
     loadSpeechStatus,
+    loadTtsVoiceStatus,
     refreshLlmStatus,
     loadVoiceprints,
     loadOllama,
@@ -4516,6 +4541,104 @@ function scheduleSpeechPoll(ms) {
   clearTimeout(speechPollTimer);
   speechPollTimer = setTimeout(loadSpeechStatus, ms);
 }
+
+/* --------------------------------------------- offline voice pack (Settings)
+   Two piper models (Urdu + English, ~88 MB) let the server speak every reply
+   offline in a human voice. Progress mirrors the speech-model row, and the
+   status caches GET /api/tts so speak() can choose the server voice before
+   the user ever opens Settings. */
+const ttsVoiceBtn = document.getElementById("download-tts-voice");
+const ttsVoiceNote = document.getElementById("tts-voice-status");
+let ttsVoicePollTimer = 0;
+
+function scheduleTtsVoicePoll(ms) {
+  clearTimeout(ttsVoicePollTimer);
+  ttsVoicePollTimer = setTimeout(loadTtsVoiceStatus, ms);
+}
+
+async function loadTtsVoiceStatus() {
+  let t;
+  try {
+    t = await (await fetch("/api/tts")).json();
+  } catch {
+    return; /* keep the last snapshot for speak() */
+  }
+  ttsVoiceStatus = t;
+  if (!ttsVoiceBtn && !ttsVoiceNote) return;
+  const dl = t.download || {};
+  const packMb = Math.round((t.voice_pack_bytes || 88326964) / 1000000);
+  if (dl.state === "downloading") {
+    if (ttsVoiceBtn) {
+      ttsVoiceBtn.disabled = true;
+      ttsVoiceBtn.hidden = false;
+      ttsVoiceBtn.textContent = "DOWNLOADING...";
+    }
+    if (ttsVoiceNote) {
+      const got = Math.round((dl.bytes || 0) / 1048576);
+      const want = Math.round((dl.total || 0) / 1048576);
+      ttsVoiceNote.textContent = want
+        ? `Fetching the offline voice: ${got} / ${want} MB...`
+        : "Fetching the offline voice...";
+    }
+    scheduleTtsVoicePoll(1500);
+    return;
+  }
+  if (dl.state === "paused") {
+    const mb = Math.round((dl.bytes || dl.partial || 0) / 1048576);
+    if (ttsVoiceBtn) {
+      ttsVoiceBtn.disabled = false;
+      ttsVoiceBtn.hidden = false;
+      ttsVoiceBtn.textContent = "RESUME DOWNLOAD";
+    }
+    if (ttsVoiceNote) {
+      ttsVoiceNote.textContent =
+        `Voice pack paused at ${mb} MB. Resume continues from there.`;
+    }
+    scheduleTtsVoicePoll(3000);
+    return;
+  }
+  const installed = Boolean(t.voice_model) || dl.state === "ready";
+  if (ttsVoiceBtn) {
+    ttsVoiceBtn.disabled = false;
+    ttsVoiceBtn.hidden = installed || !t.engine;
+    ttsVoiceBtn.textContent =
+      dl.state === "error"
+        ? "RETRY DOWNLOAD"
+        : `DOWNLOAD OFFLINE VOICE (~${packMb} MB)`;
+  }
+  if (ttsVoiceNote) {
+    if (dl.state === "error") {
+      ttsVoiceNote.textContent = "Download failed: " + (dl.reason || "unknown error");
+    } else if (installed) {
+      ttsVoiceNote.textContent =
+        `Offline voice ready - Urdu and English spoken on the ${
+          t.engine === "native" ? "on-device engine" : "sherpa engine"
+        }.`;
+    } else if (!t.engine) {
+      ttsVoiceNote.textContent = "The sherpa voice engine is not in this build.";
+    } else {
+      ttsVoiceNote.textContent =
+        `Offline voice not downloaded yet (~${packMb} MB for Urdu + English).`;
+    }
+  }
+}
+
+if (ttsVoiceBtn) {
+  ttsVoiceBtn.addEventListener("click", async () => {
+    ttsVoiceBtn.disabled = true;
+    try {
+      await fetch("/api/tts/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch {
+      /* the status poll reports the failure */
+    }
+    loadTtsVoiceStatus();
+  });
+}
+loadTtsVoiceStatus();
 
 /* ------------------------------------------ offline model setup (Settings)
    The download controls deliberately live in Settings: opening the app must
