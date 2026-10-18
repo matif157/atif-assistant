@@ -86,6 +86,10 @@ public class MainActivity extends Activity {
 
     /** False once the server reports no offline speech stack; refreshed on boot. */
     private volatile boolean sttAvailable;
+    /** Why the last whisper attempt failed, so the legacy fallback can name it. */
+    private volatile String sttFail = "";
+    /** Why the last capture failed ("" = simply never spoke, a normal retry). */
+    private volatile String micFail = "";
 
     // Boot UI
     private View bootSplash;
@@ -845,6 +849,17 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> startListening(lang));
         }
 
+        /**
+         * The offline-availability probe runs once at boot and goes stale the
+         * moment a speech-model download lands; JS calls this after downloads
+         * so the very next listen() can pick whisper instead of the platform
+         * recogniser. Non-blocking.
+         */
+        @JavascriptInterface
+        public void refreshStt() {
+            new Thread(() -> probeOfflineStt(), "stt-probe").start();
+        }
+
         /** Silence TTS and cancel any active recognition (end call / hands-free off). */
         @JavascriptInterface
         public void stop() {
@@ -1027,6 +1042,7 @@ public class MainActivity extends Activity {
      * recogniser (which needs a network, but keeps the mic working).
      */
     private void startListening(String lang) {
+        sttFail = ""; // fresh turn: never report the previous attempt's reason
         if (sttAvailable) {
             whisperListen(lang);
         } else {
@@ -1055,12 +1071,21 @@ public class MainActivity extends Activity {
 
     private void whisperListen(final String lang) {
         if (recording) {
-            return; // already capturing; the next result will arrive on its own
+            // Already capturing: say so (the JS side retries with a strike)
+            // instead of leaving the call waiting for a result that will
+            // never come from this request.
+            emitError("Still recording the last clip - retrying.");
+            return;
         }
         new Thread(() -> {
             byte[] wav = recordWav();
             if (wav == null) {
-                emitResult("");
+                String why = micFail;
+                if (why == null || why.isEmpty()) {
+                    emitResult(""); // never spoke: a normal, silent retry
+                } else {
+                    emitError(why); // the mic itself failed: name it
+                }
                 return;
             }
             // Clip captured; transcription can take a cold minute. Lets the JS
@@ -1081,6 +1106,7 @@ public class MainActivity extends Activity {
 
     /** Capture 16 kHz mono PCM16 with a simple energy VAD; null on failure. */
     private byte[] recordWav() {
+        micFail = "";
         int minBuf = AudioRecord.getMinBufferSize(
                 STT_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         AudioRecord ar;
@@ -1090,10 +1116,12 @@ public class MainActivity extends Activity {
                     AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                     Math.max(minBuf, 3200) * 4);
         } catch (Throwable t) {
+            micFail = "Microphone unavailable - check Settings - device permissions, then try again.";
             return null;
         }
         if (ar.getState() != AudioRecord.STATE_INITIALIZED) {
             ar.release();
+            micFail = "Microphone unavailable - check Settings - device permissions, then try again.";
             return null;
         }
         ByteArrayOutputStream pcm = new ByteArrayOutputStream(STT_RATE * 2 * 9);
@@ -1130,6 +1158,7 @@ public class MainActivity extends Activity {
                 }
             }
         } catch (Throwable t) {
+            micFail = "Microphone read failed - another app may be using it.";
             return null;
         } finally {
             recording = false;
@@ -1195,11 +1224,17 @@ public class MainActivity extends Activity {
             }
             in.close();
             if (code != 200) {
+                sttFail = serverReason(buf.toString(StandardCharsets.UTF_8.name()));
+                if (sttFail.isEmpty()) {
+                    sttFail = "Speech transcription failed (HTTP " + code + ").";
+                }
                 return null;
             }
+            sttFail = "";
             return new JSONObject(buf.toString(StandardCharsets.UTF_8.name()))
                     .optString("text", "");
         } catch (Throwable t) {
+            sttFail = "The app server did not respond - try again.";
             return null;
         } finally {
             if (conn != null) {
@@ -1208,10 +1243,30 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Pull the human reason out of a failed /api/stt body; "" if unreadable. */
+    private static String serverReason(String json) {
+        try {
+            JSONObject o = new JSONObject(json);
+            String s = o.optString("error", "");
+            if (s.isEmpty()) {
+                s = o.optString("detail", "");
+            }
+            if (s.isEmpty()) {
+                s = o.optString("message", "");
+            }
+            return s;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
     /** The platform recogniser: online, but always available as a fallback. */
     private void startListeningLegacy(String lang) {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            emitResult("");
+            emitError(sttFail.isEmpty()
+                    ? "No speech engine: connect to the internet, or download "
+                    + "the speech model in Settings - OFFLINE MODELS."
+                    : sttFail);
             return;
         }
         if (recognizer != null) {
@@ -1228,7 +1283,27 @@ public class MainActivity extends Activity {
 
             @Override
             public void onError(int error) {
-                emitResult("");
+                // Silence stays a soft retry; everything else gets a reason.
+                if (error == SpeechRecognizer.ERROR_NO_MATCH
+                        || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                    emitResult("");
+                    return;
+                }
+                if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    emitError("Microphone permission is required for speech.");
+                    return;
+                }
+                if (error == SpeechRecognizer.ERROR_NETWORK
+                        || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT) {
+                    emitError(sttFail.isEmpty()
+                            ? "Speech recognition needs the internet - or download "
+                            + "the offline speech model in Settings - OFFLINE MODELS."
+                            : sttFail);
+                    return;
+                }
+                emitError(sttFail.isEmpty()
+                        ? "Speech recognition failed (error " + error + ")."
+                        : sttFail);
             }
 
             @Override public void onReadyForSpeech(Bundle params) {}
@@ -1250,6 +1325,17 @@ public class MainActivity extends Activity {
     private void emitResult(final String text) {
         final String js = "window.onAndroidSpeechResult && window.onAndroidSpeechResult("
                 + jsQuote(text) + ")";
+        web.post(() -> web.evaluateJavascript(js, null));
+    }
+
+    /**
+     * A real failure (mic, model, recogniser) with its reason. The JS call
+     * shows it, counts the strike and decides - instead of flattening every
+     * failure into an empty "silence" result that loops forever.
+     */
+    private void emitError(final String reason) {
+        final String js = "window.onAndroidSpeechError && window.onAndroidSpeechError("
+                + jsQuote(reason) + ")";
         web.post(() -> web.evaluateJavascript(js, null));
     }
 

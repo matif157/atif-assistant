@@ -2449,6 +2449,18 @@ window.onAndroidSpeechProgress = () => {
   armCallWatchdog(60000);
 };
 
+// Default owner of the native error channel: while a call or a hands-free
+// loop is live it reassigns this to its own handler; the one-shot mic and any
+// owner-less failure at least hear why instead of freezing on "Listening".
+window.onAndroidSpeechError = (reason) => {
+  if (callActive || handsFreeActive) return;
+  if (listening) {
+    listening = false;
+    mic?.classList.remove("active");
+  }
+  toast(String(reason || "Speech failed."));
+};
+
 /* ------------------------------------------------------------ speech input */
 
 let recognizer = null;
@@ -2803,6 +2815,10 @@ let callResumeTimer = null;
 let callErrorStreak = 0;
 let callMicAsking = false;
 let callListenTimer = null;
+let callEndTimer = null;
+// Set while callFail() waits out its readable beat: a late native result or
+// error must not resurrect a call that has already been sentenced.
+let callEnding = false;
 
 function callSupported() {
   // The offline engine makes a call possible even in browsers with no built-in
@@ -2882,17 +2898,30 @@ function startCall() {
   }
   stopSpeech();
   callActive = true;
+  callEnding = false;
   callTranscriptEl.textContent = "";
   callHeardEl.textContent = "";
   callSheet.hidden = false;
+  // No speech engine and no network: say so once, visibly, instead of an
+  // eternal LISTENING (the platform recogniser needs the internet; whisper
+  // needs its downloaded model).
+  if (!localSttReady && typeof navigator !== "undefined" && navigator.onLine === false) {
+    callFail(
+      "No speech engine: connect to the internet, or download the speech " +
+        "model in Settings - OFFLINE MODELS."
+    );
+    return;
+  }
   callListen();
 }
 
 function endCall() {
   callActive = false;
   callPhase = "idle";
+  callEnding = false;
   clearTimeout(callResumeTimer);
   clearTimeout(callListenTimer);
+  clearTimeout(callEndTimer);
   callMicAsking = false;
   stopCallRecognition();
   stopSpeech();
@@ -2900,6 +2929,48 @@ function endCall() {
     try { window.AndroidVoice.stop(); } catch { /* ignore */ }
   }
   if (callSheet) callSheet.hidden = true;
+}
+
+// One visible failure surface for the call: the reason shows in the heard
+// line (where the user already looks), strikes are counted, and only the
+// third strike ends the call. Before this, every native failure arrived as an
+// empty result and looped forever on LISTENING.
+function callStrike(message, hard) {
+  if (!callActive || callEnding || callPhase !== "listening") return;
+  clearTimeout(callListenTimer);
+  clearTimeout(callRetry);
+  callErrorStreak += 1;
+  const msg = String(message || "The microphone stopped responding.");
+  if (callHeardEl) callHeardEl.textContent = msg;
+  if (callErrorStreak >= 3) {
+    callFail(
+      hard
+        ? msg
+        : msg +
+            " Check Settings - device permissions, or download the speech " +
+            "model in Settings - OFFLINE MODELS."
+    );
+    return;
+  }
+  callRetry = setTimeout(() => {
+    if (callActive && !callEnding) callListen();
+  }, 1400);
+}
+
+// Terminal failure: the reason stays readable (transcript + toast) for a
+// beat, then the sheet closes itself - never hidden on the same tick it was
+// written, which is how every stall reason disappeared before the user saw it.
+function callFail(message) {
+  callEnding = true;
+  clearTimeout(callListenTimer);
+  clearTimeout(callRetry);
+  clearTimeout(callEndTimer);
+  const msg = String(message || "The call ended unexpectedly.");
+  if (callTranscriptEl) callTranscriptEl.textContent = msg;
+  toast(msg);
+  callEndTimer = setTimeout(() => {
+    endCall();
+  }, 2600);
 }
 
 // The bridge branch of callListen has no onend to re-arm it: a stuck
@@ -2914,9 +2985,9 @@ function armCallWatchdog(ms) {
     if (!callActive || callPhase !== "listening") return;
     callErrorStreak += 1;
     if (callErrorStreak >= 3) {
-      callTranscriptEl.textContent =
-        "The microphone is not responding. Check it in Settings - device permissions - and try again.";
-      endCall();
+      callFail(
+        "The microphone is not responding. Check it in Settings - device permissions - and try again."
+      );
       return;
     }
     // Kill any stuck capture, then re-arm. Native only: the browser
@@ -2963,8 +3034,7 @@ function callMicReady() {
         clearInterval(poll);
         callMicAsking = false;
         if (callActive) {
-          callTranscriptEl.textContent = "Microphone permission is required for a call.";
-          endCall();
+          callFail("Microphone permission is required for a call.");
         }
       }
     }, 700);
@@ -2975,7 +3045,7 @@ function callMicReady() {
 }
 
 function callListen() {
-  if (!callActive) return;
+  if (!callActive || callEnding) return;
   clearTimeout(callListenTimer);
 
   // Native bridge FIRST: inside Android WebView getUserMedia is always
@@ -2990,17 +3060,28 @@ function callListen() {
     callHeardEl.textContent = "";
     // Single-shot: re-arm after every turn, and never trust a silent drop.
     window.onAndroidSpeechResult = (text) => {
-      if (!callActive) return;
+      if (!callActive || callEnding) return;
       clearTimeout(callListenTimer);
       const said = (text || "").trim();
       if (said) callSubmit(said);
-      else callListen();
+      else callStrike("I didn't catch that - try again.", false);
+    };
+    // Every native failure (mic, model, recogniser) arrives here with a
+    // reason - never again as a silent empty result that loops forever.
+    window.onAndroidSpeechError = (reason) => {
+      if (!callActive || callEnding) return;
+      callStrike(reason, true);
+      // The failure may be the stale boot-time engine probe (model
+      // downloaded mid-session): re-probe so the next turn can pick whisper.
+      if (window.AndroidVoice && typeof window.AndroidVoice.refreshStt === "function") {
+        try { window.AndroidVoice.refreshStt(); } catch { /* ignore */ }
+      }
     };
     try {
       window.AndroidVoice.listen(settings.stt);
       armCallWatchdog(12000);
     } catch {
-      callRetry = setTimeout(callListen, 400);
+      callStrike("The microphone failed to start - try again.", true);
     }
     return;
   }
@@ -3020,7 +3101,7 @@ function callListen() {
   try {
     r = new SR();
   } catch {
-    endCall();
+    callFail("Speech recognition is unavailable in this browser.");
     return;
   }
   callRecognizer = r;
@@ -3051,8 +3132,7 @@ function callListen() {
     // Silence and our own aborts are normal; onend re-arms the mic.
     if (err === "no-speech" || err === "aborted") return;
     if (err === "not-allowed" || err === "service-not-allowed") {
-      callTranscriptEl.textContent = "Microphone permission is required for a call.";
-      endCall();
+      callFail("Microphone permission is required for a call.");
       return;
     }
     // "network" and a missing language pack can be transient; retry a few
@@ -3062,11 +3142,11 @@ function callListen() {
       callTranscriptEl.textContent = `Retrying the microphone (${callErrorStreak}/3)...`;
       return;
     }
-    callTranscriptEl.textContent =
+    callFail(
       err === "language-not-supported"
         ? "This browser cannot recognise that language. Set MICROPHONE LANGUAGE to one it supports."
-        : `Speech recognition stopped: ${err}.`;
-    endCall();
+        : `Speech recognition stopped: ${err}.`
+    );
   };
   r.onend = () => {
     if (!callActive || callGotResult) return;
@@ -3104,8 +3184,7 @@ async function callListenLocal() {
       callListen();
       return;
     }
-    callTranscriptEl.textContent = "Microphone unavailable: " + err.message;
-    endCall();
+    callFail("Microphone unavailable: " + err.message);
     return;
   }
   if (!callActive) {
@@ -3141,10 +3220,7 @@ async function callListenLocal() {
       ({ text, speaker } = await transcribeLocal(blob));
     } catch (err) {
       if (!callActive) return;
-      callTranscriptEl.textContent = "Offline speech failed: " + err.message;
-      callRetry = setTimeout(() => {
-        if (callActive) callListen();
-      }, 600);
+      callStrike("Offline speech failed: " + err.message, true);
       return;
     }
     if (!callActive) return;
@@ -3163,7 +3239,8 @@ async function callListenLocal() {
 }
 
 async function callSubmit(text, speaker) {
-  if (!callActive) return;
+  if (!callActive || callEnding) return;
+  callErrorStreak = 0; // a real turn clears the strikes
   stopCallRecognition();
   callTranscriptEl.textContent = text;
   callHeardEl.textContent = "";
@@ -3292,6 +3369,13 @@ function handsFreeListen() {
       const said = (text || "").trim();
       if (said) handsFreeSubmit(said);
       else handsFreeResume();
+    };
+    // Same contract as the call: native failures carry a reason; show it in
+    // the hint line and keep the loop alive instead of retrying blind.
+    window.onAndroidSpeechError = (reason) => {
+      if (!handsFreeActive || handsFreePhase !== "listening") return;
+      if (hintEl) hintEl.textContent = String(reason || "Speech failed.") + " (tap the mic to stop)";
+      handsFreeResume();
     };
     try {
       window.AndroidVoice.listen(settings.stt);
@@ -5382,7 +5466,15 @@ document.getElementById("install-app").addEventListener("click", async () => {
    not just the first load - one failed fetch at boot used to leave "offline"
    forever, and a dead engine never turned the dot off. */
 function applyHealth(h) {
-  localSttReady = Boolean(h.speech && h.speech.offline_in && h.speech.offline_in.available);
+  const sttNow = Boolean(h.speech && h.speech.offline_in && h.speech.offline_in.available);
+  if (sttNow !== localSttReady) {
+    localSttReady = sttNow;
+    // Java caches the same probe once at boot: when the model lands
+    // mid-session, re-probe so the next listen() can pick whisper.
+    if (sttNow && window.AndroidVoice && typeof window.AndroidVoice.refreshStt === "function") {
+      try { window.AndroidVoice.refreshStt(); } catch { /* ignore */ }
+    }
+  }
   const ready = h.providers && h.providers.find((p) => p.ready);
   dot.className = ready ? "dot on" : "dot off";
   statusline.textContent = ready

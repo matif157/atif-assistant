@@ -1108,6 +1108,77 @@ def test_ui_error_visibility() -> None:
     check("ring stays bounded by applog", len(applog.tail(200)) <= 200)
 
 
+def test_call_error_channel() -> None:
+    """The call never stalls silently: every native failure carries a reason.
+
+    Before v1.3.4 Java flattened mic/model/recogniser failures into an empty
+    "silence" result, so the call looped on LISTENING forever. Now emitError
+    feeds window.onAndroidSpeechError, strikes are counted in one place,
+    three strikes end the call with the reason readable for a beat, and the
+    boot-time engine probe re-runs after a model download (refreshStt).
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    java = (root / "mobile" / "android" / "app" / "src" / "main" / "java"
+            / "ai" / "atif" / "assistant" / "MainActivity.java").read_text(
+        encoding="utf-8"
+    )
+
+    print("\ncall error channel: reasons instead of silent loops")
+
+    # Java: a real error channel, with the reason preserved end to end.
+    check("java emits errors", "private void emitError(final String reason)" in java)
+    check("java targets the js handler", "window.onAndroidSpeechError" in java)
+    check("java has multiple emit sites", java.count("emitError(") >= 6)
+    check(
+        "legacy onError no longer flattens to silence",
+        re.search(r"onError\(int error\) \{\s*emitResult\(\"\"\);", java) is None,
+    )
+    check("never-spoke stays a soft retry", java.count('emitResult("")') >= 2)
+    check("busy capture reports instead of vanishing",
+          "Still recording the last clip - retrying." in java)
+    check("mic failure reasons recorded", 'micFail = "Microphone unavailable' in java)
+    check("server failure reasons recorded", "sttFail = serverReason(" in java)
+    check("legacy network failure named", "SpeechRecognizer.ERROR_NETWORK" in java)
+    check("bridge re-probes after downloads",
+          'new Thread(() -> probeOfflineStt(), "stt-probe")' in java)
+
+    # JS: one failure surface (heard line), strikes, delayed terminal.
+    check("js owns the error channel", js.count("onAndroidSpeechError =") >= 3)
+    check("callFail helper exists", "function callFail(message)" in js)
+    check("callStrike helper exists", "function callStrike(message, hard)" in js)
+    check("soft strike on empty result", "I didn't catch that - try again." in js)
+    check("listen-throw path strikes", "callStrike(\"The microphone failed to start" in js)
+    check("watchdog terminal uses callFail",
+          "The microphone is not responding. Check it in Settings" in js)
+    check("permission failures visible", 'callFail("Microphone permission is required for a call.")' in js)
+    check("browser recogniser failures visible",
+          'callFail("Speech recognition is unavailable in this browser.")' in js)
+    check("local mic failure visible", 'callFail("Microphone unavailable: "' in js)
+    check("local transcribe failure strikes",
+          'callStrike("Offline speech failed: "' in js)
+    check("terminal reason lingers (delayed end)",
+          js.count("callEndTimer = setTimeout") >= 1
+          and "clearTimeout(callEndTimer)" in js)
+    check("late results cannot resurrect a failing call",
+          "callEnding" in js
+          and re.search(r"function callSubmit[\s\S]{0,160}?callEnding", js) is not None)
+    check("a real turn resets strikes",
+          re.search(r"async function callSubmit[\s\S]{0,200}?callErrorStreak = 0", js)
+          is not None)
+    check("offline start says why", "No speech engine: connect to the internet" in js)
+    check("engine re-probe from the js side", js.count("AndroidVoice.refreshStt") >= 2)
+    check("one-shot mic gets a default error owner",
+          "if (callActive || handsFreeActive) return;" in js)
+    check("hands-free shows the reason too",
+          re.search(
+              r"onAndroidSpeechError = \(reason\)[\s\S]{0,400}?handsFreeResume", js
+          )
+          is not None)
+
+
 def test_downloads() -> None:
     """Phase 8 install channel: /dl serves only allowlisted build artifacts
     and 404s everything else - never becomes a general file server."""
@@ -4570,6 +4641,7 @@ def main() -> int:
     test_natural_reply_surface()
     test_layout_navigation()
     test_ui_error_visibility()
+    test_call_error_channel()
     test_no_undeclared_identifiers()
     test_downloads()
     test_sessions_feedback()
