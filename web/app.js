@@ -4227,6 +4227,7 @@ document.getElementById("btn-settings").addEventListener("click", () => {
     loadProviders,
     loadSpeechStatus,
     loadTtsVoiceStatus,
+    loadSyncStatus,
     refreshLlmStatus,
     loadVoiceprints,
     loadOllama,
@@ -4639,6 +4640,161 @@ if (ttsVoiceBtn) {
   });
 }
 loadTtsVoiceStatus();
+
+/* -------------------------------------------------- cross-device sync card
+   The server does the syncing (a worker swaps rows with each peer every few
+   seconds and right after every answer); this row only pairs devices and
+   mirrors status. One shared key, typed once on each side, is the whole
+   handshake. */
+const syncEnable = document.getElementById("sync-enable");
+const syncKeyLine = document.getElementById("sync-key-line");
+const syncUrls = document.getElementById("sync-urls");
+const syncPeerInput = document.getElementById("sync-peer-input");
+const syncPeerList = document.getElementById("sync-peer-list");
+const syncStatusLine = document.getElementById("sync-status");
+const syncNowBtn = document.getElementById("sync-now");
+const syncCopyKeyBtn = document.getElementById("sync-copy-key");
+const syncNewKeyBtn = document.getElementById("sync-new-key");
+const syncPeerAddBtn = document.getElementById("sync-peer-add");
+let syncPollTimer = 0;
+
+function scheduleSyncPoll(ms) {
+  clearTimeout(syncPollTimer);
+  syncPollTimer = setTimeout(loadSyncStatus, ms);
+}
+
+async function postSyncConfig(body) {
+  try {
+    await fetch("/api/sync/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    /* the next status read reports it */
+  }
+  loadSyncStatus();
+}
+
+function renderSyncStatus(s) {
+  if (syncEnable) syncEnable.checked = Boolean(s.enabled);
+  if (syncKeyLine) {
+    syncKeyLine.textContent = `Sync key (identical on both devices): ${s.secret || "-"}`;
+  }
+  if (syncUrls) {
+    const lan = s.lan_urls || [];
+    if (lan.length) {
+      syncUrls.textContent = lan.join("  ·  ");
+    } else if (s.reachable) {
+      syncUrls.textContent = `http://${s.host}:${s.port}`;
+    } else {
+      syncUrls.textContent = `http://127.0.0.1:${s.port} (loopback only - others cannot pair with this server)`;
+    }
+  }
+  if (syncPeerList) {
+    syncPeerList.textContent = "";
+    for (const p of s.peers || []) {
+      const row = document.createElement("div");
+      row.className = "hint";
+      let state;
+      if (p.last_error) state = `error - ${p.last_error}`;
+      else if (p.last_at) {
+        state = p.pending
+          ? `synced ${p.last_at} · ${p.pending} waiting`
+          : `synced ${p.last_at} · up to date`;
+      } else state = "paired - not synced yet";
+      row.textContent = `${p.url} — ${state} · `;
+      const rm = document.createElement("button");
+      rm.className = "ghost";
+      rm.type = "button";
+      rm.textContent = "REMOVE";
+      rm.addEventListener("click", () => postSyncConfig({ remove_peer: p.url }));
+      row.appendChild(rm);
+      syncPeerList.appendChild(row);
+    }
+    if (!(s.peers || []).length) {
+      syncPeerList.textContent = "No paired devices yet.";
+    }
+  }
+  if (syncStatusLine) {
+    const last = s.last || {};
+    let line = s.hint ? `${s.hint} ` : "";
+    if (last.at) {
+      line += `Last sync ${last.at} - pushed ${last.pushed || 0}, pulled ${last.pulled || 0}` +
+        (last.errors ? `, ${last.errors} error(s): ${last.error || ""}` : "");
+    } else {
+      line += s.enabled && (s.peers || []).length
+        ? "Waiting for the first sync cycle."
+        : "Never synced.";
+    }
+    syncStatusLine.textContent = line;
+  }
+}
+
+async function loadSyncStatus() {
+  let s;
+  try {
+    s = await (await fetch("/api/sync")).json();
+  } catch {
+    return; /* leave the last good rendering */
+  }
+  renderSyncStatus(s);
+  // Live numbers (pending, errors) only matter while the sheet is open.
+  const sheet = document.getElementById("settings-sheet");
+  if (sheet && !sheet.hidden) scheduleSyncPoll(4000);
+}
+
+if (syncEnable) {
+  syncEnable.addEventListener("change", () => {
+    postSyncConfig({ enabled: syncEnable.checked });
+  });
+}
+if (syncNowBtn) {
+  syncNowBtn.addEventListener("click", async () => {
+    try {
+      await fetch("/api/sync/now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch {
+      /* status shows the failure */
+    }
+    scheduleSyncPoll(1200);
+  });
+}
+if (syncCopyKeyBtn) {
+  syncCopyKeyBtn.addEventListener("click", async () => {
+    const key = (syncKeyLine && syncKeyLine.textContent.split(": ").pop()) || "";
+    try {
+      await navigator.clipboard.writeText(key);
+      syncCopyKeyBtn.textContent = "COPIED";
+      setTimeout(() => { syncCopyKeyBtn.textContent = "COPY SYNC KEY"; }, 1500);
+    } catch {
+      /* clipboard denied: the key is on screen to copy manually */
+    }
+  });
+}
+if (syncNewKeyBtn) {
+  syncNewKeyBtn.addEventListener("click", () => {
+    if (window.confirm("Create a new sync key? Paired devices stop syncing until they copy this one.")) {
+      postSyncConfig({ rotate: true });
+    }
+  });
+}
+if (syncPeerAddBtn) {
+  syncPeerAddBtn.addEventListener("click", () => {
+    const url = (syncPeerInput && syncPeerInput.value || "").trim();
+    if (!/^https?:\/\//.test(url)) {
+      if (syncStatusLine) {
+        syncStatusLine.textContent = "Peer address must start with http:// or https://";
+      }
+      return;
+    }
+    if (syncPeerInput) syncPeerInput.value = "";
+    postSyncConfig({ add_peer: url });
+  });
+}
 
 /* ------------------------------------------ offline model setup (Settings)
    The download controls deliberately live in Settings: opening the app must

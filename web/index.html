@@ -432,6 +432,29 @@
       </section>
 
       <section class="set-card">
+        <div class="set-title">SYNC (EVERY DEVICE SEES THE SAME CHATS)</div>
+    <p class="hint">Pair this instance with another (the APK, a desktop server, another WebUI host): chats, memory, todos, reminders and settings - API keys included - converge automatically within seconds. Voice packs and uploaded media files stay on each device.</p>
+    <label>AUTO-SYNC
+      <input type="checkbox" id="sync-enable">
+    </label>
+    <div class="form-actions">
+      <button class="ghost" id="sync-now">SYNC NOW</button>
+      <button class="ghost" id="sync-copy-key">COPY SYNC KEY</button>
+      <button class="ghost" id="sync-new-key">NEW KEY</button>
+    </div>
+    <div id="sync-key-line" class="hint"></div>
+    <div class="set-title" style="margin-top:.6rem">THIS DEVICE (enter these on the other side)</div>
+    <div id="sync-urls" class="hint"></div>
+    <div class="set-title" style="margin-top:.6rem">PAIRED DEVICES</div>
+    <div class="form-actions">
+      <input id="sync-peer-input" placeholder="http://192.168.1.7:8770" aria-label="Peer URL" style="flex:1;min-width:0">
+      <button class="ghost" id="sync-peer-add">ADD DEVICE</button>
+    </div>
+    <div id="sync-peer-list"></div>
+    <div id="sync-status" class="hint"></div>
+      </section>
+
+      <section class="set-card">
         <div class="set-title">MODELS &amp; API KEYS</div>
         <div id="providers-list" class="providers"></div>
     <div class="form-actions">

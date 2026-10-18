@@ -375,6 +375,173 @@ _ADDED_COLUMNS = (
     ("inbox", "notified", "INTEGER"),
 )
 
+# ---------------------------------------------------------------- sync
+# Cross-instance sync (APK <-> desktop <-> any server). Every write to a
+# synced table is captured by an SQLite trigger into `sync_log` - no Python
+# write path changes - and peers exchange those log rows over HTTP. Row keys
+# are origin-qualified (`<device>:<table>:<id>`) so per-database integer ids
+# can never collide; `settings` keys are global by construction. `sync_map`
+# remembers remote-key -> local-id, `sync_tomb` remembers deletions so stale
+# rows cannot resurrect, and `sync_hold` silences the triggers while a peer's
+# rows are being applied (so an apply is re-logged with the peer's origin for
+# fan-out, never as our own write).
+SYNCED_TABLES: dict[str, tuple[str, ...]] = {
+    "messages": ("session", "role", "content", "labels", "patterns", "created_at"),
+    "settings": ("key", "value", "updated_at"),
+    "todos": ("text", "done", "due", "origin", "source", "created_at", "updated_at"),
+    "reminders": ("text", "due_at", "fired", "created_at"),
+    "notes": ("title", "body", "tags", "mood", "created_at", "updated_at"),
+    "facts": (
+        "text", "source", "confidence", "evidence", "last_verified",
+        "status", "created_at", "updated_at",
+    ),
+    "episodes": ("occurred_at", "title", "summary", "source", "people", "created_at"),
+    "patterns": (
+        "name", "trigger", "observed", "frequency", "function_", "effect",
+        "intervention", "triggers", "source", "created_at",
+    ),
+    "rules": ("code", "text", "source", "approved", "created_at"),
+    "decisions": (
+        "topic", "decided_at", "decision", "evidence", "assumptions",
+        "alternatives", "prediction", "confidence", "expected_outcome",
+        "review_date", "actual_outcome", "resolved_at", "created_at",
+    ),
+    "learned": ("text", "subject", "kind", "source", "confidence", "status", "created_at"),
+    "works": ("title", "description", "status", "data", "created_at", "updated_at"),
+    "profiles": ("name", "data", "created_at", "updated_at"),
+    "mood_history": ("mood", "score", "cues", "trajectory", "session", "created_at"),
+    "feedback": ("message_id", "session", "kind", "note", "applied", "created_at"),
+}
+
+# Natural keys used to bind "the same row created independently on both
+# sides" instead of duplicating it (notes learned on both devices, todos
+# added offline on both, ...). Empty = always insert a fresh row.
+_SYNC_ADOPT: dict[str, tuple[str, ...]] = {
+    "messages": ("session", "role", "created_at", "content"),
+    "settings": ("key",),
+    "todos": ("text", "origin"),
+    "reminders": ("text", "due_at"),
+    "notes": ("body",),
+    "facts": ("text",),
+    "episodes": ("title", "occurred_at"),
+    "patterns": ("name",),
+    "rules": ("text",),
+    "decisions": ("topic", "decision"),
+    "learned": ("text", "kind"),
+    "works": ("title",),
+    "profiles": ("name",),
+    "mood_history": (),
+    "feedback": (),
+}
+
+# Same second-precision UTC format as now(): triggers and Python must agree
+# or last-write-wins comparisons would silently break.
+_SYNC_TS_SQL = "strftime('%Y-%m-%dT%H:%M:%S+00:00','now')"
+_SYNC_ORIGIN_SQL = (
+    "COALESCE((SELECT value FROM settings WHERE key='sync.device_id'),'unknown')"
+)
+
+_SYNC_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS sync_log (
+    id      INTEGER PRIMARY KEY,
+    origin  TEXT NOT NULL,
+    tbl     TEXT NOT NULL,
+    op      TEXT NOT NULL,
+    row_key TEXT NOT NULL,
+    ts      TEXT NOT NULL,
+    payload TEXT
+);
+CREATE TABLE IF NOT EXISTS sync_map (
+    row_key  TEXT PRIMARY KEY,
+    tbl      TEXT NOT NULL,
+    local_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_tomb (
+    row_key TEXT PRIMARY KEY,
+    ts      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_state (
+    peer     TEXT PRIMARY KEY,
+    peer_id  TEXT,
+    sent_upto INTEGER NOT NULL DEFAULT 0,
+    recv_upto INTEGER NOT NULL DEFAULT 0,
+    last_at  TEXT,
+    last_error TEXT,
+    processed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_hold (
+    id INTEGER PRIMARY KEY CHECK (id = 1)
+);
+"""
+
+
+def _build_sync_triggers() -> str:
+    """One INSERT/UPDATE/DELETE trigger triplet per synced table.
+
+    Built from SYNCED_TABLES so adding a table to the dict is the whole
+    change. The WHEN clause skips fires while sync_hold is set (remote rows
+    being applied are re-logged with the peer's origin by the applier).
+    """
+    parts: list[str] = []
+    guard = "WHEN NOT EXISTS (SELECT 1 FROM sync_hold)"
+    for tbl, cols in SYNCED_TABLES.items():
+        if tbl == "settings":
+            new_key = "'settings:' || new.key"
+            old_key = "'settings:' || old.key"
+            # sync.* is this instance's private identity/config (device id,
+            # key, peer list): syncing it would let a peer overwrite ours.
+            guard_ins = f"{guard} AND new.key NOT LIKE 'sync.%'"
+            guard_upd = f"{guard} AND new.key NOT LIKE 'sync.%'"
+            guard_del = f"{guard} AND old.key NOT LIKE 'sync.%'"
+        else:
+            new_key = f"{_SYNC_ORIGIN_SQL} || ':{tbl}:' || new.id"
+            old_key = f"{_SYNC_ORIGIN_SQL} || ':{tbl}:' || old.id"
+            guard_ins = guard
+            guard_upd = guard
+            guard_del = guard
+        obj = ", ".join(f"'{c}', new.{c}" for c in cols)
+        obj_old = ", ".join(f"'{c}', old.{c}" for c in cols)
+        if tbl == "feedback":
+            msg_key = (
+                ", 'message_key', (SELECT row_key FROM sync_map"
+                " WHERE tbl='messages' AND local_id=new.message_id)"
+            )
+        else:
+            msg_key = ""
+        parts.append(
+            f"""
+CREATE TRIGGER IF NOT EXISTS sync_{tbl}_ins AFTER INSERT ON {tbl}
+{guard_ins}
+BEGIN
+    INSERT INTO sync_log(origin, tbl, op, row_key, ts, payload)
+    VALUES ({_SYNC_ORIGIN_SQL}, '{tbl}', 'upsert', {new_key}, {_SYNC_TS_SQL},
+            json_object({obj}{msg_key}));
+    DELETE FROM sync_tomb WHERE row_key = {new_key};
+END;
+CREATE TRIGGER IF NOT EXISTS sync_{tbl}_upd AFTER UPDATE ON {tbl}
+{guard_upd}
+BEGIN
+    INSERT INTO sync_log(origin, tbl, op, row_key, ts, payload)
+    VALUES ({_SYNC_ORIGIN_SQL}, '{tbl}', 'upsert', {new_key}, {_SYNC_TS_SQL},
+            json_object({obj}{msg_key}));
+    DELETE FROM sync_tomb WHERE row_key = {new_key};
+END;
+CREATE TRIGGER IF NOT EXISTS sync_{tbl}_del AFTER DELETE ON {tbl}
+{guard_del}
+BEGIN
+    INSERT INTO sync_log(origin, tbl, op, row_key, ts, payload)
+    VALUES ({_SYNC_ORIGIN_SQL}, '{tbl}', 'delete', {old_key}, {_SYNC_TS_SQL},
+            NULL);
+    INSERT INTO sync_tomb(row_key, ts) VALUES ({old_key}, {_SYNC_TS_SQL})
+    ON CONFLICT(row_key) DO UPDATE SET ts = excluded.ts;
+    DELETE FROM sync_map WHERE row_key = {old_key};
+END;"""
+        )
+    return "\n".join(parts)
+
+
+SYNC_TRIGGERS_SQL = _build_sync_triggers()
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -465,6 +632,29 @@ def init_db() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
+    conn.commit()
+    conn.executescript(_SYNC_TABLES_SQL)
+    conn.executescript(SYNC_TRIGGERS_SQL)
+    _ensure_sync_identity(conn)
+
+
+def _ensure_sync_identity(conn: sqlite3.Connection) -> None:
+    """Mint this instance's device id and sync key once, at init time.
+
+    The id is the `origin` stamped on every outgoing change; the key is the
+    shared secret both sides of a pairing must present (``X-Sync-Key``).
+    """
+    import secrets as _secrets
+    import uuid as _uuid
+
+    conn.execute(
+        "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('sync.device_id', ?, ?)",
+        (_uuid.uuid4().hex[:12], now()),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('sync.secret', ?, ?)",
+        (_secrets.token_hex(16), now()),
+    )
     conn.commit()
 
 
@@ -2134,9 +2324,12 @@ def export_data() -> dict[str, Any]:
         tables[t] = [dict(r) for r in rows]
     # API keys (settings under `provider.*`) are deliberately excluded: a
     # backup may be shared or stored elsewhere, and a key is not memory.
+    # `sync.*` settings are the per-instance sync identity and pairing
+    # config - they must never travel in a file either.
     if "settings" in tables:
         tables["settings"] = [
-            r for r in tables["settings"] if not str(r.get("key", "")).startswith("provider.")
+            r for r in tables["settings"]
+            if not str(r.get("key", "")).startswith(("provider.", "sync."))
         ]
     return {
         "app": "atif-assistant",
@@ -2429,7 +2622,7 @@ def import_data(payload: dict[str, Any]) -> dict[str, int]:
         key, value = s.get("key"), s.get("value")
         if key is None or value is None:
             continue
-        if str(key).startswith("provider."):
+        if str(key).startswith(("provider.", "sync.")):
             continue
         if get_setting(str(key)) is not None:
             continue
@@ -2599,3 +2792,518 @@ def update_decision(decision_id: int, topic: str | None = None, decision: str | 
     cur = conn.execute(f"UPDATE decisions SET {', '.join(fields)} WHERE id=?", (*params,))
     conn.commit()
     return cur.rowcount > 0
+
+
+# ------------------------------------------------------------- sync engine
+# Exchange of sync_log rows between paired instances. The wire format is one
+# flat row: {id, origin, tbl, op, row_key, ts, payload}. Deletions travel as
+# op="delete" with no payload; upserts carry the full column payload.
+
+
+def sync_device_id() -> str:
+    """This instance's origin id (minted once by init_db)."""
+    conn = connect()
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key='sync.device_id'"
+    ).fetchone()
+    if not row:
+        _ensure_sync_identity(conn)
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='sync.device_id'"
+        ).fetchone()
+    return str(row["value"]) if row else "unknown"
+
+
+def sync_secret() -> str:
+    """Shared pairing key presented by peers as X-Sync-Key."""
+    conn = connect()
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key='sync.secret'"
+    ).fetchone()
+    if not row:
+        _ensure_sync_identity(conn)
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='sync.secret'"
+        ).fetchone()
+    return str(row["value"]) if row else ""
+
+
+def _sync_load_rows(rows: sqlite3.Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        item: dict[str, Any] = {
+            "id": int(r["id"]),
+            "origin": r["origin"],
+            "tbl": r["tbl"],
+            "op": r["op"],
+            "row_key": r["row_key"],
+            "ts": r["ts"],
+        }
+        if r["payload"]:
+            try:
+                item["payload"] = json.loads(r["payload"])
+            except (TypeError, ValueError):
+                item["payload"] = None
+        else:
+            item["payload"] = None
+        out.append(item)
+    return out
+
+
+def sync_outbox(peer_id: str | None, sent_upto: int, limit: int = 500) -> dict[str, Any]:
+    """Our changes a peer has not received: rows they did not write themselves."""
+    conn = connect()
+    if peer_id:
+        rows = conn.execute(
+            """SELECT id, origin, tbl, op, row_key, ts, payload FROM sync_log
+               WHERE id > ? AND origin != ? ORDER BY id LIMIT ?""",
+            (int(sent_upto), peer_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, origin, tbl, op, row_key, ts, payload FROM sync_log
+               WHERE id > ? ORDER BY id LIMIT ?""",
+            (int(sent_upto), limit),
+        ).fetchall()
+    items = _sync_load_rows(rows)
+    upto = items[-1]["id"] if items else int(sent_upto)
+    return {"rows": items, "upto": upto, "full": len(items) >= limit}
+
+
+def sync_inbox_rows(since: int, my_id: str, limit: int = 500) -> dict[str, Any]:
+    """Rows for a peer polling us: everything after their cursor except rows
+    whose last writer was themselves (their own changes bounced back)."""
+    conn = connect()
+    rows = conn.execute(
+        """SELECT id, origin, tbl, op, row_key, ts, payload FROM sync_log
+           WHERE id > ? ORDER BY id LIMIT ?""",
+        (int(since), limit),
+    ).fetchall()
+    items = [r for r in _sync_load_rows(rows) if r["origin"] != my_id]
+    next_cursor = int(rows[-1]["id"]) if rows else int(since)
+    return {"rows": items, "next": next_cursor, "more": len(rows) >= limit}
+
+
+def _sync_latest_ts(conn: sqlite3.Connection, row_key: str) -> str | None:
+    row = conn.execute(
+        "SELECT ts FROM sync_log WHERE row_key=? ORDER BY id DESC LIMIT 1",
+        (row_key,),
+    ).fetchone()
+    return str(row["ts"]) if row else None
+
+
+def _sync_local_id(
+    conn: sqlite3.Connection, tbl: str, row_key: str, my_id: str
+) -> int | str | None:
+    """Local row a wire row_key refers to, or None if we do not have it."""
+    if tbl == "settings":
+        key = row_key[len("settings:"):] if row_key.startswith("settings:") else ""
+        if key and conn.execute(
+            "SELECT 1 FROM settings WHERE key=?", (key,)
+        ).fetchone():
+            return key
+        return None
+    parts = row_key.split(":")
+    if len(parts) == 3 and parts[0] == my_id:
+        try:
+            lid = int(parts[2])
+        except ValueError:
+            return None
+        hit = conn.execute(f"SELECT 1 FROM {tbl} WHERE id=?", (lid,)).fetchone()
+        return lid if hit else None
+    hit = conn.execute(
+        "SELECT local_id FROM sync_map WHERE row_key=? AND tbl=?",
+        (row_key, tbl),
+    ).fetchone()
+    if not hit:
+        return None
+    lid = int(hit["local_id"])
+    exists = conn.execute(f"SELECT 1 FROM {tbl} WHERE id=?", (lid,)).fetchone()
+    if exists:
+        return lid
+    conn.execute("DELETE FROM sync_map WHERE row_key=?", (row_key,))
+    return None
+
+
+def _sync_adopt_id(
+    conn: sqlite3.Connection, tbl: str, payload: dict[str, Any]
+) -> int | str | None:
+    """Bind to an equivalent row created independently here (no duplication)."""
+    if tbl == "settings":
+        return None
+    cols = _SYNC_ADOPT.get(tbl) or ()
+    if not cols:
+        return None
+    where = " AND ".join(f"{c} IS ?" for c in cols)
+    vals = [payload.get(c) for c in cols]
+    hit = conn.execute(
+        f"SELECT id FROM {tbl} WHERE {where} LIMIT 1", vals
+    ).fetchone()
+    return int(hit["id"]) if hit else None
+
+
+def _sync_local_ts(
+    conn: sqlite3.Connection,
+    tbl: str,
+    local_id: int | str,
+    row_key: str,
+    my_id: str,
+) -> str | None:
+    """Timestamp of our current version of a row, for last-write-wins.
+
+    Three sources, max wins: the row's own updated_at/created_at (same UTC
+    format as sync ts), the log entry for our own origin-qualified key (a
+    local edit after binding), and the log entry for the incoming key (a
+    previous apply of that peer's row).
+    """
+    cols = SYNCED_TABLES.get(tbl, ())
+    own_key = (
+        row_key
+        if tbl == "settings"
+        else f"{my_id}:{tbl}:{local_id}"
+    )
+    cands: list[str] = []
+    if tbl == "settings":
+        hit = conn.execute(
+            "SELECT updated_at FROM settings WHERE key=?", (local_id,)
+        ).fetchone()
+        if hit:
+            cands.append(str(hit["updated_at"]))
+    else:
+        col = "updated_at" if "updated_at" in cols else (
+            "created_at" if "created_at" in cols else None
+        )
+        if col:
+            hit = conn.execute(
+                f"SELECT {col} FROM {tbl} WHERE id=?", (local_id,)
+            ).fetchone()
+            if hit:
+                cands.append(str(hit[col]))
+    for k in (own_key, row_key):
+        ts = _sync_latest_ts(conn, k)
+        if ts:
+            cands.append(ts)
+    return max(cands) if cands else None
+
+
+def _sync_touch_fts(
+    conn: sqlite3.Connection,
+    tbl: str,
+    local_id: int | str,
+    payload: dict[str, Any] | None,
+    deleted: bool = False,
+) -> None:
+    """Keep memory search indexes true for rows a peer wrote (their Python
+    helpers never ran here)."""
+    kinds = {
+        "facts": "fact",
+        "episodes": "episode",
+        "patterns": "pattern",
+        "rules": "rule",
+        "learned": "learned",
+    }
+    if deleted:
+        kind = kinds.get(tbl)
+        if kind:
+            conn.execute(
+                "DELETE FROM memory_fts WHERE kind=? AND ref_id=?", (kind, local_id)
+            )
+        if tbl == "facts":
+            conn.execute("DELETE FROM claims_fts WHERE fact_id=?", (local_id,))
+        return
+    if payload is None:
+        return
+    if tbl == "facts":
+        text = str(payload.get("text") or "")
+        _fts_index("fact", int(local_id), text[:80], text)
+        _index_claim(int(local_id), text)
+    elif tbl == "episodes":
+        title = str(payload.get("title") or "")
+        summary = str(payload.get("summary") or "")
+        _fts_index("episode", int(local_id), title[:80], f"{title} {summary}")
+    elif tbl == "patterns":
+        name = str(payload.get("name") or "")
+        body = " ".join(
+            filter(
+                None,
+                [
+                    payload.get("trigger"),
+                    payload.get("observed"),
+                    payload.get("effect"),
+                ],
+            )
+        )
+        _fts_index("pattern", int(local_id), name[:80], body)
+    elif tbl == "rules":
+        code = payload.get("code")
+        text = str(payload.get("text") or "")
+        _fts_index("rule", int(local_id), code or "rule", text)
+    elif tbl == "learned":
+        text = str(payload.get("text") or "")
+        _fts_index("learned", int(local_id), text[:80], text)
+
+
+def _sync_relog(
+    conn: sqlite3.Connection,
+    origin: str,
+    tbl: str,
+    op: str,
+    row_key: str,
+    ts: str,
+    payload: dict[str, Any] | None,
+) -> None:
+    """Record a peer's change in our own log so a third instance receives it
+    (multi-instance fan-out) and our own poller cursor stays honest."""
+    conn.execute(
+        "INSERT INTO sync_log(origin, tbl, op, row_key, ts, payload)"
+        " VALUES (?,?,?,?,?,?)",
+        (
+            origin,
+            tbl,
+            op,
+            row_key,
+            ts,
+            json.dumps(payload) if payload is not None else None,
+        ),
+    )
+
+
+def _sync_resolve_message_id(
+    conn: sqlite3.Connection, payload: dict[str, Any], peer_id: str, my_id: str
+) -> int | None:
+    """feedback.message_id in the peer's id space -> ours, or None to drop."""
+    mid = payload.get("message_id")
+    if mid is None:
+        return None
+    try:
+        mid_i = int(mid)
+    except (TypeError, ValueError):
+        return None
+    key = payload.get("message_key")
+    if isinstance(key, str) and key:
+        local = _sync_local_id(conn, "messages", key, my_id)
+        if local is not None:
+            return int(local)
+    local = _sync_local_id(conn, "messages", f"{peer_id}:messages:{mid_i}", my_id)
+    if local is not None:
+        return int(local)
+    return None
+
+
+def sync_apply_rows(peer_id: str, rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Merge a peer's changes. Last-write-wins, tombstones beat stale rows,
+    equivalent rows bind instead of duplicating. Never raises per row; the
+    caller's retry (no ack on failure) makes anything dropped come back."""
+    conn = connect()
+    my_id = sync_device_id()
+    counts = {"applied": 0, "skipped": 0, "dropped": 0}
+    conn.execute("INSERT OR IGNORE INTO sync_hold(id) VALUES (1)")
+    try:
+        for raw in rows:
+            try:
+                if not isinstance(raw, dict):
+                    counts["dropped"] += 1
+                    continue
+                tbl = raw.get("tbl")
+                op = raw.get("op")
+                key = raw.get("row_key") or ""
+                ts = raw.get("ts") or ""
+                if (
+                    tbl not in SYNCED_TABLES
+                    or op not in ("upsert", "delete")
+                    or not key
+                    or not isinstance(ts, str)
+                    or not ts
+                ):
+                    counts["dropped"] += 1
+                    continue
+                if tbl == "settings" and str(key).startswith("settings:sync."):
+                    counts["dropped"] += 1
+                    continue
+                tomb = conn.execute(
+                    "SELECT ts FROM sync_tomb WHERE row_key=?", (key,)
+                ).fetchone()
+                if tomb and str(tomb["ts"]) > ts:
+                    # Our deletion is newer than the row they still hold.
+                    counts["skipped"] += 1
+                    continue
+                if op == "delete":
+                    local = _sync_local_id(conn, tbl, key, my_id)
+                    if local is not None:
+                        if tbl == "settings":
+                            conn.execute(
+                                "DELETE FROM settings WHERE key=?", (local,)
+                            )
+                        else:
+                            conn.execute(f"DELETE FROM {tbl} WHERE id=?", (local,))
+                        _sync_touch_fts(conn, tbl, local, None, deleted=True)
+                    conn.execute(
+                        "INSERT INTO sync_tomb(row_key, ts) VALUES (?,?)"
+                        " ON CONFLICT(row_key) DO UPDATE SET ts = excluded.ts",
+                        (key, ts),
+                    )
+                    if tbl != "settings":
+                        conn.execute(
+                            "DELETE FROM sync_map WHERE row_key=?", (key,)
+                        )
+                    _sync_relog(conn, peer_id, tbl, "delete", key, ts, None)
+                    counts["applied"] += 1
+                    continue
+                payload = raw.get("payload")
+                if not isinstance(payload, dict):
+                    counts["dropped"] += 1
+                    continue
+                if tbl == "settings" and str(payload.get("key", "")).startswith(
+                    "sync."
+                ):
+                    counts["dropped"] += 1
+                    continue
+                cols = [c for c in SYNCED_TABLES[tbl] if c in payload]
+                if not cols:
+                    counts["dropped"] += 1
+                    continue
+                if tbl == "feedback":
+                    new_mid = _sync_resolve_message_id(conn, payload, peer_id, my_id)
+                    if new_mid is None:
+                        counts["dropped"] += 1
+                        continue
+                    payload = dict(payload)
+                    payload["message_id"] = new_mid
+                local = _sync_local_id(conn, tbl, key, my_id)
+                if local is None:
+                    adopted = _sync_adopt_id(conn, tbl, payload)
+                    if adopted is not None:
+                        local = adopted
+                        conn.execute(
+                            "INSERT OR REPLACE INTO sync_map(row_key, tbl, local_id)"
+                            " VALUES (?,?,?)",
+                            (key, tbl, int(adopted)),
+                        )
+                if local is None:
+                    if tbl == "settings":
+                        conn.execute(
+                            "INSERT INTO settings(key, value, updated_at)"
+                            " VALUES (?,?,?)",
+                            (
+                                payload.get("key"),
+                                payload.get("value"),
+                                payload.get("updated_at") or ts,
+                            ),
+                        )
+                        local = str(payload.get("key"))
+                    else:
+                        marks = ",".join("?" for _ in cols)
+                        cur = conn.execute(
+                            f"INSERT INTO {tbl}({','.join(cols)}) VALUES ({marks})",
+                            [payload.get(c) for c in cols],
+                        )
+                        local = int(cur.lastrowid)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO sync_map(row_key, tbl, local_id)"
+                            " VALUES (?,?,?)",
+                            (key, tbl, local),
+                        )
+                    _sync_touch_fts(conn, tbl, local, payload)
+                    _sync_relog(conn, peer_id, tbl, "upsert", key, ts, payload)
+                    counts["applied"] += 1
+                    continue
+                local_ts = _sync_local_ts(conn, tbl, local, key, my_id)
+                if local_ts is not None:
+                    if local_ts > ts:
+                        counts["skipped"] += 1
+                        continue
+                    if local_ts == ts and not (peer_id > my_id):
+                        counts["skipped"] += 1
+                        continue
+                if tbl == "settings":
+                    sets = [c for c in cols if c != "key"]
+                    if sets:
+                        conn.execute(
+                            f"UPDATE settings SET {','.join(f'{c}=?' for c in sets)}"
+                            " WHERE key=?",
+                            [payload.get(c) for c in sets] + [local],
+                        )
+                else:
+                    conn.execute(
+                        f"UPDATE {tbl} SET {','.join(f'{c}=?' for c in cols)}"
+                        " WHERE id=?",
+                        [payload.get(c) for c in cols] + [local],
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO sync_map(row_key, tbl, local_id)"
+                        " VALUES (?,?,?)",
+                        (key, tbl, int(local)),
+                    )
+                _sync_touch_fts(conn, tbl, local, payload)
+                _sync_relog(conn, peer_id, tbl, "upsert", key, ts, payload)
+                counts["applied"] += 1
+            except Exception:  # noqa: BLE001 - one bad row never blocks the batch
+                counts["dropped"] += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("DELETE FROM sync_hold")
+        conn.commit()
+    return counts
+
+
+def sync_log_len() -> int:
+    conn = connect()
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) n FROM sync_log").fetchone()
+    return int(row["n"]) if row else 0
+
+
+def sync_state_get(peer: str) -> dict[str, Any]:
+    conn = connect()
+    hit = conn.execute("SELECT * FROM sync_state WHERE peer=?", (peer,)).fetchone()
+    if hit:
+        return dict(hit)
+    return {
+        "peer": peer,
+        "peer_id": None,
+        "sent_upto": 0,
+        "recv_upto": 0,
+        "last_at": None,
+        "last_error": None,
+        "processed": 0,
+    }
+
+
+def sync_state_save(peer: str, **fields: Any) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT OR IGNORE INTO sync_state(peer, sent_upto, recv_upto, processed)"
+        " VALUES (?, 0, 0, 0)",
+        (peer,),
+    )
+    allowed = {"peer_id", "sent_upto", "recv_upto", "last_at", "last_error", "processed"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if sets:
+        conn.execute(
+            f"UPDATE sync_state SET {','.join(f'{k}=?' for k in sets)}"
+            " WHERE peer=?",
+            [*sets.values(), peer],
+        )
+    conn.commit()
+
+
+def sync_states() -> list[dict[str, Any]]:
+    conn = connect()
+    return [dict(r) for r in conn.execute("SELECT * FROM sync_state").fetchall()]
+
+
+def sync_pending(sent_upto: int, peer_id: str | None) -> int:
+    """Rows in our outbox this peer has not acknowledged."""
+    conn = connect()
+    if peer_id:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM sync_log WHERE id > ? AND origin != ?",
+            (int(sent_upto), peer_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM sync_log WHERE id > ?", (int(sent_upto),)
+        ).fetchone()
+    return int(row["c"]) if row else 0

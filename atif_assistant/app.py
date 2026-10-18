@@ -28,7 +28,7 @@ from starlette.background import BackgroundTask
 
 from . import (
     applog, constitution, db, engine, learn, llm, location, ollama, pipeline, plan,
-    reflection, router, stt, style, tts, uploads, voice_id,
+    reflection, router, stt, style, sync, tts, uploads, voice_id,
 )
 from .config import DATA_DIR, DB_PATH, PROVIDER_LABELS, PROVIDER_ORDER, TAILSCALE_HOST, WEB_DIR
 from .importers import whatsapp
@@ -89,6 +89,10 @@ async def web_password_gate(request: Request, call_next):
     """
     expected = os.environ.get("ATIF_ASSISTANT_WEB_PASSWORD", "")
     if not expected:
+        return await call_next(request)
+    # Peer sync authenticates with the shared X-Sync-Key instead (a browser
+    # would never have it, so this is not a way around the gate).
+    if request.url.path == "/api/sync/swap":
         return await call_next(request)
     header = request.headers.get("authorization", "")
     if header.startswith("Basic "):
@@ -198,6 +202,7 @@ def _startup() -> None:
     # and not already running, so offline chat works without a terminal.
     ollama.ensure_autostart()
     _resume_partial_downloads()
+    sync.ensure_worker()
     return None
 
 
@@ -423,6 +428,40 @@ def download_tts_voice(payload: dict | None = None) -> JSONResponse:
         return JSONResponse(result)
     db.set_setting("models.auto_resume", "on")
     return JSONResponse(tts.tts_download_start())
+
+
+@app.get("/api/sync")
+def sync_status() -> dict:
+    """Identity, pairing key, peers and reachability for the SYNC card."""
+    return sync.status()
+
+
+@app.post("/api/sync/config")
+def sync_config(payload: dict | None = None) -> dict:
+    """Enable auto-sync, add/remove a peer URL, or rotate the shared key."""
+    return sync.configure(payload or {})
+
+
+@app.post("/api/sync/now")
+def sync_now() -> dict:
+    """Wake the worker for an immediate cycle (status catches up after it)."""
+    sync.notify()
+    return sync.status()
+
+
+@app.post("/api/sync/swap")
+def sync_swap(request: Request, payload: dict | None = None) -> JSONResponse:
+    """Paired-instance endpoint: apply their rows, hand back ours.
+
+    Authenticated by the shared key (``X-Sync-Key``), never by the optional
+    browser password - a peer has no browser to prompt it.
+    """
+    if not sync.key_ok(request.headers.get("x-sync-key", "")):
+        return JSONResponse({"error": "bad sync key"}, status_code=403)
+    try:
+        return JSONResponse(sync.handle_swap(payload or {}))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.post("/api/stt")
@@ -806,6 +845,9 @@ def _finalize_ask(
             result["text"],
             result.get("provider", "offline"),
         )
+    # Two new rows just landed in messages - tell the sync worker so paired
+    # devices see this answer in seconds, not at the next interval tick.
+    sync.notify()
     return result
 
 
@@ -2000,7 +2042,7 @@ def import_backup(payload: dict) -> JSONResponse:
     """Restore a backup add-only. Never deletes or overwrites existing rows."""
     if payload.get("app") and payload.get("app") != "atif-assistant":
         return JSONResponse({"error": "not an Atif Assistant backup"}, status_code=400)
-    if not isinstance(payload.get("tables"), dict):
+    if not isinstance(payload.get("tables"), dict) or not payload.get("tables"):
         return JSONResponse({"error": "missing tables"}, status_code=400)
     added = db.import_data(payload)
     return JSONResponse({"ok": True, "added": added})

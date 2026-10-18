@@ -34,6 +34,19 @@ fi
 PORT="${ATIF_ASSISTANT_PORT:-8770}"
 BIND="${ATIF_ASSISTANT_HOST:-127.0.0.1}"
 
+# ATIF_ASSISTANT_BIND=lan binds every interface so other devices on the same
+# network (phone, tablet) can reach this server as a sync peer. A loopback
+# server still syncs OUT to peers, but nobody can pair with it inbound - the
+# SYNC card shows this state and tells the user what to do.
+if [ "${ATIF_ASSISTANT_BIND:-}" = "lan" ]; then
+  BIND="0.0.0.0"
+  LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+  echo "Atif Assistant  ->  http://0.0.0.0:${PORT}   (LAN: other devices can pair for sync)"
+  if [ -n "$LAN_IP" ]; then
+    echo "          other devices:  http://${LAN_IP}:${PORT}"
+  fi
+fi
+
 # ATIF_ASSISTANT_BIND=tailnet binds to this machine's Tailscale IP instead of loopback,
 # so the app is reachable from your phone without opening anything to the
 # internet. If the IP is not bindable it falls back to loopback and says so,

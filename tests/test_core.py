@@ -2954,7 +2954,15 @@ def test_extended_api() -> None:
         db.init_db()
         client = TestClient(app)
 
-        check("settings start empty", client.get("/api/settings").json() == {})
+        user_settings = {
+            k: v for k, v in client.get("/api/settings").json().items()
+            if not str(k).startswith("sync.")
+        }
+        check("settings start empty", user_settings == {})
+        check(
+            "server identity is seeded at init",
+            {"sync.device_id", "sync.secret"} <= set(client.get("/api/settings").json()),
+        )
         client.post("/api/settings", json={"theme": "dark", "skip": None})
         got = client.get("/api/settings").json()
         check("settings round-trip", got.get("theme") == "dark")
@@ -3202,10 +3210,290 @@ def test_backup() -> None:
         )
         check(
             "a file without tables is rejected",
-            client.post("/api/import", json={"app": "atif-assistant"}).status_code == 400,
+            client.post("/api/import", json={"app": "atif-assistant", "tables": {}}).status_code == 400,
         )
 
     db.reset_db_path()
+
+
+def test_sync() -> None:
+    """v1.4.0: paired instances converge - chats, todos, settings (API keys
+    included) flow both ways; deletes stick; no echo of a peer's own rows;
+    the shared key gates every swap."""
+    from fastapi.testclient import TestClient
+
+    from atif_assistant import db
+    from atif_assistant.app import app
+
+    print("\nsync (cross-instance convergence)")
+    with tempfile.TemporaryDirectory() as tmp:
+        c = TestClient(app)
+        try:
+            # ---- instance A seeds chat, settings, a todo, feedback
+            db.use_test_db(Path(tmp) / "a.db")
+            db.init_db()
+            db.save_message("sessSYNCAAA01", "user", "hello from A")
+            db.save_message("sessSYNCAAA01", "assistant", "A replies")
+            db.save_message("sessSYNCAAA01", "assistant", "second A line")
+            db.set_setting("lang", "ur")
+            db.set_setting("provider.gemini.api_key", "KEY-A")
+            db.add_todo("call from A", origin="manual")
+            aid = db.sync_device_id()
+            akey = db.sync_secret()
+            mid_a = db.connect().execute(
+                "SELECT id FROM messages WHERE session=? ORDER BY id DESC LIMIT 1",
+                ("sessSYNCAAA01",),
+            ).fetchone()[0]
+            db.save_feedback("up", message_id=mid_a, session="sessSYNCAAA01")
+
+            st = c.get("/api/sync").json()
+            check(
+                "status carries this instance identity",
+                st["device_id"] == aid and len(st["secret"]) >= 32,
+            )
+            check(
+                "status exposes pairing fields",
+                all(
+                    k in st
+                    for k in (
+                        "enabled", "peers", "reachable", "lan_urls", "hint",
+                        "host", "port", "last", "log", "interval", "secret",
+                    )
+                ),
+            )
+            check(
+                "loopback server explains the bind flag",
+                st["hint"] is None or "sync" in st["hint"].lower(),
+            )
+
+            empty = {"device_id": "peerB", "since": 0, "rows": []}
+            check(
+                "swap without the key is rejected",
+                c.post("/api/sync/swap", json=empty).status_code == 403,
+            )
+            check(
+                "swap with a wrong key is rejected",
+                c.post("/api/sync/swap", json=empty, headers={"X-Sync-Key": "nope"}).status_code == 403,
+            )
+            first = c.post("/api/sync/swap", json=empty, headers={"X-Sync-Key": akey})
+            check("swap with the right key succeeds", first.status_code == 200)
+            a_out = first.json()
+            check("A hands over chat + settings + todo", len(a_out["rows"]) >= 6)
+            check("swap announces A's own device id", a_out["peer"] == aid)
+            keys = [r["row_key"] for r in a_out["rows"]]
+            check("provider API key travels", "settings:provider.gemini.api_key" in keys)
+            check(
+                "identity settings never travel",
+                not any(k.startswith("settings:sync.") for k in keys),
+            )
+
+            # ---- instance B applies what A offered
+            db.use_test_db(Path(tmp) / "b.db")
+            db.init_db()
+            bid = db.sync_device_id()
+            bkey = db.sync_secret()
+            counts = db.sync_apply_rows(aid, a_out["rows"])
+            check("B applies A's rows", counts["applied"] >= 6)
+            check(
+                "B sees A's conversation",
+                [m["content"] for m in db.history("sessSYNCAAA01", limit=5)]
+                == ["hello from A", "A replies", "second A line"],
+            )
+            check("B adopted A's language", db.get_setting("lang") == "ur")
+            check("B adopted A's API key", db.get_setting("provider.gemini.api_key") == "KEY-A")
+            check("B has A's todo", any(t["text"] == "call from A" for t in db.list_todos()))
+            check(
+                "B keeps its own identity",
+                db.sync_device_id() == bid and db.sync_secret() == bkey,
+            )
+            b_mid = db.connect().execute(
+                "SELECT id FROM messages WHERE session=? ORDER BY id DESC LIMIT 1",
+                ("sessSYNCAAA01",),
+            ).fetchone()[0]
+            check(
+                "feedback remapped onto B's own message id",
+                any(
+                    f.get("session") == "sessSYNCAAA01" and f.get("message_id") == b_mid
+                    for f in db.list_feedback()
+                ),
+            )
+
+            # ---- B writes; A receives through the live endpoint
+            db.save_message("sessSYNCBBB02", "user", "hello from B")
+            b_out = db.sync_outbox(aid, 0)
+            db.use_test_db(Path(tmp) / "a.db")
+            push = c.post(
+                "/api/sync/swap",
+                json={"device_id": bid, "since": a_out["next"], "rows": b_out["rows"]},
+                headers={"X-Sync-Key": akey},
+            )
+            j = push.json()
+            check(
+                "A processed every row B pushed",
+                j["processed"] == len(b_out["rows"]) and j["applied"] == len(b_out["rows"]),
+            )
+            check(
+                "A gained B's conversation",
+                any(s["session"] == "sessSYNCBBB02" for s in db.list_sessions(20)),
+            )
+            check(
+                "A never echoes rows B wrote",
+                all(r["origin"] != bid for r in j["rows"]),
+            )
+            inbox = db.sync_inbox_rows(0, bid)
+            check(
+                "A's inbox excludes the requester's own origin",
+                all(r["origin"] != bid for r in inbox["rows"]),
+            )
+            check(
+                "A's inbox includes A's own rows",
+                any(r["origin"] == aid for r in inbox["rows"]),
+            )
+
+            # ---- last-write-wins: newer remote edit wins, stale one loses
+            tod_row = db.connect().execute(
+                "SELECT * FROM todos WHERE text='call from A'"
+            ).fetchone()
+            future = dict(tod_row)
+            future["done"] = 1
+            future["updated_at"] = "2999-01-01T00:00:00+00:00"
+            apply_new = db.sync_apply_rows(
+                bid,
+                [{
+                    "origin": bid, "tbl": "todos", "op": "upsert",
+                    "row_key": f"{bid}:todos:{tod_row['id']}",
+                    "ts": future["updated_at"], "payload": future,
+                }],
+            )
+            check(
+                "a newer remote edit wins",
+                apply_new["applied"] == 1
+                and any(t["text"] == "call from A" and t.get("done") for t in db.list_todos()),
+            )
+            stale = dict(tod_row)
+            stale["done"] = 0
+            stale["updated_at"] = "2000-01-01T00:00:00+00:00"
+            apply_old = db.sync_apply_rows(
+                bid,
+                [{
+                    "origin": bid, "tbl": "todos", "op": "upsert",
+                    "row_key": f"{bid}:todos:{tod_row['id']}",
+                    "ts": stale["updated_at"], "payload": stale,
+                }],
+            )
+            check(
+                "a stale remote edit loses",
+                apply_old["applied"] == 0
+                and any(t["text"] == "call from A" and t.get("done") for t in db.list_todos()),
+            )
+
+            # ---- deletions travel; stale data cannot resurrect them
+            db.add_todo("temp task", origin="manual")
+            temp_id = db.connect().execute(
+                "SELECT id FROM todos WHERE text='temp task'"
+            ).fetchone()[0]
+            fresh = db.sync_outbox(None, 0)
+            db.use_test_db(Path(tmp) / "b.db")
+            db.sync_apply_rows(aid, fresh["rows"])
+            check(
+                "B received the fresh todo",
+                any(t["text"] == "temp task" for t in db.list_todos()),
+            )
+            db.use_test_db(Path(tmp) / "a.db")
+            db.delete_todo(temp_id)
+            gone = db.sync_outbox(None, 0)
+            db.use_test_db(Path(tmp) / "b.db")
+            db.sync_apply_rows(aid, gone["rows"])
+            check(
+                "the delete travels to B",
+                not any(t["text"] == "temp task" for t in db.list_todos()),
+            )
+            res = db.sync_apply_rows(
+                aid,
+                [{
+                    "origin": aid, "tbl": "todos", "op": "upsert",
+                    "row_key": f"{aid}:todos:{temp_id}",
+                    "ts": "2000-01-01T00:00:00+00:00",
+                    "payload": {
+                        "text": "temp task", "origin": "manual",
+                        "created_at": "2000-01-01T00:00:00+00:00",
+                        "updated_at": "2000-01-01T00:00:00+00:00",
+                    },
+                }],
+            )
+            check(
+                "a stale row cannot resurrect a delete",
+                res["applied"] == 0
+                and not any(t["text"] == "temp task" for t in db.list_todos()),
+            )
+            check(
+                "the synced key never leaks through the settings API",
+                "KEY-A" not in c.get("/api/settings").text,
+            )
+            exp_settings = db.export_data()["tables"].get("settings", [])
+            check(
+                "backups never carry sync identity or keys",
+                all(
+                    not str(r.get("key", "")).startswith(("sync.", "provider."))
+                    for r in exp_settings
+                ),
+            )
+
+            # ---- configuration endpoints
+            c.post("/api/sync/config", json={"enabled": True, "add_peer": "http://127.0.0.1:9/"})
+            s2 = c.get("/api/sync").json()
+            check(
+                "config enables sync and adds a peer",
+                s2["enabled"] is True
+                and any(p["url"] == "http://127.0.0.1:9" for p in s2["peers"]),
+            )
+            c.post("/api/sync/config", json={"enabled": False, "remove_peer": "http://127.0.0.1:9"})
+            s3 = c.get("/api/sync").json()
+            check(
+                "config disables sync and removes the peer",
+                s3["enabled"] is False and not s3["peers"],
+            )
+            kick = c.post("/api/sync/now", json={})
+            check(
+                "manual kick returns current status",
+                kick.status_code == 200 and kick.json().get("device_id") == bid,
+            )
+            c.post("/api/sync/config", json={"rotate": True})
+            s4 = c.get("/api/sync").json()
+            check("rotating the key changes it", s4["secret"] not in (akey, bkey))
+            check(
+                "the rotated key opens the swap",
+                c.post("/api/sync/swap", json=empty, headers={"X-Sync-Key": s4["secret"]}).status_code == 200,
+            )
+            check(
+                "the old key stops working",
+                c.post("/api/sync/swap", json=empty, headers={"X-Sync-Key": bkey}).status_code == 403,
+            )
+
+            # ---- UI + server wiring
+            html = (Path("web") / "index.html").read_text(encoding="utf-8")
+            js = (Path("web") / "app.js").read_text(encoding="utf-8")
+            runsh = Path("run.sh").read_text(encoding="utf-8")
+            for eid in (
+                "sync-enable", "sync-now", "sync-copy-key", "sync-new-key",
+                "sync-peer-input", "sync-peer-add", "sync-peer-list",
+                "sync-key-line", "sync-urls", "sync-status",
+            ):
+                check(f"index.html has #{eid}", f'id="{eid}"' in html)
+            check("app.js reads sync status", 'fetch("/api/sync")' in js)
+            check("app.js posts sync config", 'fetch("/api/sync/config"' in js)
+            check("app.js can force a cycle", 'fetch("/api/sync/now"' in js)
+            check("sync status loads with the settings sheet", "loadSyncStatus," in js)
+            check(
+                "run.sh can bind the LAN",
+                'BIND="0.0.0.0"' in runsh and 'ATIF_ASSISTANT_BIND:-}' in runsh,
+            )
+            check(
+                "swap route is registered",
+                any(getattr(r, "path", "") == "/api/sync/swap" for r in app.routes),
+            )
+        finally:
+            db.reset_db_path()
 
 
 def test_providers() -> None:
@@ -5117,6 +5405,7 @@ def main() -> int:
     test_location()
     test_uploads()
     test_backup()
+    test_sync()
     test_providers()
     test_language()
     test_ask_endpoint()
