@@ -802,6 +802,7 @@ def _load_detail(kind: str, ref_id: int) -> dict[str, Any] | None:
         "pattern": "patterns",
         "rule": "rules",
         "learned": "learned",
+        "note": "notes",
     }.get(kind)
     if not table:
         return None
@@ -1991,6 +1992,7 @@ def prune_fts_orphans() -> int:
         "pattern": "patterns",
         "rule": "rules",
         "learned": "learned",
+        "note": "notes",
     }
     removed = 0
     for kind, table in parents.items():
@@ -2137,6 +2139,8 @@ def add_note(title: str | None, body: str, tags: str | None = None, mood: str | 
         "INSERT INTO notes(title, body, tags, mood, created_at, updated_at) VALUES (?,?,?,?,?,?)",
         (title, body, tags, mood, now(), now()),
     )
+    conn.commit()
+    _fts_index("note", int(cur.lastrowid), (title or body)[:80], body)
     conn.commit()
     return int(cur.lastrowid)
 

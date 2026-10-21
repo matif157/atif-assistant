@@ -188,6 +188,15 @@ def test_retrieval() -> None:
         check("empty query returns nothing", db.search_memory("", limit=5) == [])
         check("stopword-only query returns nothing", db.search_memory("the and for", limit=5) == [])
 
+        # Notes are memory too: add_note must index them, or imported archive
+        # notes are invisible to search_memory while looking perfectly fine in
+        # list_notes.
+        db.add_note("Physiotherapy plan", "twice a week for the shoulder")
+        check(
+            "note is findable after add_note",
+            len(db.search_memory("physiotherapy", limit=5)) > 0,
+        )
+
         # Idempotency of seeding
         counts_before = db.counts()
         db.add_pattern("Second pattern", triggers=["sleep"])
